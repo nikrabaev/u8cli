@@ -15,6 +15,11 @@ export interface ExecOptions {
   shell?: string;
   /** Cap on captured output per stream; excess is dropped from the tail. */
   maxBuffer?: number;
+  /**
+   * Grace between SIGTERM and SIGKILL when a timeout or abort fires. Health
+   * probes need this below their own interval, so it must be caller-tunable.
+   */
+  killGraceMs?: number;
 }
 
 export interface ExecResult {

@@ -4,11 +4,13 @@ export type U8ErrorCode =
   | "CONFIG_NOT_FOUND"
   | "CONFIG_INVALID"
   | "CONFIG_PARSE"
+  | "CONFIG_EXISTS"
   | "UNKNOWN_TARGET"
   | "UNKNOWN_COMMAND"
   | "UNKNOWN_PROFILE"
   | "DAEMON_UNREACHABLE"
   | "DAEMON_VERSION_MISMATCH"
+  | "DAEMON_ALREADY_RUNNING"
   | "RPC_ERROR"
   | "PROCESS_FAILED"
   | "PLUGIN_LOAD"
@@ -41,8 +43,14 @@ export class ConfigError extends U8Error {
   readonly issues: ConfigIssue[];
   readonly configPath: string | undefined;
 
-  constructor(message: string, issues: ConfigIssue[], configPath?: string) {
-    super("CONFIG_INVALID", message, issues);
+  constructor(
+    message: string,
+    issues: ConfigIssue[],
+    configPath?: string,
+    /** `CONFIG_PARSE` distinguishes "this file is not JSONC" from "this config is wrong". */
+    code: Extract<U8ErrorCode, "CONFIG_INVALID" | "CONFIG_PARSE"> = "CONFIG_INVALID",
+  ) {
+    super(code, message, issues);
     this.name = "ConfigError";
     this.issues = issues;
     this.configPath = configPath;

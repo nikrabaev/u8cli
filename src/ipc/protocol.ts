@@ -253,7 +253,8 @@ export interface RpcErrorBody {
 
 export interface RpcResponseEnvelope {
   jsonrpc: "2.0";
-  id: number;
+  /** `null` for errors raised before an id could be read (unparsable frames). */
+  id: number | null;
   result?: unknown;
   error?: RpcErrorBody;
 }

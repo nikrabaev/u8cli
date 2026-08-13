@@ -1,0 +1,109 @@
+// Demo workspace exercising every u8cli concept end to end.
+// Run from this directory:  u8            (dashboard)
+//                           u8 start      (start the active profile)
+//                           u8 run test   (task command across targets)
+{
+  "$schema": "../../schema.json",
+  "name": "u8-demo",
+
+  // Applied to every spawned process, then overridden per app / per subapp.
+  "env": {
+    "NODE_ENV": "development"
+  },
+
+  "templates": {
+    "app": "{app@name:pad(20)} {app@dirname:dim} {git@branch:color(yellow):max(18)} {git@dirty:color(red)}",
+    "subapp": "  {app@status} {app@name:pad(18)} {health@status} {app@uptime:dim} {x@port:dim}"
+  },
+
+  // {x@port} — a config-defined indicator: shell command polled per target.
+  "indicators": {
+    "port": {
+      "cmd": "node -e \"process.stdout.write(process.env.PORT||'-')\"",
+      "interval": 30000
+    }
+  },
+
+  "apps": {
+    // Non-HTTP dependency, probed with a shell healthcheck, auto-restarted.
+    "db": {
+      "path": "./services/infra",
+      "scripts": {
+        "start": "node fake-db.js"
+      },
+      "health": {
+        "cmd": "test -f ${TMPDIR:-/tmp}/u8-demo-db.ready",
+        "interval": 2000
+      },
+      "restart": "on-crash"
+    },
+
+    // Single-service repo: no subapps, so it becomes one implicit subapp.
+    "api": {
+      "path": "./services/api",
+      "env": { "PORT": "3000", "SERVICE_NAME": "api" },
+      "scripts": {
+        "start": "node server.js",
+        "test": "node -e \"console.log('api tests ok')\""
+      },
+      "health": { "http": "http://localhost:3000/healthz" },
+      "dependsOn": ["db"]
+    },
+
+    // Monorepo: FE shell plus a micro-frontend, each its own process.
+    "platform": {
+      "path": "./services/platform",
+      "env": { "TZ": "UTC" },
+      "subapps": {
+        "shell": {
+          "path": "apps/shell",
+          "env": { "PORT": "3100" },
+          "scripts": { "start": "node server.js" },
+          "health": { "http": "http://localhost:3100/healthz" }
+        },
+        "auth-mfe": {
+          "path": "apps/auth-mfe",
+          "env": { "PORT": "3101" },
+          "scripts": { "start": "node server.js" },
+          "health": { "http": "http://localhost:3101/healthz" },
+          "dependsOn": ["api"]
+        }
+      }
+    }
+  },
+
+  "profiles": {
+    "full": {
+      "default": true,
+      "targets": ["db", "api", "platform"]
+    },
+    "frontend": {
+      "targets": ["platform.shell", "platform.auth-mfe"]
+    }
+  },
+
+  "commands": {
+    // Shared script with a per-target override and an explicit skip.
+    "test": {
+      "description": "Run each service's test suite",
+      "script": "echo \"no tests for $PWD\"",
+      "targets": {
+        "api": "node -e \"console.log('api tests ok')\"",
+        "db": null
+      }
+    },
+
+    // Hooks gate the command per target: refuse to deploy from a dirty tree.
+    "deploy": {
+      "description": "Pretend to deploy",
+      "targets": {
+        "api": "echo deploying api",
+        "platform.shell": "echo deploying shell"
+      },
+      "hooks": {
+        "pre": "git diff --quiet || (echo 'refusing: working tree is dirty' && exit 1)",
+        "post": "echo deploy finished"
+      }
+    }
+  }
+}

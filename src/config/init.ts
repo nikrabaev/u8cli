@@ -1,0 +1,120 @@
+/**
+ * `u8 init` — writes a commented `u8.jsonc` skeleton.
+ *
+ * The skeleton is deliberately minimal-but-valid: one app that loads cleanly,
+ * with every other feature present as a commented example. It doubles as the
+ * config reference most users will ever read, so it is kept in sync with the
+ * schema by a round-trip test.
+ */
+import fs from "node:fs";
+import path from "node:path";
+import { U8Error } from "../util/errors.js";
+import { CONFIG_FILENAME } from "../util/paths.js";
+
+/** Renders the skeleton for a workspace named `name`. */
+export function skeletonConfig(name: string): string {
+  return `{
+  // Editor completion for this file. Ships with the u8cli package.
+  "$schema": "https://unpkg.com/u8cli/schema.json",
+
+  "name": ${JSON.stringify(name)},
+
+  // Row templates: literal text plus {namespace@indicator} tokens with optional
+  // :modifiers — pad(n), max(n), color(name), dim, bold.
+  // "templates": {
+  //   "app": "{app@name:pad(24)} {app@dirname:dim} {git@branch:color(yellow)}",
+  //   "subapp": "  {app@status} {app@name:pad(22)} {health@status}"
+  // },
+
+  // Env for every process. Merge order: workspace -> app -> subapp.
+  // "env": { "NODE_ENV": "development" },
+
+  // Extra indicators, rendered as {x@version}. The command runs in each
+  // target's cwd; trimmed stdout is the value.
+  // "indicators": {
+  //   "version": { "cmd": "jq -r .version package.json", "interval": 60000 }
+  // },
+
+  // Local files (./…) or npm package names, loaded into the daemon.
+  // "plugins": ["./plugins/deploy.ts"],
+
+  // The git and health plugins are built in and enabled by default.
+  // "builtins": { "git": true, "health": true },
+
+  // "limits": { "stopTimeout": 10000, "readyTimeout": 60000, "taskConcurrency": 4 },
+
+  "apps": {
+    "example": {
+      // Absolute, ~-relative, or relative to this file.
+      "path": ".",
+
+      // Arbitrary shell strings, run with $SHELL in the target's cwd.
+      // The "start" and "stop" entries back \`u8 start\` / \`u8 stop\`; with no
+      // stop script u8 signals the process group instead.
+      "scripts": {
+        "start": "echo 'replace me with your dev server' && sleep 3600"
+      },
+
+      // "env": { "PORT": "3000" },
+      // "restart": "on-crash",
+      // "health": { "http": "http://localhost:3000/healthz" },
+      // "health": { "cmd": "pg_isready -q", "interval": 5000, "threshold": 2 },
+      // "dependsOn": ["db"],
+
+      // A monorepo declares subapps instead — each one is separately runnable
+      // as "example.web" / "example.api". Anything set on the app above becomes
+      // the default for every subapp; the subapp entry overrides it.
+      // "subapps": {
+      //   "web": { "path": "apps/web", "scripts": { "start": "pnpm dev" } },
+      //   "api": {
+      //     "path": "apps/api",
+      //     "scripts": { "start": "pnpm dev --port 3001" },
+      //     "dependsOn": ["example.web"]
+      //   }
+      // }
+    }
+  },
+
+  // Named selections of targets. At most one may be "default": true; with none
+  // declared at all, u8 synthesizes an "all" profile covering every app.
+  // "profiles": {
+  //   "full": { "default": true, "targets": ["example"] },
+  //   "frontend": { "targets": ["example.web"] }
+  // },
+
+  // Command names are bare — ":" is reserved for core (app:start) and plugins.
+  // "commands": {
+  //   "test": {
+  //     "script": "pnpm test",           // run in every selected target's cwd
+  //     "targets": { "example": null }   // null skips this target
+  //   },
+  //   "deploy": {
+  //     "kind": "task",
+  //     "concurrency": 1,
+  //     "targets": { "example": "./scripts/deploy.sh" },
+  //     "hooks": { "pre": "git diff --quiet || exit 1", "post": "echo deployed" }
+  //   }
+  // }
+}
+`;
+}
+
+/** Writes the skeleton into `dir`, refusing to clobber an existing config. */
+export function writeSkeletonConfig(dir: string = process.cwd()): string {
+  const root = path.resolve(dir);
+  const target = path.join(root, CONFIG_FILENAME);
+  fs.mkdirSync(root, { recursive: true });
+  try {
+    // `wx` is the refusal: it fails on an existing file — including a symlink
+    // pointing at one — instead of racing an `existsSync` check.
+    fs.writeFileSync(target, skeletonConfig(path.basename(root)), { encoding: "utf8", flag: "wx" });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new U8Error("CONFIG_INVALID", `${CONFIG_FILENAME} already exists at ${target}`, {
+        configPath: target,
+      });
+    }
+    throw e;
+  }
+  return target;
+}

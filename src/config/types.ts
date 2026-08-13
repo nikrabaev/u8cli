@@ -155,9 +155,13 @@ export const DEFAULT_LIMITS: Limits = {
   daemonIdleMs: 10 * 60_000,
 };
 
+/**
+ * `max(n):pad(n)` rather than a bare `pad(n)`: padding alone only sets a minimum
+ * width, so one long name would shift every column to its right on that row.
+ */
 export const DEFAULT_TEMPLATES: Templates = {
-  app: "{app@name:pad(24)} {app@dirname:dim} {git@branch:color(yellow):max(20)} {git@dirty:color(red)}",
-  subapp: "  {app@status} {app@name:pad(22)} {health@status}",
+  app: "{app@name:max(24):pad(24)} {app@dirname:dim} {git@branch:color(yellow):max(20)} {git@dirty:color(red)}",
+  subapp: "  {app@status} {app@name:max(22):pad(22)} {health@status}",
 };
 
 export const DEFAULT_HEALTH = {
