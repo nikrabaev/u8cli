@@ -22,7 +22,7 @@ export function Footer({ state }: { readonly state: DashboardState }): ReactElem
   const summary = state.summary;
   return el(
     Box,
-    { flexDirection: "column" },
+    { flexDirection: "column", flexShrink: 0 },
     notice === undefined
       ? null
       : el(Text, { color: NOTICE_COLOR[notice.tone], wrap: "truncate-end" }, notice.text),

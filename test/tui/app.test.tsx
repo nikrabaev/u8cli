@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { stripAnsi } from "../../src/template/index.js";
 import { App } from "../../src/tui/components/App.js";
 import { createController, DEFAULT_FRAME_MS, type DashboardController } from "../../src/tui/controller.js";
+import { frameRows } from "../../src/tui/present.js";
 import type { Snapshot } from "../../src/ipc/protocol.js";
 import { createFakeClient, fixtureSnapshot, logLine, settle, testScheduler, type FakeClient, type TestScheduler } from "./helpers.js";
 
@@ -62,6 +63,46 @@ function resize(instance: Mounted, rows: number): Promise<void> {
   instance.app.stdout.emit("resize");
   return settle();
 }
+
+describe("frame", () => {
+  it("fills the terminal and welds the hint bar to the last line", async () => {
+    const ui = mount();
+    await settle();
+    const lines = ui.frame().split("\n");
+
+    // One short of the terminal on purpose: ink appends a newline, so this is a
+    // full screen, and staying under stdout.rows keeps it off the clear-the-world
+    // render path. The hint bar is the LAST line, not merely the line after the
+    // rows — before the frame had a height it floated up under a short list.
+    expect(lines).toHaveLength(frameRows(24));
+    expect(lines.at(-1)).toContain("q quit");
+    // Body top-aligned directly under the header, with the slack below it.
+    expect(lines[1]).toContain("SUB api stopped");
+    expect(lines.slice(5, -1).every((line) => line.trim() === "")).toBe(true);
+  });
+
+  it("keeps the hint bar on the last line when there is nothing to list", async () => {
+    const ui = mount({ snapshot: fixtureSnapshot({ profiles: [{ name: "all", isDefault: true, subappIds: [] }] }) });
+    await settle();
+    const lines = ui.frame().split("\n");
+
+    expect(lines).toHaveLength(frameRows(24));
+    expect(ui.frame()).toContain('no targets in profile "all"');
+    expect(lines.at(-1)).toContain("q quit");
+  });
+
+  it("keeps the hint bar on the last line in every mode", async () => {
+    const ui = mount();
+    await settle();
+
+    for (const [key, expected] of [["?", "close help"], ["?", "q quit"], [":", "esc close"], ["\u001B", "q quit"], ["P", "esc close"]] as const) {
+      await ui.type(key);
+      const lines = ui.frame().split("\n");
+      expect(lines, `frame height after ${JSON.stringify(key)}`).toHaveLength(frameRows(24));
+      expect(lines.at(-1), `hint bar after ${JSON.stringify(key)}`).toContain(expected);
+    }
+  });
+});
 
 afterEach(async () => {
   for (const instance of mounted.splice(0)) {

@@ -15,7 +15,7 @@ const CHROME_LINES = 1;
 export function ProfileMenu({ state }: { readonly state: DashboardState }): ReactElement {
   const menu = state.profileMenu;
   if (menu === undefined) {
-    return el(Box, { flexDirection: "column" }, el(Text, { dimColor: true }, "no profiles"));
+    return el(Box, { flexDirection: "column", flexShrink: 0 }, el(Text, { dimColor: true }, "no profiles"));
   }
 
   const height = Math.max(1, state.viewport - CHROME_LINES);
@@ -25,7 +25,7 @@ export function ProfileMenu({ state }: { readonly state: DashboardState }): Reac
 
   return el(
     Box,
-    { flexDirection: "column" },
+    { flexDirection: "column", flexShrink: 0 },
     el(Text, { bold: true, wrap: "truncate-end" }, "profiles"),
     ...(visible.length === 0
       ? [el(Text, { key: "empty", dimColor: true }, "  this workspace defines no profiles")]

@@ -17,7 +17,7 @@ export function Header({ state }: { readonly state: DashboardState }): ReactElem
   const range = rowRangeText(state);
   return el(
     Box,
-    { flexDirection: "column" },
+    { flexDirection: "column", flexShrink: 0 },
     el(
       Text,
       { wrap: "truncate-end" },

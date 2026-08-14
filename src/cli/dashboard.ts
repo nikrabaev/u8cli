@@ -46,6 +46,7 @@ export async function dashboardCommand(ctx: CliContext, opts: StatusOptions = {}
       ...terminal,
       color: ctx.color,
       signal: ctx.io.signal,
+      altScreen: altScreenAllowed(ctx),
     });
   } catch (err) {
     throw explainLaunchFailure(err, configPath);
@@ -66,6 +67,23 @@ function explainLaunchFailure(err: unknown, configPath: string): unknown {
     return configErr instanceof ConfigError ? configErr : err;
   }
   return err;
+}
+
+/**
+ * Whether to borrow the alternate screen.
+ *
+ * Saying no is not a degraded mode — it is the pre-alternate-screen behaviour
+ * exactly: the frame renders inline and the shell keeps it in its scrollback.
+ * That is the right answer for `TERM=dumb`, and the escape hatch for a terminal
+ * or multiplexer that filters the buffer switch (GNU screen without
+ * `altscreen on`, tmux with `alternate-screen off`), where the dashboard would
+ * otherwise draw over the visible window.
+ */
+function altScreenAllowed(ctx: CliContext): boolean {
+  const disabled = ctx.io.env["U8_NO_ALT_SCREEN"];
+  if (disabled !== undefined && disabled !== "" && disabled !== "0") return false;
+  const term = ctx.io.env["TERM"];
+  return term !== undefined && term !== "" && term !== "dumb";
 }
 
 function terminalOf(ctx: CliContext): Terminal | undefined {

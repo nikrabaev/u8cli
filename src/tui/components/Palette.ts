@@ -17,7 +17,7 @@ const CHROME_LINES = 2;
 export function Palette({ state }: { readonly state: DashboardState }): ReactElement {
   const palette = state.palette;
   if (palette === undefined) {
-    return el(Box, { flexDirection: "column" }, el(Text, { dimColor: true }, "no palette"));
+    return el(Box, { flexDirection: "column", flexShrink: 0 }, el(Text, { dimColor: true }, "no palette"));
   }
 
   const height = Math.max(1, state.viewport - CHROME_LINES);
@@ -28,7 +28,7 @@ export function Palette({ state }: { readonly state: DashboardState }): ReactEle
 
   return el(
     Box,
-    { flexDirection: "column" },
+    { flexDirection: "column", flexShrink: 0 },
     el(
       Text,
       { wrap: "truncate-end" },

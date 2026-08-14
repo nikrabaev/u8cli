@@ -16,13 +16,13 @@ import { el, type ReactElement } from "./element.js";
 export function LogView({ state }: { readonly state: DashboardState }): ReactElement {
   const view = state.logs;
   if (view === undefined) {
-    return el(Box, { flexDirection: "column" }, el(Text, { dimColor: true }, "no log view"));
+    return el(Box, { flexDirection: "column", flexShrink: 0 }, el(Text, { dimColor: true }, "no log view"));
   }
 
   const window = logWindow(view, state.logViewport);
   return el(
     Box,
-    { flexDirection: "column" },
+    { flexDirection: "column", flexShrink: 0 },
     el(Text, { bold: true, wrap: "truncate-end" }, logTitle(view, window.total)),
     ...window.lines.map((line) =>
       el(

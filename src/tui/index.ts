@@ -50,6 +50,7 @@ export {
   footerLines,
   headerText,
   hintText,
+  frameRows,
   listViewport,
   logTitle,
   logViewport,

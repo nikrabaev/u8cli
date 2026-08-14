@@ -16,7 +16,7 @@ export function Help({ state }: { readonly state: DashboardState }): ReactElemen
   const visible = HELP.slice(0, Math.max(1, state.viewport));
   return el(
     Box,
-    { flexDirection: "column" },
+    { flexDirection: "column", flexShrink: 0 },
     ...visible.map((entry) =>
       el(
         Text,

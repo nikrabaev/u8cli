@@ -20,7 +20,7 @@ export function RowList({ state }: { readonly state: DashboardState }): ReactEle
   if (state.rows.length === 0) {
     return el(
       Box,
-      { flexDirection: "column" },
+      { flexDirection: "column", flexShrink: 0 },
       el(Text, { dimColor: true }, `  no targets in profile "${state.profile}"`),
     );
   }
@@ -28,7 +28,7 @@ export function RowList({ state }: { readonly state: DashboardState }): ReactEle
   const visible = state.rows.slice(state.windowTop, state.windowTop + state.viewport);
   return el(
     Box,
-    { flexDirection: "column" },
+    { flexDirection: "column", flexShrink: 0 },
     ...visible.map((row, offset) => {
       const selected = state.windowTop + offset === state.cursor;
       const progress = progressLabel(row.targets, state.progress);

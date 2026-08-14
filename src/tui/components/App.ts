@@ -11,7 +11,7 @@ import { useEffect } from "react";
 
 import type { DashboardController } from "../controller.js";
 import { useControllerState, useTerminalSize } from "../hooks.js";
-import { listViewport, logViewport } from "../present.js";
+import { frameRows, listViewport, logViewport } from "../present.js";
 import type { DashboardState } from "../types.js";
 import { el, type ReactElement } from "./element.js";
 import { Footer } from "./Footer.js";
@@ -52,11 +52,25 @@ export function App({ controller }: AppProps): ReactElement {
     if (state.exited) exit();
   }, [state.exited, exit]);
 
+  // Three boxes, three jobs, and they cannot be collapsed into fewer.
+  //
+  // The root fixes the frame's height so the footer has a bottom to sit on. The
+  // body wrapper is the only thing allowed to shrink, so an over-tall body is
+  // absorbed there instead of squeezing the chrome. The mode components inside
+  // it refuse to shrink (see their own boxes) because Ink's default
+  // `flexShrink: 1` does not clip a too-tall list — yoga shrinks each row to a
+  // fractional height and every other row silently disappears.
+  //
+  // The height is `rows - 1`, not `rows`: Ink switches to erasing the entire
+  // terminal (`2J 3J`, no repaint guard) once a frame is as tall as the screen,
+  // which flickers at our frame rate and is inconsistently handled by
+  // multiplexers. Ink appends a newline, so `rows - 1` still fills the screen —
+  // the cursor simply parks on the last line.
   return el(
     Box,
-    { flexDirection: "column" },
+    { flexDirection: "column", height: frameRows(rows) },
     el(Header, { state }),
-    body(state),
+    el(Box, { flexDirection: "column", flexGrow: 1, flexShrink: 1, overflowY: "hidden" }, body(state)),
     el(Footer, { state }),
   );
 }

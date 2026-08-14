@@ -86,26 +86,39 @@ export function footerLines(state: DashboardState): number {
 }
 
 /**
+ * How tall the frame itself is: one line short of the terminal.
+ *
+ * Not spare, and not about scrollback any more — the dashboard runs on the
+ * alternate screen, which has none to lose. What the held-back line buys is
+ * Ink's *incremental* render path: a frame as tall as the terminal flips Ink to
+ * writing `2J 3J` and repainting everything on every frame, with no
+ * output-unchanged guard, which flickers on any terminal that ignores
+ * synchronized-update mode and is handled inconsistently by multiplexers.
+ * See `lastOutputHeight >= stdout.rows` in ink's render loop.
+ *
+ * The screen still looks full: Ink appends a newline after the frame, so the
+ * cursor parks on the last row and nothing else is drawn there.
+ */
+export function frameRows(terminalRows: number): number {
+  return Math.max(1, terminalRows - 1);
+}
+
+/** The header line, which the frame always spends before anything else. */
+const HEADER_ROWS = 1;
+
+/**
  * Rows the list may draw.
  *
  * One line for the header, one per banner, and the footer's — anything left is
  * the list. Never zero: a one-row window still shows where the cursor is.
- *
- * The extra reserved line is not spare: Ink switches to erasing the whole screen
- * (and with it the user's shell scrollback) the moment a frame is as tall as the
- * terminal. Leaving one line unspent keeps it on the incremental path, so
- * quitting the dashboard returns you to your history rather than a blank
- * terminal. See `lastOutputHeight >= stdout.rows` in ink's render loop.
  */
-const RESERVED_ROWS = 2;
-
 export function listViewport(terminalRows: number, state: DashboardState): number {
-  return Math.max(1, terminalRows - RESERVED_ROWS - banners(state).length - footerLines(state));
+  return Math.max(1, frameRows(terminalRows) - HEADER_ROWS - banners(state).length - footerLines(state));
 }
 
 /** Same, for the log view, which spends two lines on its title and status bar. */
 export function logViewport(terminalRows: number, state: DashboardState): number {
-  return Math.max(1, terminalRows - RESERVED_ROWS - banners(state).length - 2 - footerLines(state));
+  return Math.max(1, listViewport(terminalRows, state) - 2);
 }
 
 // ---------------------------------------------------------------------------
