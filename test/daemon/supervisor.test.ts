@@ -313,6 +313,61 @@ describe("supervisor lifecycle", () => {
   });
 });
 
+/**
+ * `start` resolves while the process is still inside its grace, so on its own it
+ * cannot say whether the start worked. `waitForSettled` is what turns "spawned"
+ * into the verdict SPEC §2.5 asks for: a service is done when it is *running*.
+ */
+describe("waitForSettled", () => {
+  it("resolves as crashed for a process that dies inside the grace", async () => {
+    const h = await harness(
+      () => ({ apps: { boom: { path: ".", scripts: { start: fixture("crash-now.sh") } } } }),
+      crashTiming(),
+    );
+
+    const spawned = await h.sup.start("boom");
+    expect(spawned.status).toBe("starting");
+    const settledState = await h.sup.waitForSettled("boom");
+
+    expect(settledState.status).toBe("crashed");
+    expect(settledState.exitCode).toBe(3);
+    expect(settledState.lastError).toContain("code 3");
+    expect(h.statuses("boom")).toEqual(["starting", "crashed"]);
+  });
+
+  it("resolves as running once the grace elapses", async () => {
+    const h = await harness(oneService);
+
+    const spawned = await h.sup.start("svc");
+    expect(spawned.status).toBe("starting");
+    const settledState = await h.sup.waitForSettled("svc");
+
+    expect(settledState.status).toBe("running");
+    expect(settledState.pid).toBe(spawned.pid);
+    expect(h.sup.state("svc").status).toBe("running");
+  });
+
+  it("resolves as stopped when the target is stopped before it settled", async () => {
+    const h = await harness(oneService, { ...FAST, startGraceMs: 5_000 });
+
+    await h.sup.start("svc");
+    const pending = h.sup.waitForSettled("svc");
+    await h.sup.stop("svc");
+
+    expect((await pending).status).toBe("stopped");
+  });
+
+  it("resolves at once for a target that is not starting", async () => {
+    const h = await harness(oneService);
+
+    expect((await h.sup.waitForSettled("svc")).status).toBe("stopped");
+    expect((await h.sup.waitForSettled("never-heard-of-it")).status).toBe("stopped");
+
+    await startAndWaitRunning(h, "svc");
+    expect((await h.sup.waitForSettled("svc")).status).toBe("running");
+  });
+});
+
 describe("crash handling", () => {
   it("reports a crash inside the start grace, never passing through running", async () => {
     const h = await harness(

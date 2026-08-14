@@ -18,6 +18,17 @@ import { safeSegment } from "../util/paths.js";
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024;
 const DEFAULT_KEEP = 3;
 
+/**
+ * How much un-written log text the queue will hold before it starts dropping.
+ *
+ * Writes are serialized, so a service printing megabytes per second outruns the
+ * writer and every line it produces meanwhile is retained in memory. Unbounded,
+ * that queue grows until V8 aborts — killing the daemon, and with it supervision
+ * of every *other* service. A few MB absorbs any ordinary burst; past that,
+ * losing lines from a firehose is the cheaper failure.
+ */
+const MAX_PENDING_BYTES = 4 * 1024 * 1024;
+
 /** Read granularity of the backward tail scan. */
 const TAIL_CHUNK = 16 * 1024;
 
@@ -41,6 +52,10 @@ export interface LogWriter {
    * Queues one line. The returned promise resolves once it (and everything
    * queued before it) is on disk, and never rejects — I/O failures are logged,
    * because losing a log line must not take down a service.
+   *
+   * A producer that outruns the disk has its lines dropped once the queue is
+   * full (see `MAX_PENDING_BYTES`); the log then carries a `[u8] dropped N
+   * lines` marker, so a gap is always visible. The promise still resolves.
    *
    * After {@link LogWriter.close} the line is dropped rather than reopening the
    * file: the caller owns lifecycle ordering, and a late line must not resurrect
@@ -74,6 +89,9 @@ export function createLogWriter(opts: LogWriterOptions): LogWriter {
   let size = 0;
   let closed = false;
   let queue: Promise<void> = Promise.resolve();
+  /** Bytes of formatted text queued but not yet written — the memory at risk. */
+  let pendingBytes = 0;
+  let droppedLines = 0;
 
   const ensureOpen = async (): Promise<FileHandle> => {
     if (handle) return handle;
@@ -110,14 +128,46 @@ export function createLogWriter(opts: LogWriterOptions): LogWriter {
     size += buf.byteLength;
   };
 
+  /**
+   * One queued line, plus the drop marker when this write drained the queue.
+   * Never rejects: a rejection here would break the chain every later write is
+   * appended to, and `write()` promises callers it resolves.
+   */
+  const step = async (text: string, bytes: number): Promise<void> => {
+    try {
+      await doWrite(text);
+    } catch (err: unknown) {
+      logger.warn(`log write failed (${filePath}): ${errorMessage(err)}`);
+    } finally {
+      pendingBytes -= bytes;
+    }
+    if (pendingBytes > 0 || droppedLines === 0) return;
+    const n = droppedLines;
+    droppedLines = 0;
+    try {
+      // Emitted from inside the queue so it lands with the burst it describes,
+      // once — a marker per dropped line would be its own firehose.
+      await doWrite(formatLogLine(`[u8] dropped ${n} lines`, Date.now()));
+    } catch (err: unknown) {
+      logger.warn(`log write failed (${filePath}): ${errorMessage(err)}`);
+    }
+  };
+
   return {
     path: filePath,
     write(line: string, ts?: number): Promise<void> {
       if (closed) return queue;
       const text = formatLogLine(line, ts ?? Date.now());
-      queue = queue.then(() => doWrite(text)).catch((err: unknown) => {
-        logger.warn(`log write failed (${filePath}): ${errorMessage(err)}`);
-      });
+      const bytes = Buffer.byteLength(text, "utf8");
+      // An empty queue always accepts, however large the line: one write in
+      // flight is not a leak, and it keeps every drop followed by a drain that
+      // reports it.
+      if (pendingBytes > 0 && pendingBytes + bytes > MAX_PENDING_BYTES) {
+        droppedLines++;
+        return queue;
+      }
+      pendingBytes += bytes;
+      queue = queue.then(() => step(text, bytes));
       return queue;
     },
     close(): Promise<void> {

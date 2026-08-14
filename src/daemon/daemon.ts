@@ -61,12 +61,33 @@ export const LOG_BYTES_PER_WINDOW = 256 * 1024;
 /** Per-notification overhead charged against the budget (envelope + metadata). */
 const LOG_LINE_OVERHEAD = 120;
 
+/**
+ * How long one in-flight run may keep the daemon out of idle.
+ *
+ * A run that can never settle — a plugin command that ignores its abort signal,
+ * a script waiting on something that will not come — would otherwise hold
+ * `activeRuns` above zero forever and make SPEC §5.1's self-exit unreachable
+ * for the life of the process. It is deliberately far longer than any idle
+ * window: a legitimate long task must never be the reason a daemon exits
+ * underneath it, and a client waiting on a run is connected anyway.
+ */
+export const RUN_IDLE_CEILING_MS = 60 * 60_000;
+
+/**
+ * Headroom over the stop timeout when draining runs at shutdown. The process
+ * layer's own SIGTERM → SIGKILL escalation takes the whole stop timeout, so a
+ * cap of exactly that would give up in the instant the kill lands.
+ */
+const DRAIN_GRACE_MS = 2_000;
+
 export interface DaemonOptions {
   /** Path to `u8.jsonc`. Symlink-resolved before the state dir is derived. */
   configPath: string;
   logger?: Logger;
   /** Overrides `limits.daemonIdle` and `U8_IDLE_MS`. `0` disables idle exit. */
   idleMs?: number;
+  /** Overrides {@link RUN_IDLE_CEILING_MS}; a test shrinks it to milliseconds. */
+  runCeilingMs?: number;
   /**
    * Replaces the host built from `ws.plugins` and the built-ins. A test passes
    * a fake (`emptyPluginHost` in `contracts.ts`) to keep a workspace's real
@@ -106,6 +127,12 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   const loadedSignature = configSignature(configPath);
   const paths = statePaths(configPath);
   const workspace: WorkspaceHolder = { current: () => ws };
+
+  // Before the plugin host, which hands it to the `health` built-in: the host is
+  // built (and rebuilt on reload) from here, and a supervisor declared below it
+  // would still be in its temporal dead zone at cold start.
+  const supervisor = createSupervisor({ workspace, paths, logger });
+
   /**
    * Plugin failures are pushed as they happen so a connected client can banner
    * them; the cold-start ones land before anyone can be listening, which is why
@@ -119,6 +146,13 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       logger,
       onError: (plugin, error) => {
         server?.broadcast("plugin.error", { plugin, error });
+      },
+      builtinOptions: {
+        // The supervisor is the only source of the lifecycle edges the plugin
+        // SDK cannot report — a crash, and an automatic restart. Without it a
+        // crashed service keeps its last verdict and is probed for the life of
+        // the daemon, against SPEC §7.2 on both counts.
+        health: { services: supervisor, workspace },
       },
     });
 
@@ -150,7 +184,6 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   let activeProfile = pickProfile(ws, store.current().activeProfile);
   let configError: string | undefined;
 
-  const supervisor = createSupervisor({ workspace, paths, logger });
   const indicators = createIndicatorRegistry({ workspace, services: supervisor, logger });
   const engine = createEngine({
     workspace,
@@ -162,6 +195,7 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   });
 
   const idleMs = resolveIdleMs(opts.idleMs, ws.limits.daemonIdleMs, logger);
+  const runCeilingMs = Math.max(0, opts.runCeilingMs ?? RUN_IDLE_CEILING_MS);
   const startedAt = Date.now();
 
   const disposers: Unsubscribe[] = [];
@@ -224,9 +258,30 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   const track = (handle: RunHandle): void => {
     activeRuns += 1;
     resetIdle();
-    const settle = (): void => {
+    /**
+     * Released exactly once. A run that outstayed the ceiling and settles later
+     * would otherwise decrement a second time, and a negative `activeRuns`
+     * reads as idle while real work is in flight.
+     */
+    let counted = true;
+    const release = (): void => {
+      if (!counted) return;
+      counted = false;
       activeRuns -= 1;
       resetIdle();
+    };
+    const ceiling = setTimeout(() => {
+      logger.warn(
+        `run ${handle.runId} has been in flight for ${runCeilingMs}ms; it no longer holds off idle exit`,
+      );
+      release();
+    }, runCeilingMs);
+    // Background, like every other daemon timer: the listening socket is what
+    // keeps the process alive.
+    ceiling.unref();
+    const settle = (): void => {
+      clearTimeout(ceiling);
+      release();
     };
     handle.done.then(settle, settle);
   };
@@ -441,6 +496,7 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       activeProfile = name;
     },
     track,
+    shuttingDown: () => shutdownPromise !== undefined,
     requestShutdown: (reason: string) => {
       // After the current turn, so the `{ ok: true }` response is written before
       // the server starts closing connections.
@@ -476,6 +532,13 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       supervisor.stopAll().catch((err: unknown) => {
         logger.error(`stopping services failed: ${errorMessage(err)}`);
       }),
+      // `cancelAll` only *asks*: a task or hook that traps SIGTERM keeps running
+      // until the process layer escalates, and a daemon that exits before then
+      // leaves it behind with nothing left to reap it. Bounded, because that is
+      // exactly the case that may never finish.
+      engine.drain(ws.limits.stopTimeoutMs + DRAIN_GRACE_MS).catch((err: unknown) => {
+        logger.error(`draining runs failed: ${errorMessage(err)}`);
+      }),
       // Providers first, then the plugins that own them: a teardown releasing
       // what a poll still in flight is reading would be the one race worth
       // avoiding here.
@@ -492,6 +555,14 @@ export function createDaemon(opts: DaemonOptions): Daemon {
           });
         }),
     ]);
+
+    // A second pass, over the set as it stands *now*: the first one worked from
+    // the targets the supervisor knew about when it began, and a run still in
+    // flight can have spawned a service after that. Nothing else would ever own
+    // that process — the next daemon reports the target `stopped`.
+    await supervisor.stopAll().catch((err: unknown) => {
+      logger.error(`the final stop pass failed: ${errorMessage(err)}`);
+    });
 
     for (const dispose of disposers.splice(0)) {
       try {

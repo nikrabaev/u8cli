@@ -117,6 +117,34 @@ describe("createLogWriter", () => {
     expect((await linesOf(file)).map((l) => parseLogLine(l).text)).toEqual(["before"]);
   });
 
+  it("bounds the pending queue under a firehose, dropping lines and saying so", async () => {
+    const file = path.join(dir.path, "svc.log");
+    // maxBytes high enough that rotation never interferes: this is about the
+    // in-memory queue, not the file.
+    const writer = createLogWriter({ path: file, maxBytes: 512 * 1024 * 1024, keep: 1 });
+
+    const payload = "x".repeat(8 * 1024);
+    const offered = 2_048; // 16 MiB — far more than any sane queue budget
+    // Deliberately not awaited: a service printing faster than the disk accepts
+    // is exactly the producer that used to grow the queue until V8 died.
+    const pending = Array.from({ length: offered }, () => writer.write(payload));
+    await Promise.all(pending);
+    await writer.close();
+
+    const lines = await linesOf(file);
+    const texts = lines.map((l) => parseLogLine(l).text);
+    const written = texts.filter((t) => t === payload).length;
+    const markers = texts.map((t) => /^\[u8\] dropped (\d+) lines$/.exec(t)).filter((m) => m !== null);
+
+    expect(written).toBeLessThan(offered);
+    expect(markers).toHaveLength(1);
+    // Accurate to the line: every line the queue refused is accounted for.
+    const dropped = Number.parseInt(markers[0]?.[1] ?? "-1", 10);
+    expect(written + dropped).toBe(offered);
+    // The whole point: what the queue accepted stayed a few MB, not 16.
+    expect(written * payload.length).toBeLessThanOrEqual(8 * 1024 * 1024);
+  });
+
   it("writes a line larger than maxBytes whole rather than splitting it", async () => {
     const file = path.join(dir.path, "svc.log");
     const writer = createLogWriter({ path: file, maxBytes: 40, keep: 1 });

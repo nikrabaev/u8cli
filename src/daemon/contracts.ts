@@ -69,6 +69,18 @@ export interface Supervisor {
 
   /** Spawns the target's start script. Resolves once the process is spawned. */
   start(id: TargetId, opts?: StartOptions): Promise<ServiceState>;
+  /**
+   * Resolves once the target has left `"starting"` — i.e. once the start grace
+   * decided the spawn was real (`running`) or the process died inside it
+   * (`crashed`/`stopped`).
+   *
+   * {@link start} deliberately returns while the status is still `"starting"`,
+   * so its caller can report a run id without waiting. But SPEC §2.5 defines a
+   * service as done when it is *running*, so anything that has to say whether a
+   * start succeeded — the engine's start pass, and through it `u8 start`'s exit
+   * code — must await this instead of reading what `start` returned.
+   */
+  waitForSettled(id: TargetId): Promise<ServiceState>;
   /** Runs a custom stop script if the subapp declares one, else signals the group. */
   stop(id: TargetId, opts?: StopOptions): Promise<ServiceState>;
   restart(id: TargetId): Promise<ServiceState>;
@@ -149,6 +161,15 @@ export interface Engine {
   /** Resolves for a finished run too — results are retained for a while. */
   awaitRun(runId: string): Promise<TaskResult>;
   cancelAll(reason: string): void;
+  /**
+   * Resolves once every run still in flight has closed, or after `timeoutMs`.
+   *
+   * `cancelAll` only *asks*: it signals the abort, and a script that traps
+   * SIGTERM keeps running until the process layer escalates to SIGKILL. A
+   * daemon that exits before then orphans it, so shutdown must call this after
+   * `cancelAll` and before it tears the process down.
+   */
+  drain(timeoutMs: number): Promise<void>;
 
   onProgress(cb: (p: TaskProgress) => void): Unsubscribe;
   onFinished(cb: (r: TaskResult) => void): Unsubscribe;

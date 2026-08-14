@@ -96,6 +96,51 @@ describe("startTargets", () => {
     expect(h.supervisor.startOrder).toEqual(["db"]);
   });
 
+  it("does not treat a dependency still inside its start grace as ready", async () => {
+    const h = chain({ readyTimeout: 150 });
+    h.supervisor.stuckStarting.add("db");
+
+    const result = await settled(h.engine.startTargets(["db", "gateway"]));
+
+    // SPEC §5.4: with no healthcheck, ready means *running*. The supervisor
+    // counts "starting" as up for its own bookkeeping, which would make the
+    // readiness timeout unreachable for every dependency without a healthcheck.
+    expect(statesByTarget(result)).toEqual({ db: "ok", gateway: "failed" });
+    expect(resultFor(result, "gateway").error).toBe('dependency "db" did not become ready within 150ms');
+    expect(h.supervisor.startOrder).toEqual(["db"]);
+  });
+
+  it("skips a dependent as soon as its dependency crashes, without waiting out the timeout", async () => {
+    const h = chain({ readyTimeout: 30_000 });
+    h.plugins.verdicts.set("db", "pending");
+
+    const handle = h.engine.startTargets(["db", "gateway"]);
+    await waitFor(() => h.supervisor.startOrder.includes("db"), "db to start");
+    h.supervisor.crash("db");
+
+    const result = await settled(handle, 3_000);
+
+    expect(statesByTarget(result)).toEqual({ db: "ok", gateway: "skipped" });
+    expect(resultFor(result, "gateway").error).toMatch(/dependency "db" crashed/);
+    expect(h.supervisor.startOrder).toEqual(["db"]);
+  });
+
+  it("keeps waiting on a crashed dependency that the restart ladder will bring back", async () => {
+    const h = chain({ restart: "on-crash", readyTimeout: 200 });
+    h.plugins.verdicts.set("db", "pending");
+
+    const handle = h.engine.startTargets(["db", "gateway"]);
+    await waitFor(() => h.supervisor.startOrder.includes("db"), "db to start");
+    h.supervisor.crash("db");
+
+    const result = await settled(handle, 3_000);
+
+    // `restart: "on-crash"` means the crash is not final, so the dependent has
+    // to wait for its own readiness timeout rather than give up on the spot.
+    expect(statesByTarget(result)).toEqual({ db: "ok", gateway: "failed" });
+    expect(resultFor(result, "gateway").error).toBe('dependency "db" did not become ready within 200ms');
+  });
+
   it("skips a target with no start script, and everything downstream of it", async () => {
     const h = createHarness({
       dirs: ["db", "gateway"],

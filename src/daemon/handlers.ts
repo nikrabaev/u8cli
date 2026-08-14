@@ -77,6 +77,8 @@ export interface HandlerDeps extends DaemonContext {
   track(handle: RunHandle): void;
   /** Schedules a graceful shutdown *after* the current response is written. */
   requestShutdown(reason: string): void;
+  /** True from the moment shutdown begins; see {@link refuseWhileStopping}. */
+  shuttingDown(): boolean;
 }
 
 export function createHandlers(deps: HandlerDeps): RpcHandlerMap {
@@ -85,6 +87,23 @@ export function createHandlers(deps: HandlerDeps): RpcHandlerMap {
   const launch = (handle: RunHandle): { runId: string } => {
     deps.track(handle);
     return { runId: handle.runId };
+  };
+
+  /**
+   * Refuses anything that would spawn a process once the shutdown has begun.
+   *
+   * The stop pass works from the targets the supervisor knows about when it
+   * starts, and the daemon is on its way out: a process started now is one no
+   * daemon will ever own again. The next daemon reports the target `stopped`,
+   * so the following `u8 start` runs a second copy of it — two writers on one
+   * database, both invisible.
+   *
+   * Stopping and every read stay available: winding down is exactly what a
+   * client should still be able to ask a shutting-down daemon for.
+   */
+  const refuseWhileStopping = (method: string): void => {
+    if (!deps.shuttingDown()) return;
+    throw new U8Error("RPC_ERROR", `the daemon is shutting down; "${method}" was refused`, { method });
   };
 
   return {
@@ -143,11 +162,18 @@ export function createHandlers(deps: HandlerDeps): RpcHandlerMap {
       return { ok: true as const, activeProfile: name };
     },
 
-    "service.start": (params) => launch(deps.engine.startTargets(readTargets(params))),
+    "service.start": (params) => {
+      refuseWhileStopping("service.start");
+      return launch(deps.engine.startTargets(readTargets(params)));
+    },
     "service.stop": (params) => launch(deps.engine.stopTargets(readTargets(params))),
-    "service.restart": (params) => launch(deps.engine.restartTargets(readTargets(params))),
+    "service.restart": (params) => {
+      refuseWhileStopping("service.restart");
+      return launch(deps.engine.restartTargets(readTargets(params)));
+    },
 
     "command.run": (params) => {
+      refuseWhileStopping("command.run");
       const command = readString(params, "command");
       if (command === undefined || command.length === 0) {
         throw new U8Error("UNKNOWN_COMMAND", 'command.run requires a "command"');

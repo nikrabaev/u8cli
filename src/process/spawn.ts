@@ -87,6 +87,13 @@ export function spawnManaged(spec: SpawnSpec, opts: SpawnManagedOptions = {}): P
     outReader.flush();
     errReader.flush();
     exit = { code, signal, durationMs: Date.now() - startedAt, requested };
+    // A leader that exits on its own (`something & ...`) leaves its group behind,
+    // and this handle is the last thing that knows the group's pgid: the
+    // supervisor drops the handle as soon as `exited` resolves, so a later stop
+    // has nothing to signal and the survivors are orphaned for good. Sweeping
+    // here — not only in `doStop` — covers the self-exit path too. The exit is
+    // already recorded, so the reported code/signal/`requested` are untouched.
+    signalGroup("SIGKILL");
     resolveExited(exit);
   };
 
@@ -111,9 +118,12 @@ export function spawnManaged(spec: SpawnSpec, opts: SpawnManagedOptions = {}): P
   });
 
   /**
-   * Signals the whole group. Only ever called while the leader is alive (or in
-   * the instant after it exits), because once node has reaped the pid the OS is
-   * free to hand it to someone else and `-pid` would address a stranger's group.
+   * Signals the whole group. Only ever called while the leader is alive, or in
+   * the instant after it exits (`settle`, and `stop` once `exited` resolved):
+   * POSIX keeps a pid reserved as a pgid for as long as the group still has
+   * members, so `-pid` is either our survivors or nobody (ESRCH). Signalling any
+   * later would risk addressing a stranger's group, once the OS is free to hand
+   * the pid out again.
    */
   const signalGroup = (sig: NodeJS.Signals): void => {
     const pid = child.pid;

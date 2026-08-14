@@ -66,7 +66,7 @@ import { errorMessage, U8Error } from "../util/errors.js";
 import type { Logger } from "../util/logger.js";
 import type { StatePaths } from "../util/paths.js";
 import { toAppInfo, toTargetInfo, toWorkspaceInfo } from "./context.js";
-import { runPostHooks, runPreHooks, type HookPipeline } from "./hooks.js";
+import { postHookEnv, runPostHooks, runPreHooks, type HookPipeline } from "./hooks.js";
 import { runPool } from "./pool.js";
 import { describeExit, runScript, targetEnv } from "./script.js";
 import { createTargetSink, type TargetSink } from "./sink.js";
@@ -131,6 +131,7 @@ interface RunOptions {
 type Gate =
   | { kind: "ready" }
   | { kind: "aborted" }
+  | { kind: "crashed"; dep: TargetId }
   | { kind: "timeout"; dep: TargetId; timeoutMs: number };
 
 /**
@@ -403,11 +404,11 @@ export function createEngine(deps: EngineDeps): Engine {
 
     const pipeline: HookPipeline = {
       logger: log,
-      runShell: (script) =>
+      runShell: (script, extraEnv) =>
         runScript({
           script,
           cwd: pt.cwd,
-          env: targetEnv(pt.subapp.env),
+          env: { ...targetEnv(pt.subapp.env), ...extraEnv },
           signal: rec.controller.signal,
           stopTimeoutMs: pt.subapp.stopTimeoutMs,
           logger: log,
@@ -419,7 +420,7 @@ export function createEngine(deps: EngineDeps): Engine {
       note: (text) => {
         sink.note(text);
       },
-      cancelled: () => rec.controller.signal.aborted,
+      signal: rec.controller.signal,
     };
 
     const startedAt = Date.now();
@@ -429,7 +430,15 @@ export function createEngine(deps: EngineDeps): Engine {
 
     try {
       const abortReason = await runPreHooks(hooks.config.pre, hooks.bound, pipeline);
-      if (abortReason !== undefined) {
+      // Re-checked here, not only on entry: a pre hook takes time, and a
+      // `cancelAll` landing while it runs means the shutdown has already
+      // snapshotted what to stop. Spawning the work now would put a process
+      // outside everything that is being torn down — an orphan forever.
+      if (rec.controller.signal.aborted) {
+        state = "aborted";
+        exitCode = null;
+        error = rec.cancelReason ?? "run cancelled";
+      } else if (abortReason !== undefined) {
         state = "aborted";
         exitCode = null;
         error = abortReason;
@@ -452,7 +461,13 @@ export function createEngine(deps: EngineDeps): Engine {
           durationMs: Date.now() - startedAt,
           error,
         };
-        const postError = await runPostHooks(hooks.config.post, hooks.bound, result, pipeline);
+        const postError = await runPostHooks(
+          hooks.config.post,
+          hooks.bound,
+          result,
+          pipeline,
+          postHookEnv({ command: rec.command, targetId: pt.id, status: state, result }),
+        );
         if (postError !== undefined) {
           // A failing `post` fails the target, but never overwrites the original
           // cause when the target was already failing: that one explains more.
@@ -729,7 +744,16 @@ export function createEngine(deps: EngineDeps): Engine {
   // Core service commands
   // -------------------------------------------------------------------------
 
-  /** True once a dependency counts as ready: plugins decide, else "it runs". */
+  /**
+   * True once a dependency counts as ready (SPEC §5.4): a plugin verdict when
+   * one is offered — that is the healthcheck path — and otherwise "it runs".
+   *
+   * "Runs" is deliberately `running`, not {@link Supervisor.isRunning}: the
+   * supervisor counts `starting` as up for its own bookkeeping, but a process
+   * still inside its start grace has not survived long enough to be depended
+   * on, and treating it as ready makes the readiness timeout unreachable for
+   * every dependency without a healthcheck — which is the default.
+   */
   async function isReady(id: TargetId): Promise<boolean> {
     const info = targetInfoFor(id);
     if (info) {
@@ -741,7 +765,17 @@ export function createEngine(deps: EngineDeps): Engine {
         log.warn(`readiness check for "${id}" threw: ${errorMessage(err)}`);
       }
     }
-    return supervisor.isRunning(id);
+    return supervisor.state(id).status === "running";
+  }
+
+  /**
+   * A crashed dependency is only a dead end if nothing will bring it back: with
+   * `restart: "on-crash"` the backoff ladder is still working on it, and giving
+   * up on the first crash would break exactly the services that opted into
+   * being restarted.
+   */
+  function willNeverBecomeReady(ws: NormalizedWorkspace, dep: TargetId): boolean {
+    return supervisor.state(dep).status === "crashed" && findSubapp(ws, dep)?.restart !== "on-crash";
   }
 
   /** Polls every dependency until it is ready, the run is cancelled, or it times out. */
@@ -753,6 +787,9 @@ export function createEngine(deps: EngineDeps): Engine {
       for (;;) {
         if (rec.controller.signal.aborted) return { kind: "aborted" };
         if (await isReady(dep)) break;
+        // Sitting out the full readiness timeout for something that already
+        // died tells the user nothing they could not have been told at once.
+        if (willNeverBecomeReady(ws, dep)) return { kind: "crashed", dep };
         if (Date.now() >= deadline) return { kind: "timeout", dep, timeoutMs };
         await delay(Math.min(readinessPollMs, Math.max(1, deadline - Date.now())), rec.controller.signal);
       }
@@ -852,6 +889,16 @@ export function createEngine(deps: EngineDeps): Engine {
           blocked.set(id, "was cancelled");
           return;
         }
+        if (gate.kind === "crashed") {
+          // Nothing was attempted for this target, so it is `skipped` rather
+          // than `failed`: the failure is the dependency's, and it is reported
+          // as such on its own row.
+          const message = `not started: dependency "${gate.dep}" crashed`;
+          log.warn(`${id}: ${message}`);
+          finish(rec, id, "skipped", { error: message });
+          blocked.set(id, `was skipped (dependency "${gate.dep}" crashed)`);
+          return;
+        }
         if (gate.kind === "timeout") {
           const message = `dependency "${gate.dep}" did not become ready within ${gate.timeoutMs}ms`;
           log.warn(`${id}: ${message}`);
@@ -871,10 +918,12 @@ export function createEngine(deps: EngineDeps): Engine {
           try {
             // `app:start` lets the supervisor resolve the script itself, so its
             // spawn-time fingerprint stays the one a reload compares against.
-            const service = await supervisor.start(
-              id,
-              plan.via === undefined ? undefined : { script, via: plan.via },
-            );
+            await supervisor.start(id, plan.via === undefined ? undefined : { script, via: plan.via });
+            // `start` resolves at the spawn, while the status is still
+            // `starting`; SPEC §2.5 says a service is done when it is running,
+            // so the verdict is whatever it settles on. Waves already run in
+            // parallel, so a whole profile pays the start grace once.
+            const service = await supervisor.waitForSettled(id);
             if (service.status === "crashed") {
               const message = service.lastError ?? "service crashed during start";
               sink.note(message);
@@ -1065,6 +1114,36 @@ export function createEngine(deps: EngineDeps): Engine {
         if (rec.finished || rec.controller.signal.aborted) continue;
         rec.cancelReason = reason;
         rec.controller.abort(new U8Error("INTERNAL", reason, { runId: rec.runId }));
+      }
+    },
+
+    /**
+     * A run closes only after every process it owns has exited, because each
+     * target awaits its script's `exited` — including the SIGTERM → SIGKILL
+     * escalation `cancelAll` sets off. So waiting for the runs is waiting for
+     * the processes, and the bound is there for the one case that cannot be
+     * waited out: a plugin command that ignores its abort signal.
+     */
+    async drain(timeoutMs: number): Promise<void> {
+      const pending = [...runs.values()].filter((rec) => !rec.finished).map((rec) => rec.done);
+      if (pending.length === 0) return;
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await Promise.race([
+          Promise.all(pending),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, Math.max(0, timeoutMs));
+            // Draining is the last thing a dying daemon does; the timer must
+            // not be the reason the process outlives it.
+            timer.unref();
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      const stuck = [...runs.values()].filter((rec) => !rec.finished);
+      if (stuck.length > 0) {
+        log.warn(`drain gave up after ${timeoutMs}ms with ${stuck.length} run(s) still in flight`);
       }
     },
 

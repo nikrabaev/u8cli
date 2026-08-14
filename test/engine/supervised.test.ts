@@ -16,12 +16,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import { loadWorkspace } from "../../src/config/index.js";
 import type { NormalizedWorkspace } from "../../src/config/types.js";
 import { emptyPluginHost, type Engine, type Supervisor } from "../../src/daemon/contracts.js";
-import { createSupervisor } from "../../src/daemon/supervisor.js";
+import { createSupervisor, START_GRACE_MS, type SupervisorTiming } from "../../src/daemon/supervisor.js";
 import { createEngine } from "../../src/engine/index.js";
 import type { TaskResult } from "../../src/ipc/protocol.js";
 import { nullLogger } from "../../src/util/logger.js";
 import type { StatePaths } from "../../src/util/paths.js";
-import { delay, settled, statesByTarget, waitFor } from "./helpers.js";
+import { delay, resultFor, settled, statesByTarget, waitFor } from "./helpers.js";
 
 const dirs: string[] = [];
 const teardown: Array<() => Promise<void>> = [];
@@ -55,7 +55,11 @@ interface Live {
 }
 
 /** A workspace on disk driven by a real supervisor and a real engine over it. */
-function live(config: (dir: string) => object, subdirs: string[] = []): Live {
+function live(
+  config: (dir: string) => object,
+  subdirs: string[] = [],
+  timing: Partial<SupervisorTiming> = { startGraceMs: 60, restartBackoffMs: [20], maxRestartAttempts: 3 },
+): Live {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "u8-live-")));
   dirs.push(dir);
   for (const rel of subdirs) fs.mkdirSync(path.join(dir, rel), { recursive: true });
@@ -77,12 +81,7 @@ function live(config: (dir: string) => object, subdirs: string[] = []): Live {
     taskLogDir: path.join(stateDir, "logs", "tasks"),
   };
   const workspace = { current: () => ws };
-  const supervisor = createSupervisor({
-    workspace,
-    paths,
-    logger: nullLogger,
-    timing: { startGraceMs: 60, restartBackoffMs: [20], maxRestartAttempts: 3 },
-  });
+  const supervisor = createSupervisor({ workspace, paths, logger: nullLogger, timing });
   const engine = createEngine({
     workspace,
     paths,
@@ -114,6 +113,63 @@ function live(config: (dir: string) => object, subdirs: string[] = []): Live {
 }
 
 const LIMITS = { stopTimeout: 1_000 };
+
+/**
+ * The real grace, because these are the cases where the process dies *inside*
+ * it: a shortened grace would race the fork + shell + exec round trip and the
+ * behaviour under test would stop being the behaviour under test.
+ */
+const REAL_GRACE: Partial<SupervisorTiming> = {
+  startGraceMs: START_GRACE_MS,
+  restartBackoffMs: [20],
+  maxRestartAttempts: 3,
+};
+
+/**
+ * SPEC §2.5: a service is done when it is *running*. A start that returns while
+ * the process is still inside its grace has decided nothing yet, so a service
+ * that dies on spawn must not be reported `ok` — `u8 start` exits on this.
+ */
+describe("a service that dies on spawn", () => {
+  it("fails the target instead of reporting it ok", async () => {
+    const h = live(
+      () => ({
+        apps: { solo: { path: ".", scripts: { start: "echo boom; exit 7" } } },
+        limits: LIMITS,
+      }),
+      [],
+      REAL_GRACE,
+    );
+
+    const result = await settled(h.engine.startTargets());
+
+    expect(result.ok).toBe(false);
+    expect(statesByTarget(result)).toEqual({ solo: "failed" });
+    expect(resultFor(result, "solo").error).toMatch(/code 7/);
+    expect(h.supervisor.state("solo").status).toBe("crashed");
+  });
+
+  it("does not launch a dependent, and reports it skipped", async () => {
+    const h = live(
+      () => ({
+        apps: {
+          dep: { path: ".", scripts: { start: "echo dep-starting; exit 3" } },
+          child: { path: ".", scripts: { start: "sleep 100" }, dependsOn: ["dep"] },
+        },
+        limits: LIMITS,
+      }),
+      [],
+      REAL_GRACE,
+    );
+
+    const result = await settled(h.engine.startTargets());
+
+    expect(result.ok).toBe(false);
+    expect(statesByTarget(result)).toEqual({ dep: "failed", child: "skipped" });
+    expect(resultFor(result, "child").error).toMatch(/dependency "dep"/);
+    expect(h.supervisor.state("child").status).toBe("stopped");
+  });
+});
 
 describe("a kind:\"service\" config command, end to end", () => {
   it("leaves its own script running under the supervisor, and stops with the target", async () => {

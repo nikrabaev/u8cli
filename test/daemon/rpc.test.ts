@@ -13,6 +13,7 @@ import {
   connect,
   createWorkspace,
   daemonPid,
+  markerService,
   record,
   SERVICE_SCRIPT,
   twoServiceConfig,
@@ -27,6 +28,9 @@ afterEach(async () => {
 afterAll(() => {
   cleanupStateHome();
 });
+
+/** Ignores SIGTERM, so stopping it takes the whole stop timeout. */
+const STUBBORN_SERVICE = "trap '' TERM; printf 'ready\\n'; while true; do sleep 0.1; done";
 
 /** A workspace with a scriptless app, so `appliesTo` has something to exclude. */
 function mixedConfig(): Record<string, unknown> {
@@ -236,6 +240,58 @@ describe("profile persistence failures", () => {
     const run = await client.request("service.start", {});
     const result = await client.request("run.await", { runId: run.runId });
     expect(result.targets.map((t) => t.targetId)).toEqual(["api", "web"]);
+  });
+});
+
+describe("shutting down", () => {
+  /**
+   * A service started inside the shutdown window is a process no daemon will
+   * ever own again: this one is torn down, the next one reports the target
+   * `stopped`, and the following `u8 start` runs a second copy of it.
+   */
+  it("refuses to start anything once shutdown has begun", async () => {
+    const ws = createWorkspace(
+      (dir) => ({
+        // Long enough that the RPCs below land while the first daemon.stop is
+        // still waiting out the service it cannot terminate politely.
+        limits: { stopTimeout: 2_000 },
+        apps: {
+          api: { path: "api", scripts: { start: STUBBORN_SERVICE } },
+          late: { path: "late", scripts: { start: markerService(`${dir}/late.pid`) } },
+        },
+        profiles: { all: { default: true, targets: ["api", "late"] } },
+        commands: { hello: { script: "printf 'hello\\n'" } },
+      }),
+      ["api", "late"],
+    );
+    const client = await connect(ws);
+    await client.request("client.attach", { clientVersion: "test" });
+
+    const started = await client.request("service.start", { targets: ["api"] });
+    await client.request("run.await", { runId: started.runId });
+    const pid = daemonPid(ws);
+    expect(pid).toBeDefined();
+
+    await client.request("daemon.stop", {});
+
+    for (const attempt of [
+      client.request("service.start", { targets: ["late"] }),
+      client.request("service.restart", { targets: ["late"] }),
+      client.request("command.run", { command: "hello", targets: ["late"] }),
+    ]) {
+      const rejected = await failure(attempt);
+      expect(isU8Error(rejected) && rejected.code).toBe("RPC_ERROR");
+      expect((rejected as Error).message).toContain("shutting down");
+    }
+
+    // Reads still answer, and stopping is exactly what a shutting-down daemon
+    // should still accept.
+    expect((await client.request("daemon.ping", {})).pong).toBe(true);
+    expect((await client.request("service.stop", { targets: ["api"] })).runId).toMatch(/\w/);
+
+    expect(await waitForPidGone(pid ?? 0, 10_000)).toBe(true);
+    // Nothing was spawned, so there is nothing left behind.
+    expect(fs.existsSync(ws.file("late.pid"))).toBe(false);
   });
 });
 

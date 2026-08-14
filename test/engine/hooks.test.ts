@@ -51,6 +51,40 @@ describe("config hooks", () => {
     expect(h.statesOf("gateway")).toEqual(["pending", "running", "aborted"]);
   });
 
+  it("hands post hooks the outcome as environment, and hides it from pre hooks", async () => {
+    const h = createHarness({
+      dirs: ["ok", "bad", "blocked"],
+      config: {
+        apps: { ok: { path: "ok" }, bad: { path: "bad" }, blocked: { path: "blocked" } },
+        commands: {
+          probe: {
+            script: "true",
+            targets: { bad: "exit 4" },
+            hooks: {
+              // SPEC §2.6: only `post` receives the result; a `pre` hook has none.
+              pre: ['printf "%s|%s\\n" "${U8_OK:-unset}" "${U8_STATUS:-unset}" > pre.txt', "test ! -f stop"],
+              post: [
+                'printf "%s|%s|%s|%s|%s\\n" "$U8_OK" "$U8_EXIT_CODE" "$U8_STATUS" "$U8_COMMAND" "$U8_TARGET" > post.txt',
+                'printf "%s\\n" "$U8_DURATION_MS" >> post.txt',
+              ],
+            },
+          },
+        },
+      },
+    });
+    fs.writeFileSync(h.file("blocked/stop"), "");
+
+    const result = await settled(h.engine.runCommand({ command: "probe" }));
+
+    expect(statesByTarget(result)).toEqual({ ok: "ok", bad: "failed", blocked: "aborted" });
+    expect(h.read("ok/post.txt").split("\n")[0]).toBe("1|0|ok|probe|ok");
+    expect(h.read("bad/post.txt").split("\n")[0]).toBe("0|4|failed|probe|bad");
+    // An aborted target never ran anything, so it has no exit code to report.
+    expect(h.read("blocked/post.txt").split("\n")[0]).toBe("0||aborted|probe|blocked");
+    expect(Number(h.read("ok/post.txt").split("\n")[1])).toBeGreaterThanOrEqual(0);
+    expect(h.read("ok/pre.txt")).toBe("unset|unset\n");
+  });
+
   it("fails the target when a post hook fails, without skipping the rest of them", async () => {
     const seen: string[] = [];
     const h = twoTargets({

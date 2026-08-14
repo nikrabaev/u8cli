@@ -90,6 +90,13 @@ interface Entry {
    */
   stopRequested: boolean;
   /**
+   * Callbacks waiting for this target to leave `"starting"`, one per pending
+   * {@link Supervisor.waitForSettled}. Drained by {@link setState}, which is
+   * the single place a status changes, so the grace timer and an early exit
+   * both settle them without either having to know about the other.
+   */
+  settleWaiters: Set<(state: ServiceState) => void>;
+  /**
    * The definition this process belongs to: the name of the `kind: "service"`
    * command that started it, or `undefined` for the target's own `start` script.
    * A start naming a *different* one replaces the process.
@@ -136,8 +143,17 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     }
   };
 
+  /** `starting` and `stopping` are journeys; these three are destinations. */
+  const isSettled = (state: ServiceState): boolean =>
+    state.status === "running" || state.status === "crashed" || state.status === "stopped";
+
   const setState = (entry: Entry, patch: Partial<ServiceState>): void => {
     entry.state = { ...entry.state, ...patch };
+    if (isSettled(entry.state) && entry.settleWaiters.size > 0) {
+      const waiters = [...entry.settleWaiters];
+      entry.settleWaiters.clear();
+      for (const resolve of waiters) resolve({ ...entry.state });
+    }
     dispatchChange(entry);
   };
 
@@ -149,6 +165,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       state: { targetId: id, status: "stopped", stale: false, restartAttempts: 0 },
       flush: Promise.resolve(),
       stopRequested: false,
+      settleWaiters: new Set(),
       lock: Promise.resolve(),
     };
     entries.set(id, entry);
@@ -480,6 +497,24 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     return exclusive(entry, () => doStart(entry, opts ?? {}, false));
   };
 
+  /**
+   * The two things that can end a `"starting"` state are the grace timer and
+   * the process exiting, and both funnel through {@link setState} — so waiting
+   * on the next settled state *is* the race between them, without a second
+   * timer to own or a handle to keep a reference to.
+   *
+   * No timeout: `graceTimer` is always armed for a live spawn, so one of the
+   * two always fires. A target that is not currently starting resolves at once.
+   */
+  const waitForSettled = (id: TargetId): Promise<ServiceState> => {
+    const entry = entries.get(id);
+    if (!entry) return Promise.resolve(stateOf(id));
+    if (isSettled(entry.state)) return Promise.resolve({ ...entry.state });
+    return new Promise<ServiceState>((resolve) => {
+      entry.settleWaiters.add(resolve);
+    });
+  };
+
   return {
     state: stateOf,
 
@@ -510,6 +545,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     },
 
     start,
+    waitForSettled,
     stop,
 
     /**

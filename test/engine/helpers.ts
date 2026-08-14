@@ -65,6 +65,13 @@ export class FakeSupervisor implements Supervisor {
   readonly failStart = new Set<TargetId>();
   /** Targets that come back `crashed` instead of `running`. */
   readonly crashOnStart = new Set<TargetId>();
+  /**
+   * Targets whose start settles in `"starting"` and stays there — a process
+   * still inside the supervisor's start grace, or one the backoff ladder has
+   * just respawned. The real supervisor counts those as "up" for
+   * {@link isRunning}, which is exactly what readiness gating must not do.
+   */
+  readonly stuckStarting = new Set<TargetId>();
   /** Targets whose `stop` rejects. */
   readonly failStop = new Set<TargetId>();
   startDelayMs = 0;
@@ -87,8 +94,10 @@ export class FakeSupervisor implements Supervisor {
     return [...this.byId.values()];
   }
 
+  /** Deliberately mirrors the real supervisor: `"starting"` counts as up. */
   isRunning(id: TargetId): boolean {
-    return this.state(id).status === "running";
+    const status = this.state(id).status;
+    return status === "running" || status === "starting";
   }
 
   runningCount(): number {
@@ -100,9 +109,10 @@ export class FakeSupervisor implements Supervisor {
     if (this.startDelayMs > 0) await delay(this.startDelayMs);
     if (this.failStart.has(id)) throw new Error(`fake supervisor cannot start ${id}`);
     const crashed = this.crashOnStart.has(id);
+    const starting = !crashed && this.stuckStarting.has(id);
     const next: ServiceState = {
       targetId: id,
-      status: crashed ? "crashed" : "running",
+      status: crashed ? "crashed" : starting ? "starting" : "running",
       stale: false,
       pid: crashed ? undefined : this.nextPid++,
       startedAt: Date.now(),
@@ -112,6 +122,23 @@ export class FakeSupervisor implements Supervisor {
     };
     this.byId.set(id, next);
     return next;
+  }
+
+  /** The real supervisor settles a start on its own; the fake is already settled. */
+  async waitForSettled(id: TargetId): Promise<ServiceState> {
+    return this.state(id);
+  }
+
+  /** Flips an already-started target to `crashed`, as a late crash would. */
+  crash(id: TargetId, exitCode = 9): void {
+    this.byId.set(id, {
+      targetId: id,
+      status: "crashed",
+      stale: false,
+      exitCode,
+      restartAttempts: 0,
+      lastError: `exited with code ${exitCode}`,
+    });
   }
 
   async stop(id: TargetId, _opts?: StopOptions): Promise<ServiceState> {

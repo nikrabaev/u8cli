@@ -168,6 +168,38 @@ describe("spawnManaged", () => {
     }
   });
 
+  it("reaps the group when the leader exits on its own and leaves a child behind", async () => {
+    const dir = await tempDir();
+    let childPid = 0;
+    try {
+      const pidFile = path.join(dir.path, "survivor.pid");
+      // The leader exits immediately; the backgrounded child outlives it while
+      // still holding stdout, so nothing but this handle knows the group exists.
+      const handle = start(`sleep 300 & echo "$!" > '${pidFile}'; echo leader done`);
+      const lines = collect(handle);
+
+      const exit = await handle.exited;
+      childPid = Number.parseInt(await readFile(pidFile, "utf8"), 10);
+
+      // The leader's own outcome must be reported unchanged.
+      expect(exit.code).toBe(0);
+      expect(exit.signal).toBe(null);
+      expect(exit.requested).toBe(false);
+      expect(textOf(lines, "stdout")).toContain("leader done");
+      expect(await waitForPidGone(childPid)).toBe(true);
+    } finally {
+      // An unreaped survivor would outlive the suite by five minutes.
+      if (childPid > 0) {
+        try {
+          process.kill(childPid, "SIGKILL");
+        } catch {
+          // Already gone, which is what the assertion above demands.
+        }
+      }
+      await dir.cleanup();
+    }
+  });
+
   it("is idempotent: repeated stops resolve to the same exit", async () => {
     const handle = start(script("service.sh"));
     const lines = collect(handle);

@@ -28,10 +28,10 @@
  * context per *evaluation*, and a subscription is only activated once). So the
  * monitors take lifecycle edges from every source the SDK does offer — the
  * subscribe-time snapshot, every `readiness()` call, and the `app:start` /
- * `app:restart` / `app:stop` hooks — and from {@link HealthPluginOptions.services}
- * when the daemon wires it, which is the only fully precise source (it also sees
- * crashes and auto-restarts). Passing it is a one-liner:
- * `createHealthPlugin({ services: supervisor })`.
+ * `app:restart` / `app:stop` hooks — and from {@link HealthPluginOptions.services},
+ * which is the only fully precise source (it also sees crashes and auto-restarts).
+ * The daemon supplies it by loading this module through {@link createPlugin}
+ * rather than through its default export.
  */
 import fs from "node:fs";
 import { request as httpRequest, type ClientRequest, type IncomingMessage } from "node:http";
@@ -640,5 +640,13 @@ export function createHealthPlugin(opts: HealthPluginOptions = {}): PluginDefini
     },
   });
 }
+
+/**
+ * The plugin host's factory hook for a built-in: loading `health` through it is
+ * what gets {@link HealthPluginOptions.services} in, and with it the crash and
+ * auto-restart edges no plugin-SDK callback reports. Without them a crashed
+ * service keeps its last verdict and is probed forever (SPEC §7.2).
+ */
+export const createPlugin = createHealthPlugin;
 
 export default createHealthPlugin();

@@ -483,3 +483,49 @@ describe("indicator results", () => {
     expect(result).toEqual({ value: "up", display: "●", tone: "ok" });
   });
 });
+
+/**
+ * A built-in is *constructed* by the host, not merely imported: `health` needs
+ * live lifecycle state, and the plugin SDK — the contract for third-party
+ * plugins — deliberately has no channel for it.
+ */
+describe("built-in options", () => {
+  function healthFixture(): Fixture {
+    return createFixture({
+      config: {
+        builtins: { git: false, health: true },
+        apps: {
+          api: {
+            path: "api",
+            scripts: { start: "sleep 30" },
+            health: { cmd: "true", interval: 200, timeout: 500, threshold: 1 },
+          },
+        },
+      },
+    });
+  }
+
+  it("hands a built-in the daemon's state through its factory export", async () => {
+    const fixture = healthFixture();
+    const target = targetInfo(fixture);
+    const stopped = serviceState("api", "stopped");
+    // The supervisor's word — the process is gone — against a caller still
+    // holding a `running` state, which is what a crash looks like from here.
+    const services = { state: () => stopped, states: () => [stopped] };
+
+    const wired = fixture.host({ builtinOptions: { health: { services, workspace: fixture.workspace } } });
+    await wired.load();
+    expect(wired.list()).toEqual([{ name: "health", spec: "builtin:health", ok: true }]);
+    expect(await wired.readiness(target, serviceState("api"))).toBe("n/a");
+  });
+
+  it("still loads a built-in that gets no options, from its default export", async () => {
+    const fixture = healthFixture();
+    const host = fixture.host();
+    await host.load();
+
+    // No supervisor to contradict it, so the handed-in state is all it has: the
+    // target counts as live and its first probe has not landed yet.
+    expect(await host.readiness(targetInfo(fixture), serviceState("api"))).toBe("pending");
+  });
+});

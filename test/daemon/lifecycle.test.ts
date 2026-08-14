@@ -12,7 +12,7 @@ import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { createDaemon } from "../../src/daemon/daemon.js";
 import { runDaemonEntry } from "../../src/daemon/entry.js";
 import { daemonEntryPath, ensureDaemon } from "../../src/daemon/launch.js";
-import { startRpcServer } from "../../src/ipc/index.js";
+import { createRpcClient, startRpcServer } from "../../src/ipc/index.js";
 import { isU8Error } from "../../src/util/errors.js";
 import { nullLogger } from "../../src/util/logger.js";
 import {
@@ -26,11 +26,15 @@ import {
   markerService,
   pidAlive,
   record,
+  SERVICE_SCRIPT,
   track,
   twoServiceConfig,
   waitFor,
   waitForPidGone,
 } from "./helpers.js";
+
+/** Ignores SIGTERM, so tearing it down takes the whole stop timeout. */
+const STUBBORN_SERVICE = "trap '' TERM; printf 'ready\\n'; while true; do sleep 0.1; done";
 
 afterEach(async () => {
   await cleanup();
@@ -214,6 +218,46 @@ describe("idle exit", () => {
     expect(fs.existsSync(ws.paths.pidFile)).toBe(false);
   });
 
+  /**
+   * A run that cannot settle would otherwise hold `activeRuns` above zero for
+   * good, and with it the daemon: SPEC §5.1's self-exit becomes unreachable
+   * with no clients, nothing running and nothing left to wait for.
+   */
+  it("stops counting a run that outstays the ceiling", async () => {
+    const ws = createWorkspace(
+      {
+        apps: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } },
+        profiles: { all: { default: true, targets: ["api"] } },
+        commands: { wedged: { script: "while true; do sleep 0.1; done" } },
+      },
+      ["api"],
+    );
+    track(ws);
+    const daemon = createDaemon({
+      configPath: ws.configPath,
+      logger: nullLogger,
+      idleMs: 300,
+      runCeilingMs: 500,
+    });
+    await daemon.start();
+
+    try {
+      const client = createRpcClient({ socketPath: ws.paths.socket, timeoutMs: 5_000 });
+      try {
+        await client.connect();
+        // Fire and forget, exactly as a client that walks away does.
+        await client.request("command.run", { command: "wedged", targets: ["api"] });
+      } finally {
+        await client.close();
+      }
+
+      const reason = await Promise.race([daemon.stopped, delay(6_000).then(() => "still running")]);
+      expect(reason).toBe("idle timeout");
+    } finally {
+      await daemon.shutdown("test over");
+    }
+  });
+
   it("stays up while a service is running, even with no clients", async () => {
     const ws = createWorkspace(twoServiceConfig(), ["api", "web"]);
     const client = await connect(ws, { idleMs: 300 });
@@ -295,5 +339,81 @@ describe("shutdown", () => {
     expect(await waitForPidGone(servicePid, 5_000)).toBe(true);
     expect(shutdowns.map((s) => s.reason)).toContain("daemon.stop");
     expect(fs.existsSync(ws.paths.socket)).toBe(false);
+  });
+
+  /**
+   * The stop pass works from the set of targets the supervisor knew about when
+   * it began. Anything that appears afterwards — a start pass that was still in
+   * flight — would be spawned into a daemon that has already torn everything
+   * else down, and no later daemon can find it.
+   */
+  it("reaps a service that appeared while it was already shutting down", async () => {
+    const ws = createWorkspace(
+      {
+        // Long enough for the second start to land inside the window.
+        limits: { stopTimeout: 2_000 },
+        apps: {
+          api: { path: "api", scripts: { start: STUBBORN_SERVICE } },
+          late: { path: "late", scripts: { start: SERVICE_SCRIPT } },
+        },
+        profiles: { all: { default: true, targets: ["api", "late"] } },
+      },
+      ["api", "late"],
+    );
+    track(ws);
+    const daemon = createDaemon({ configPath: ws.configPath, logger: nullLogger, idleMs: 0 });
+    await daemon.start();
+
+    let latePid: number | undefined;
+    try {
+      await daemon.context.supervisor.start("api");
+      // Not just spawned: the shell has to have installed its trap, or it dies
+      // on the first SIGTERM and the window this test needs never opens.
+      await waitFor(() => daemon.context.supervisor.state("api").status === "running", "api to be running");
+      const stopping = daemon.shutdown("test");
+      // `api` ignores SIGTERM, so the first pass is still waiting it out while
+      // `late` — a target the supervisor has never seen — is spawned.
+      await delay(100);
+      latePid = (await daemon.context.supervisor.start("late")).pid;
+      expect(latePid).toBeDefined();
+
+      await stopping;
+      expect(pidAlive(latePid ?? 0), "a service spawned mid-shutdown outlived the daemon").toBe(false);
+    } finally {
+      if (latePid !== undefined && pidAlive(latePid)) process.kill(latePid, "SIGKILL");
+      await daemon.shutdown("test over");
+    }
+  });
+
+  /**
+   * `cancelAll` only asks: a task that traps SIGTERM keeps running until the
+   * process layer escalates. A daemon that exits before then leaves it behind
+   * with nothing to reap it.
+   */
+  it("waits out an in-flight task that ignores SIGTERM", async () => {
+    const ws = createWorkspace(
+      (dir) => ({
+        limits: { stopTimeout: 1_000 },
+        apps: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } },
+        profiles: { all: { default: true, targets: ["api"] } },
+        commands: {
+          wedged: {
+            script: `trap '' TERM; printf '%s\\n' "$$" > '${dir}/task.pid'; while true; do sleep 0.1; done`,
+          },
+        },
+      }),
+      ["api"],
+    );
+    const client = await connect(ws);
+    await client.request("command.run", { command: "wedged", targets: ["api"] });
+    await waitFor(() => fs.existsSync(ws.file("task.pid")), "the task to record its pid");
+    const taskPid = Number(fs.readFileSync(ws.file("task.pid"), "utf8").trim());
+    expect(pidAlive(taskPid)).toBe(true);
+    const pid = daemonPid(ws);
+
+    await client.request("daemon.stop", {});
+    expect(await waitForPidGone(pid ?? 0, 10_000)).toBe(true);
+    // The daemon may not go before the escalation it set off has landed.
+    expect(pidAlive(taskPid), "a task that traps SIGTERM outlived the daemon").toBe(false);
   });
 });

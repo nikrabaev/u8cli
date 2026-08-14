@@ -8,7 +8,15 @@ import path from "node:path";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
 
 import type { IndicatorValue } from "../../src/ipc/protocol.js";
-import { cleanup, cleanupStateHome, connect, createWorkspace, waitFor, type Workspace } from "../daemon/helpers.js";
+import {
+  cleanup,
+  cleanupStateHome,
+  connect,
+  createWorkspace,
+  delay,
+  waitFor,
+  type Workspace,
+} from "../daemon/helpers.js";
 
 afterEach(async () => {
   await cleanup();
@@ -155,5 +163,70 @@ describe("plugins in a live daemon", () => {
     await client.request("daemon.stop", {});
     await waitFor(() => fs.existsSync(ws.file("teardown.txt")), "the plugin teardown to run");
     expect(fs.readFileSync(ws.file("teardown.txt"), "utf8").trim()).toBe("torn");
+  });
+});
+
+/**
+ * SPEC §7.2: `health@status` is `n/a` when the process is not running, and
+ * probes run *only* while it runs. A crash is the case no plugin-SDK callback
+ * reports — no command ran, so no hook fires — so this holds only if the daemon
+ * builds the built-in with its supervisor.
+ */
+describe("the health built-in inside a daemon", () => {
+  it("parks a crashed service at n/a and stops probing it", async () => {
+    const ws = createWorkspace(
+      (dir) => ({
+        builtins: { git: false },
+        apps: {
+          api: {
+            path: "api",
+            // Long enough to survive the start grace, then it dies on its own.
+            scripts: { start: "printf 'ready\\n'; sleep 1; exit 3" },
+            // A probe that always succeeds *and* counts itself: after the crash
+            // the verdict must change because the process is gone, not because
+            // the check started failing.
+            health: {
+              cmd: `printf 'p\\n' >> ${path.join(dir, "probes.txt")}`,
+              interval: 200,
+              timeout: 1_000,
+              threshold: 1,
+            },
+          },
+        },
+        profiles: { all: { default: true, targets: ["api"] } },
+      }),
+      ["api"],
+    );
+    /** One line per probe, so the file's line count is how often it ran. */
+    const probes = (): number => {
+      if (!fs.existsSync(ws.file("probes.txt"))) return 0;
+      return fs.readFileSync(ws.file("probes.txt"), "utf8").split("\n").filter((l) => l.length > 0).length;
+    };
+
+    const client = await connect(ws);
+    await client.request("client.attach", { clientVersion: "test" });
+    const health = async (): Promise<string | undefined> => {
+      const snapshot = await client.request("workspace.snapshot", {});
+      return indicator(snapshot.indicators, "health", "status")?.value;
+    };
+    const status = async (): Promise<string | undefined> => {
+      const snapshot = await client.request("workspace.snapshot", {});
+      return snapshot.services.find((s) => s.targetId === "api")?.status;
+    };
+
+    const run = await client.request("service.start", {});
+    await client.request("run.await", { runId: run.runId });
+
+    await pollFor(async () => ((await health()) === "healthy" ? true : undefined), "health to go healthy");
+    expect(probes()).toBeGreaterThan(0);
+
+    await pollFor(async () => ((await status()) === "crashed" ? true : undefined), "api to crash on its own");
+    await pollFor(async () => ((await health()) === "n/a" ? true : undefined), "health to go n/a after the crash");
+
+    // Whatever was already in flight when the monitor disarmed has landed by now.
+    await delay(200);
+    const settled = probes();
+    await delay(1_000); // five probe intervals
+    expect(probes(), "probes kept firing at a process that is gone").toBe(settled);
   });
 });
