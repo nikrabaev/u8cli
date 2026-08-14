@@ -97,7 +97,7 @@ When an app declares `subapps`, the app-level `scripts`, `env`, `health`, `resta
 
 Deepest wins, over the daemon's own environment:
 
-```
+```text
 process env of the daemon  →  workspace env  →  app env  →  subapp env
 ```
 
@@ -274,7 +274,7 @@ config commands only).
 A hook is a shell string — or an array of them — run in the target's working directory with the
 target's environment, per `(command, target)` pair:
 
-```
+```text
 pre …  →  the command's script  →  post …
 ```
 
@@ -359,7 +359,7 @@ is the header row instead — it never leaks into child rows.
 
 ### Grammar
 
-```
+```text
 {ns@name}                 {ns@name:mod}            {ns@name:mod(arg):mod}
 ```
 

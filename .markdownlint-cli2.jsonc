@@ -1,0 +1,14 @@
+{
+  // Markdown conventions for this repo's own docs. Dependencies ship their own
+  // README files with their own house style; linting those tells us nothing.
+  "globs": ["**/*.md"],
+  "ignores": ["node_modules/**", "dist/**"],
+  "config": {
+    "default": true,
+    // Prose is not hard-wrapped: these docs are read rendered, and reflowing a
+    // paragraph to satisfy a column limit makes every later edit a wide diff.
+    "MD013": false,
+    // Table pipe padding is left to the author; content alignment is what matters.
+    "MD060": false
+  }
+}

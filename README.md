@@ -191,7 +191,7 @@ the exception: the module is already imported, so that needs `u8 daemon stop`.
 
 Everything runtime lives under `$U8_STATE_HOME/<workspace-id>/` (default `~/.u8/<workspace-id>/`):
 
-```
+```text
 ~/.u8/df48413e6129/
 ├── daemon.sock              # unix socket, mode 0600 (falls back to $TMPDIR if the path is too long)
 ├── daemon.pid

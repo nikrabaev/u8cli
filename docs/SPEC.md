@@ -21,7 +21,7 @@ u8cli (`u8`) is a workspace-scoped orchestrator for long-running microservice ap
 
 Internal module layout (single package):
 
-```
+```text
 src/
   config/      # discovery, JSONC parsing, zod schema, normalization, watch/reload
   daemon/      # daemon entrypoint, lifecycle, supervisor
@@ -121,7 +121,7 @@ Core indicators (v1): `app@name`, `app@dirname`, `app@path`, `app@status`, `app@
 
 Row templates are strings of literal text + tokens with optional colon-chained modifiers:
 
-```
+```text
 {app@status} {app@name:pad(24)} {git@branch:color(yellow):max(15)} {health@status}
 ```
 
@@ -257,7 +257,7 @@ The daemon watches `u8.jsonc`:
 
 ### 9.2 Headless CLI
 
-```
+```bash
 u8 init                     # scaffold u8.jsonc
 u8                          # open TUI
 u8 start|stop|restart [target|--all]
