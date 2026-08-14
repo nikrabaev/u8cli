@@ -19,6 +19,10 @@
  *    window; overflow is dropped, counted, and reported on the `u8` stream.
  *  - **Shutdown is idempotent.** It is reachable from an RPC, a signal and the
  *    idle timer at once; the first caller owns the sequence, the rest await it.
+ *  - **Reloads are serial.** The file watcher, `workspace.reload` and a burst of
+ *    saves all drive the same sequence, which swaps the workspace, the plugin
+ *    host and every indicator binding — two of them at once would interleave
+ *    over that state. One runs, the rest collapse into a single follow-up.
  */
 import { mkdir, readFile, rm } from "node:fs/promises";
 
@@ -28,7 +32,7 @@ import { createEngine } from "../engine/index.js";
 import { createIndicatorRegistry } from "../indicators/index.js";
 import { createRpcServer, type RpcConnection, type RpcServer } from "../ipc/index.js";
 import { PROTOCOL_VERSION, type DaemonStatus, type LogLine, type Snapshot } from "../ipc/protocol.js";
-import { createPluginHost, type LoadablePluginHost } from "../plugins/index.js";
+import { createPluginHost, pluginSources, type LoadablePluginHost } from "../plugins/index.js";
 import { ConfigError, errorMessage } from "../util/errors.js";
 import { createLogger, type Logger } from "../util/logger.js";
 import { statePaths, type StatePaths } from "../util/paths.js";
@@ -43,6 +47,7 @@ import type {
 import { buildSnapshot, createHandlers, type HandlerDeps, type ReloadOutcome } from "./handlers.js";
 import { createStateStore } from "./state.js";
 import { createSupervisor } from "./supervisor.js";
+import { configSignature, watchConfig } from "./watch.js";
 
 /** Window over which one connection's log-push budget is measured. */
 export const LOG_WINDOW_MS = 1_000;
@@ -92,15 +97,23 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   let ws = loadWorkspaceFrom(opts.configPath);
   /** Symlink-resolved: the workspace id, the state dir and every reload use it. */
   const configPath = ws.configPath;
+  /**
+   * The config as it was when it was read, for the watch `start()` arms much
+   * later — loading plugins alone can take seconds. Without it a save landing
+   * in that window is lost for good: the watch and its poll would both baseline
+   * on the *post-save* file and see nothing to report.
+   */
+  const loadedSignature = configSignature(configPath);
   const paths = statePaths(configPath);
   const workspace: WorkspaceHolder = { current: () => ws };
   /**
    * Plugin failures are pushed as they happen so a connected client can banner
    * them; the cold-start ones land before anyone can be listening, which is why
    * `Snapshot.plugins` carries the same information for whoever attaches next.
+   * A failure during a *reload* is the one that really travels — by then there
+   * is a socket, and clients are on it.
    */
-  const plugins =
-    opts.plugins ??
+  const buildPluginHost = (): LoadablePluginHost =>
     createPluginHost({
       workspace,
       logger,
@@ -108,6 +121,30 @@ export function createDaemon(opts: DaemonOptions): Daemon {
         server?.broadcast("plugin.error", { plugin, error });
       },
     });
+
+  /**
+   * Only a host the daemon built is a host the daemon may replace: an injected
+   * one belongs to whoever passed it, and rebuilding it would hand back
+   * something the caller never provided.
+   */
+  const ownsPlugins = opts.plugins === undefined;
+  let host: PluginHost | LoadablePluginHost = opts.plugins ?? buildPluginHost();
+  /** Plugin specs the live host was built from; a reload compares against it. */
+  let pluginSpecs = pluginKey(ws);
+
+  /**
+   * The stable facade every collaborator holds. The engine and the handlers
+   * capture `plugins` once at construction, so a reload that rebuilds the host
+   * has to be invisible from the outside — this indirection is what makes the
+   * swap possible without re-wiring anything.
+   */
+  const plugins: PluginHost = {
+    hooksFor: (command) => host.hooksFor(command),
+    commands: () => host.commands(),
+    indicators: () => host.indicators(),
+    readiness: (target, service) => host.readiness(target, service),
+    list: () => host.list(),
+  };
 
   const store = createStateStore({ file: paths.stateFile, logger });
   let activeProfile = pickProfile(ws, store.current().activeProfile);
@@ -136,6 +173,10 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   let activeRuns = 0;
   let listening = false;
   let shutdownPromise: Promise<void> | undefined;
+  let stopWatching: Unsubscribe | undefined;
+  /** The reload in flight, and the single follow-up everything else collapses into. */
+  let reloading: Promise<ReloadOutcome> | undefined;
+  let queuedReload: Promise<ReloadOutcome> | undefined;
 
   let resolveStopped!: (reason: string) => void;
   const stopped = new Promise<string>((resolve) => {
@@ -248,12 +289,56 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   // --- reload ---------------------------------------------------------------
 
   /**
-   * Manual reload (`workspace.reload`). Phase 12 adds the file watcher; the
-   * semantics are already the ones it will use: swap the workspace, re-bind
-   * indicators, re-evaluate staleness, and on failure keep the last-good config
-   * while surfacing the error.
+   * Re-loads the plugin host when the workspace's plugin list changed (SPEC §8).
+   *
+   * Only when it changed. Tearing every plugin down on an unrelated template
+   * edit would drop the git watchers and health probes and re-run every
+   * `setup()` for nothing — and re-importing the same specs could not pick up an
+   * edited plugin *file* anyway, because the module is already in the loader's
+   * cache. Changing the list is how a user asks for that work.
+   *
+   * A plugin that now fails to load is recorded and pushed as `plugin.error`;
+   * it never aborts the reload, exactly as at cold start.
+   */
+  const syncPlugins = async (): Promise<void> => {
+    if (!ownsPlugins) return;
+    const next = pluginKey(ws);
+    if (next === pluginSpecs) return;
+    pluginSpecs = next;
+
+    const previous = host;
+    // Providers first, then the plugins that own them: a namespace left
+    // registered would keep evaluating through a torn-down plugin's context,
+    // and its subscriptions would never be released.
+    for (const ns of new Set(previous.indicators().map((reg) => reg.ns))) {
+      indicators.unregisterNamespace(ns);
+    }
+    if (isLoadable(previous)) {
+      await previous.dispose().catch((err: unknown) => {
+        logger.error(`disposing plugins failed: ${errorMessage(err)}`);
+      });
+    }
+
+    const replacement = buildPluginHost();
+    host = replacement;
+    // `load()` never rejects — a plugin's own failure is data by then.
+    await replacement.load();
+    for (const registration of replacement.indicators()) indicators.register(registration);
+  };
+
+  /**
+   * One reload: swap the workspace, re-load plugins if the list moved, re-bind
+   * indicators, re-evaluate staleness. Running processes are never touched —
+   * they keep their spawn-time definition and are reported `stale` instead
+   * (SPEC §8). On failure the last-good workspace stays in service and the error
+   * is surfaced through `Snapshot.configError` and the notification.
+   *
+   * It never rejects: its callers are a file watcher and an RPC, and neither has
+   * anywhere to put a rejection except the daemon's unhandled-rejection handler.
    */
   const reload = async (): Promise<ReloadOutcome> => {
+    if (shutdownPromise !== undefined) return { ok: false, error: "the daemon is shutting down" };
+
     let next: NormalizedWorkspace;
     try {
       next = loadWorkspaceFrom(configPath);
@@ -272,7 +357,14 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       activeProfile = fallback;
     }
 
-    await indicators.rebind();
+    try {
+      await syncPlugins();
+      await indicators.rebind();
+    } catch (err) {
+      // The workspace is already swapped, so there is no going back: report it
+      // and serve the new config with whatever re-bound successfully.
+      logger.error(`applying the reloaded config failed: ${errorMessage(err)}`);
+    }
     // Every tracked id, so the comparison both sets and clears the flag.
     supervisor.markStale(supervisor.states().map((s) => s.targetId));
 
@@ -282,6 +374,32 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       snapshot: buildSnapshot(handlerDeps),
     });
     return { ok: true };
+  };
+
+  /** Resumes after the in-flight reload, so a burst ends on the last save. */
+  const followUp = (): Promise<ReloadOutcome> => {
+    queuedReload = undefined;
+    return requestReload();
+  };
+
+  /**
+   * The only way a reload starts. Two of them must never overlap — they write
+   * `ws`, the plugin host and every indicator binding — and a save arriving
+   * mid-reload must not be lost, because the reload in flight read the file
+   * *before* it. So: one runs, and everything that arrives meanwhile becomes a
+   * single follow-up rather than one reload per event.
+   */
+  const requestReload = (): Promise<ReloadOutcome> => {
+    const inFlight = reloading;
+    if (inFlight !== undefined) {
+      queuedReload ??= inFlight.then(followUp, followUp);
+      return queuedReload;
+    }
+    const work = reload().finally(() => {
+      reloading = undefined;
+    });
+    reloading = work;
+    return work;
   };
 
   const staleIds = (): TargetId[] => supervisor.states().filter((s) => s.stale).map((s) => s.targetId);
@@ -312,7 +430,9 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       idleExitInMs: idleDeadline === undefined ? null : Math.max(0, idleDeadline - Date.now()),
     }),
     configError: () => configError,
-    reload,
+    // Through the same gate as the watcher: a `workspace.reload` racing a save
+    // would otherwise be the one pair of reloads that *can* overlap.
+    reload: requestReload,
     // Persist first: a daemon left running a profile it could not remember
     // would answer the RPC with a failure and then act on the new selection
     // anyway, and the next untargeted start would hit the wrong targets.
@@ -342,6 +462,10 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
     idleTimer = undefined;
     idleDeadline = undefined;
+    // Before anything is torn down: a save landing mid-shutdown must not start
+    // re-binding indicators that are on their way out.
+    stopWatching?.();
+    stopWatching = undefined;
 
     // Tell clients first: `end()` flushes what is queued, so this notification
     // still reaches them even though the socket closes moments later.
@@ -361,8 +485,9 @@ export function createDaemon(opts: DaemonOptions): Daemon {
           logger.error(`stopping indicators failed: ${errorMessage(err)}`);
         })
         .then(async () => {
-          if (!isLoadable(plugins)) return;
-          await plugins.dispose().catch((err: unknown) => {
+          const current = host;
+          if (!isLoadable(current)) return;
+          await current.dispose().catch((err: unknown) => {
             logger.error(`disposing plugins failed: ${errorMessage(err)}`);
           });
         }),
@@ -392,8 +517,9 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     // Before the registry starts: plugin providers have to be in place for the
     // first activation pass, or every plugin cell would sit empty until the
     // next rebind. `load()` swallows a plugin's failure by contract.
-    if (isLoadable(plugins)) await plugins.load();
-    for (const registration of plugins.indicators()) indicators.register(registration);
+    const initial = host;
+    if (isLoadable(initial)) await initial.load();
+    for (const registration of initial.indicators()) indicators.register(registration);
     // Core `app@` providers are registered by the registry itself, and `x@` ones
     // are derived from the workspace on every start/rebind — only plugin
     // contributions have to be pushed in from here.
@@ -431,6 +557,20 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     server = rpc;
     await rpc.listen();
     listening = true;
+
+    // Last: a reload that ran before the socket was bound would have nobody to
+    // tell, and `config.reloaded` is how a client learns its snapshot moved.
+    stopWatching = watchConfig({
+      configPath,
+      baseline: loadedSignature,
+      logger,
+      onChange: () => {
+        void requestReload().catch((err: unknown) => {
+          logger.error(`config reload failed: ${errorMessage(err)}`);
+        });
+      },
+    });
+
     logger.info(`listening on ${paths.socket}`, {
       workspace: ws.name,
       profile: activeProfile,
@@ -461,6 +601,18 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       };
     },
   };
+}
+
+/**
+ * Identifies the set of plugins a workspace asks for, in load order — built-in
+ * toggles included, since disabling `git` is as much a change to the host as
+ * dropping a local plugin file. Comparing it is what keeps an unrelated edit
+ * from tearing every plugin down and setting it back up.
+ */
+function pluginKey(ws: NormalizedWorkspace): string {
+  return pluginSources(ws)
+    .map((source) => source.spec)
+    .join("\n");
 }
 
 /**
