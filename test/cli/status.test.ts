@@ -250,3 +250,89 @@ describe("workspace selection", () => {
     expect((JSON.parse(viaBoth.out) as StatusJson).workspace.configPath).toBe(ws.configPath);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Directories that are not there
+// ---------------------------------------------------------------------------
+
+/**
+ * A `path` that names nothing is the likeliest mistake in a first config, and
+ * the one the status table is least able to show: a target that cannot possibly
+ * start renders as `stopped`, which is exactly how a target nobody has started
+ * yet renders. The rows cannot say it — they are templated, and the template is
+ * the user's — so the diagnostic goes to stderr beside the config and plugin
+ * ones, and `--json` stays byte-for-byte what a script already parses.
+ */
+describe("a target whose directory is not there", () => {
+  it("says so rather than presenting it as an ordinary stopped target", async () => {
+    const broken = createWorkspace(
+      {
+        name: "broken",
+        apps: {
+          api: { path: "api", scripts: { start: "true" } },
+          legacy: { path: "legacy", scripts: { start: "true" } },
+        },
+        profiles: { all: { default: true, targets: ["api", "legacy"] } },
+      },
+      // `legacy` is deliberately not created: the repo that was never cloned.
+      ["api"],
+    );
+
+    const result = await cli(["status"], { cwd: broken.dir });
+
+    expect(result.code).toBe(0);
+    expect(stripAnsi(result.out)).toContain("legacy");
+    expect(stripAnsi(result.err)).toContain(
+      `legacy cannot start: no such directory: ${broken.file("legacy")}`,
+    );
+    // And nothing at all about the app that is fine.
+    expect(stripAnsi(result.err)).not.toContain("api cannot start");
+  });
+
+  it("distinguishes a path that exists but is a file", async () => {
+    const broken = createWorkspace(
+      {
+        name: "notdir",
+        apps: { api: { path: "u8.jsonc", scripts: { start: "true" } } },
+        profiles: { all: { default: true, targets: ["api"] } },
+      },
+      [],
+    );
+
+    const result = await cli(["status"], { cwd: broken.dir });
+
+    expect(stripAnsi(result.err)).toContain(
+      `api cannot start: not a directory: ${broken.file("u8.jsonc")}`,
+    );
+  });
+
+  it("names the subapp when the subapp's own path is the missing one", async () => {
+    const broken = createWorkspace(
+      {
+        name: "sub",
+        apps: {
+          platform: {
+            path: "platform",
+            subapps: {
+              web: { path: "web", scripts: { start: "true" } },
+              admin: { path: "admin", scripts: { start: "true" } },
+            },
+          },
+        },
+        profiles: { all: { default: true, targets: ["platform"] } },
+      },
+      ["platform/web"],
+    );
+
+    const result = await cli(["status"], { cwd: broken.dir });
+    const err = stripAnsi(result.err);
+
+    expect(err).toContain(`platform.admin cannot start: no such directory: ${broken.file("platform/admin")}`);
+    expect(err).not.toContain("platform.web cannot start");
+  });
+
+  it("stays silent when every directory is really there", async () => {
+    const result = await cli(["status"], { cwd: ws.dir });
+    expect(stripAnsi(result.err)).not.toContain("cannot start");
+  });
+});

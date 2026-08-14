@@ -1,9 +1,10 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { spawnManaged, type SpawnManagedOptions } from "../../src/process/index.js";
 import type { LogStream } from "../../src/ipc/protocol.js";
 import type { ProcessHandle } from "../../src/process/types.js";
+import { U8Error } from "../../src/util/errors.js";
 import {
   fileHasContent,
   makeScriptsExecutable,
@@ -31,6 +32,17 @@ function collect(handle: ProcessHandle): Captured[] {
 
 function textOf(lines: Captured[], stream: LogStream): string[] {
   return lines.filter((l) => l.stream === stream).map((l) => l.text);
+}
+
+/** Hands back what a call threw, so the error itself can be asserted on. */
+function errorFrom(fn: () => unknown): Error {
+  try {
+    fn();
+  } catch (e) {
+    if (e instanceof Error) return e;
+    throw e;
+  }
+  throw new Error("expected the call to throw, but it returned");
 }
 
 function start(scriptCmd: string, opts: SpawnManagedOptions = {}): ProcessHandle {
@@ -248,6 +260,62 @@ describe("spawnManaged", () => {
 
     expect(exit.code).toBe(null);
     expect(textOf(lines, "u8").join(" ")).toContain("spawn failed");
+  });
+
+  /**
+   * Node reports a missing `cwd` as `spawn <shell> ENOENT`: the errno belongs to
+   * the directory but the name in the message is the executable's, so the one
+   * thing that is fine takes the blame and the reader goes hunting for a broken
+   * shell instead of their own `path` typo.
+   */
+  it("blames the missing working directory rather than the shell", async () => {
+    const missing = path.join(process.cwd(), "definitely-not-a-directory");
+    const handle = spawnManaged({ script: "echo hi", cwd: missing, env: {} });
+    const lines = collect(handle);
+
+    const exit = await handle.exited;
+
+    const said = textOf(lines, "u8").join(" ");
+    expect(said).toContain(`no such directory: ${missing}`);
+    expect(said).not.toContain("ENOENT");
+    expect(exit.code).toBe(null);
+  });
+
+  it("still names the shell when the shell is the thing that is missing", async () => {
+    const handle = spawnManaged({
+      script: "echo hi",
+      cwd: process.cwd(),
+      env: {},
+      shell: "/nonexistent/u8-shell",
+    });
+    const lines = collect(handle);
+
+    await handle.exited;
+
+    const said = textOf(lines, "u8").join(" ");
+    expect(said).toContain("/nonexistent/u8-shell");
+    expect(said).not.toContain("no such directory");
+  });
+
+  /**
+   * Node hands back only a fixed set of spawn errnos through the "error" event;
+   * a `cwd` that is a file fails with ENOTDIR, thrown from the call itself with
+   * a message that names neither the directory nor what was wrong with it.
+   */
+  it("throws a described error when the working directory is a file", async () => {
+    const dir = await tempDir();
+    try {
+      const file = path.join(dir.path, "u8.jsonc");
+      await writeFile(file, "{}", "utf8");
+
+      const failure = errorFrom(() => spawnManaged({ script: "echo hi", cwd: file, env: {} }));
+
+      expect(failure).toBeInstanceOf(U8Error);
+      expect((failure as U8Error).code).toBe("PROCESS_FAILED");
+      expect(failure.message).toContain(`not a directory: ${file}`);
+    } finally {
+      await dir.cleanup();
+    }
   });
 
   it("stopping a handle whose spawn failed resolves instead of hanging", async () => {

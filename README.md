@@ -48,21 +48,23 @@ monorepo with two subapps, healthchecks and `dependsOn` throughout.)
 
 ```console
 $ u8 start
-✓ db                ok 11ms
-✓ platform.shell    ok 10ms
-✓ api               ok 1ms
-✓ platform.auth-mfe ok 1ms
+✓ db                ok 506ms
+✓ platform.shell    ok 516ms
+✓ api               ok 504ms
+✓ platform.auth-mfe ok 506ms
 
-TARGET             RESULT  TIME  DETAIL
-db                 ✓ ok    11ms
-api                ✓ ok    1ms
-platform.shell     ✓ ok    10ms
-platform.auth-mfe  ✓ ok    1ms
-app:start: 4 ok in 7.3s (run mssidukg-c3435f2a)
+TARGET             RESULT  TIME   DETAIL
+db                 ✓ ok    506ms
+api                ✓ ok    504ms
+platform.shell     ✓ ok    516ms
+platform.auth-mfe  ✓ ok    506ms
+app:start: 4 ok in 8.6s (run mssv98od-977d9716)
 ```
 
-The wall time is 7.3 s against 11 ms of spawn work: `api` waited for `db` to pass its healthcheck,
-and `platform.auth-mfe` waited for `api`. That is `dependsOn` gating (see
+Each target reports about half a second because a service is only called started once it has
+survived a 500 ms grace — a script that dies on spawn is reported failed rather than ok, so the
+exit code is worth something in CI. The 8.6 s wall time on top of that is `dependsOn` gating: `api`
+waited for `db` to pass its healthcheck, and `platform.auth-mfe` waited for `api` (see
 [CONFIG.md](docs/CONFIG.md#dependson-and-readiness)).
 
 ```console
@@ -202,8 +204,10 @@ Everything runtime lives under `$U8_STATE_HOME/<workspace-id>/` (default `~/.u8/
     └── tasks/<command>/<runId>/<target>.log   # one per (run, target); oldest runs pruned
 ```
 
-Nothing here is checked in, and deleting a workspace's directory only loses logs and the active
-profile.
+Nothing here is checked in. Deleting a workspace's directory while its daemon is running is not a
+free operation, though: the daemon notices its own state dir has gone, stops its services and exits,
+so you lose the running stack along with the logs and the active profile. Stop the daemon first
+(`u8 daemon stop`) if you meant to keep the services up.
 
 ---
 

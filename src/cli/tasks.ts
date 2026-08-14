@@ -8,15 +8,25 @@
  * usable in CI, so it is derived from `TaskResult.ok` (any `failed`/`aborted`
  * target fails the run) and never from what got printed.
  *
- * Two deliberate details:
+ * Three deliberate details:
  *  - **The request deadline is disabled.** `run.await` resolves when the work
  *    does; a task legitimately outlives any timeout worth configuring.
  *  - **Ctrl-C detaches, it does not cancel.** The run belongs to the daemon
  *    (SPEC §5.1: processes survive the terminal), so an interrupt stops the
  *    printing and says where to pick the run back up.
+ *  - **Every `u8 logs` command printed here must lead to the output**, which is
+ *    why {@link outputLocation} exists: a summary that sends a first-time user
+ *    to an empty log is worse than printing nothing at all.
  */
+import type { CommandKind } from "../config/index.js";
 import type { AttachedClient } from "../daemon/index.js";
-import type { Snapshot, TaskProgress, TaskResult, TaskTargetState } from "../ipc/protocol.js";
+import type {
+  Snapshot,
+  TaskProgress,
+  TaskResult,
+  TaskTargetResult,
+  TaskTargetState,
+} from "../ipc/protocol.js";
 import { U8Error } from "../util/errors.js";
 import { withAttached, type CliContext } from "./context.js";
 import { EXIT_FAILURE, EXIT_INTERRUPTED } from "./errors.js";
@@ -74,7 +84,7 @@ export async function taskCommand(ctx: CliContext, spec: TaskSpec, opts: TaskOpt
         return EXIT_INTERRUPTED;
       }
       printer.flush(result);
-      printSummary(ctx, result);
+      printSummary(ctx, result, commandKind(attached.snapshot(), result.command));
       return result.ok ? 0 : EXIT_FAILURE;
     } finally {
       offProgress();
@@ -210,7 +220,81 @@ function describe(
   return parts.length === 0 ? undefined : parts.join(": ");
 }
 
-function printSummary(ctx: CliContext, result: TaskResult): void {
+/**
+ * The kind of work a run did, which is the whole basis for where its output
+ * went. `app:start|stop|restart` are `"service"` in the normalized model, so the
+ * three core commands need no special case here — and a command the snapshot no
+ * longer knows (a reload mid-run) reads as a task, which is the form that at
+ * least names the run.
+ */
+function commandKind(snapshot: Snapshot, command: string): CommandKind {
+  return snapshot.commands.find((c) => c.name === command)?.kind ?? "task";
+}
+
+/**
+ * Where a target's output actually landed.
+ *
+ * A service command hands its process to the supervisor, which writes it to the
+ * *service* log; the run log then holds nothing but u8's own one-line verdict
+ * ("exited with code 3") — the very line the user just read in the summary. A
+ * task runs to completion inside the run, so its run log is the whole story.
+ *
+ * `aborted` is the exception within a service run: the target never reached the
+ * supervisor, so its service log describes some earlier run, while whatever
+ * explains the abort — a pre hook's output — is in this run's log.
+ */
+function outputLocation(kind: CommandKind, state: TaskTargetState): "service" | "run" {
+  return kind === "service" && state !== "aborted" ? "service" : "run";
+}
+
+function logsCommandFor(result: TaskResult, target: TaskTargetResult, kind: CommandKind): string {
+  return outputLocation(kind, target.state) === "service"
+    ? `u8 logs ${target.targetId}`
+    : `u8 logs ${target.targetId} --run ${result.runId}`;
+}
+
+/** Failed targets worth naming before the list turns into wall of text. */
+const MAX_HINTS = 3;
+
+/**
+ * One `u8 logs` command per failed target, each in the form that fits it — a
+ * run can mix the two, since a pre hook can abort one target while another's
+ * process dies on its own.
+ */
+function printFailureHints(ctx: CliContext, result: TaskResult, kind: CommandKind): void {
+  const failed = result.targets.filter((t) => t.state === "failed" || t.state === "aborted");
+  if (failed.length === 0) return;
+
+  const label = "see the output with: ";
+  const indent = " ".repeat(label.length);
+  const shown = failed.slice(0, MAX_HINTS);
+  const lines = shown.map(
+    (target, i) => `${i === 0 ? label : indent}${logsCommandFor(result, target, kind)}`,
+  );
+  const rest = failed.length - shown.length;
+  if (rest > 0) lines.push(`${indent}… and ${rest} more, listed above`);
+  for (const line of lines) writeLine(ctx.io.stderr, ctx.style.dim(line));
+}
+
+/**
+ * Where a *successful* task's output went.
+ *
+ * A task's stdout is captured, not streamed, so `u8 run build` prints a tidy
+ * table and not one word of what the command actually said. One line naming a
+ * target that ran is enough to find the rest; service runs get nothing, because
+ * their output keeps flowing to a log the user already knows how to tail.
+ */
+function printOutputHint(ctx: CliContext, result: TaskResult, kind: CommandKind): void {
+  if (kind !== "task") return;
+  const ran = result.targets.find((t) => t.state === "ok");
+  if (!ran) return;
+  writeLine(
+    ctx.io.stderr,
+    ctx.style.dim(`output was captured per target: u8 logs ${ran.targetId} --run ${result.runId}`),
+  );
+}
+
+function printSummary(ctx: CliContext, result: TaskResult, kind: CommandKind): void {
   if (result.targets.length === 0) {
     writeLine(ctx.io.stdout, `${result.command}: nothing to do ${ctx.style.dim(`(run ${result.runId})`)}`);
     return;
@@ -238,13 +322,6 @@ function printSummary(ctx: CliContext, result: TaskResult): void {
     `${result.command}: ${counts || "nothing to do"} ${ctx.style.dim(`in ${wall} (run ${result.runId})`)}`,
   );
 
-  if (!result.ok) {
-    const failed = result.targets.find((t) => t.state === "failed" || t.state === "aborted");
-    if (failed) {
-      writeLine(
-        ctx.io.stderr,
-        ctx.style.dim(`see the output with: u8 logs ${failed.targetId} --run ${result.runId}`),
-      );
-    }
-  }
+  if (result.ok) printOutputHint(ctx, result, kind);
+  else printFailureHints(ctx, result, kind);
 }

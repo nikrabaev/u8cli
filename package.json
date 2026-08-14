@@ -1,9 +1,21 @@
 {
   "name": "u8cli",
-  "version": "0.1.0",
+  "version": "0.1.0-rc.1",
   "description": "Workspace-scoped orchestrator for long-running microservice apps",
   "type": "module",
   "license": "MIT",
+  "author": "Nikita Rabaev",
+  "keywords": [
+    "cli",
+    "microservices",
+    "monorepo",
+    "process-manager",
+    "orchestrator",
+    "daemon",
+    "dashboard",
+    "tui",
+    "devtools"
+  ],
   "engines": {
     "node": ">=22"
   },
@@ -25,6 +37,8 @@
     "dist",
     "schema.json",
     "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
     "docs/CONFIG.md",
     "docs/PLUGINS.md",
     "docs/SPEC.md",
@@ -32,11 +46,12 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/gen-schema.js",
+    "prepack": "pnpm build && node scripts/gen-schema.js --strict",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "schema": "node --experimental-strip-types scripts/gen-schema.js",
-    "u8": "node --experimental-strip-types src/cli/main.ts"
+    "schema": "node scripts/gen-schema.js",
+    "u8": "node --import ./node_modules/jiti/lib/jiti-register.mjs src/cli/main.ts"
   },
   "pnpm": {
     "onlyBuiltDependencies": ["esbuild"]

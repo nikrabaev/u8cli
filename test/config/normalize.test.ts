@@ -189,6 +189,72 @@ describe("paths", () => {
   });
 });
 
+/**
+ * The likeliest mistake in a first config is a `path` that names nothing on
+ * disk. Reported as warnings rather than `ConfigError` issues on purpose — see
+ * `directoryWarnings` in `normalize.ts` — so the check is pinned here as
+ * *non-fatal*: the workspace must still load, subapps and all.
+ */
+describe("directories that are not there", () => {
+  it("warns with the dotted config path and the absolute directory, and still loads", () => {
+    const { dir, ws } = loadFixture({
+      apps: { web: { path: "services/web", scripts: { start: "npm run dev" } } },
+    });
+
+    expect(ws.warnings).toEqual([`apps.web.path: no such directory: ${path.join(dir, "services/web")}`]);
+    expect(ws.subapps.map((s) => s.id)).toEqual(["web"]);
+    expect(sub(ws, "web").scripts).toEqual({ start: "npm run dev" });
+  });
+
+  it("says nothing when every resolved directory is really there", () => {
+    const { ws } = loadFixture(
+      { apps: { mono: { path: "mono", subapps: { shell: { path: "apps/shell" }, root: {} } } } },
+      { "mono/apps/shell/.keep": "" },
+    );
+    expect(ws.warnings).toEqual([]);
+  });
+
+  it("names the subapp entry when the subapp's own path is the missing one", () => {
+    const { dir, ws } = loadFixture({
+      apps: { mono: { path: ".", subapps: { shell: { path: "apps/shell" } } } },
+    });
+    expect(ws.warnings).toEqual([
+      `apps.mono.subapps.shell.path: no such directory: ${path.join(dir, "apps/shell")}`,
+    ]);
+  });
+
+  it("reports the app once rather than once per subapp beneath it", () => {
+    const { dir, ws } = loadFixture({
+      apps: { mono: { path: "gone", subapps: { shell: { path: "apps/shell" }, root: {} } } },
+    });
+    expect(ws.warnings).toEqual([`apps.mono.path: no such directory: ${path.join(dir, "gone")}`]);
+  });
+
+  it("still checks a subapp whose path escapes the missing app directory", () => {
+    const { dir, ws } = loadFixture({
+      apps: { mono: { path: "gone", subapps: { away: { path: "../elsewhere" } } } },
+    });
+    expect(ws.warnings).toEqual([
+      `apps.mono.path: no such directory: ${path.join(dir, "gone")}`,
+      `apps.mono.subapps.away.path: no such directory: ${path.join(dir, "elsewhere")}`,
+    ]);
+  });
+
+  it("distinguishes a path that exists but is a file", () => {
+    const { dir, ws } = loadFixture({ apps: { web: { path: "package.json" } } }, { "package.json": "{}" });
+    expect(ws.warnings).toEqual([`apps.web.path: not a directory: ${path.join(dir, "package.json")}`]);
+  });
+
+  it("collects directory problems ahead of template typos", () => {
+    const { dir, ws } = loadFixture({
+      apps: { web: { path: "services/web" } },
+      templates: { app: "{gti@branch}" },
+    });
+    expect(ws.warnings[0]).toBe(`apps.web.path: no such directory: ${path.join(dir, "services/web")}`);
+    expect(ws.warnings[1]).toContain("templates.app");
+  });
+});
+
 describe("dependsOn", () => {
   it("expands an app dependency to every one of its subapps and dedupes", () => {
     const { ws } = loadFixture({

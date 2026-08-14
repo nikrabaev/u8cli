@@ -6,9 +6,11 @@
  * tree its own process group, and every signal we send goes to the group
  * (`kill(-pid)`) so nothing survives a stop.
  */
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import type { Readable } from "node:stream";
 import type { LogStream } from "../ipc/protocol.js";
+import { describeDirectory } from "../util/dirs.js";
+import { U8Error } from "../util/errors.js";
 import { nullLogger, type Logger } from "../util/logger.js";
 import { defaultShell } from "./exec.js";
 import type { ProcessExit, ProcessHandle, SpawnSpec, StopOptions } from "./types.js";
@@ -41,7 +43,10 @@ type OutputListener = (stream: LogStream, text: string, ts: number) => void;
  *
  * Spawn failures (a missing cwd, an unusable shell) surface as a `"u8"` output
  * line followed by `exited` resolving with a `null` code, because `ProcessHandle`
- * has no separate error channel.
+ * has no separate error channel. The exception is a failure Node reports from
+ * the call itself rather than through the `"error"` event (`describeDirectory`):
+ * that one throws, since the call *is* an error channel and there is no process
+ * to attach a lifecycle to.
  */
 export function spawnManaged(spec: SpawnSpec, opts: SpawnManagedOptions = {}): ProcessHandle {
   const logger = opts.logger ?? nullLogger;
@@ -60,13 +65,25 @@ export function spawnManaged(spec: SpawnSpec, opts: SpawnManagedOptions = {}): P
     }
   };
 
-  const child = spawn(spec.shell ?? defaultShell(), ["-c", spec.script], {
-    cwd: spec.cwd,
-    env: spec.env,
-    detached: true,
-    // stdin is /dev/null: a service that reads it should see EOF, never our tty.
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const shell = spec.shell ?? defaultShell();
+  let child: ChildProcess;
+  try {
+    child = spawn(shell, ["-c", spec.script], {
+      cwd: spec.cwd,
+      env: spec.env,
+      detached: true,
+      // stdin is /dev/null: a service that reads it should see EOF, never our tty.
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    // Node defers only a fixed set of spawn errnos to the "error" event; the
+    // rest come straight back out of the call. The one that reaches a user is
+    // ENOTDIR — a `path` pointing at a file — and its message ("spawn ENOTDIR")
+    // names neither the directory nor what is wrong with it.
+    const message = describeDirectory(spec.cwd) ?? `cannot run in ${spec.cwd}: ${(err as Error).message}`;
+    logger.error("spawn failed", { script: spec.script, cwd: spec.cwd, error: message });
+    throw new U8Error("PROCESS_FAILED", message, { cwd: spec.cwd, script: spec.script });
+  }
 
   const outReader = lineReader(child.stdout, "stdout", emit, maxLineLength);
   const errReader = lineReader(child.stderr, "stderr", emit, maxLineLength);
@@ -112,8 +129,9 @@ export function spawnManaged(spec: SpawnSpec, opts: SpawnManagedOptions = {}): P
   });
 
   child.on("error", (err) => {
-    emit("u8", `spawn failed: ${err.message}`, Date.now());
-    logger.error("spawn failed", { script: spec.script, cwd: spec.cwd, error: err.message });
+    const message = spawnErrorMessage(err, spec.cwd);
+    emit("u8", `spawn failed: ${message}`, Date.now());
+    logger.error("spawn failed", { script: spec.script, cwd: spec.cwd, error: message });
     settle(null, null);
   });
 
@@ -178,6 +196,22 @@ export function spawnManaged(spec: SpawnSpec, opts: SpawnManagedOptions = {}): P
       };
     },
   };
+}
+
+/**
+ * What actually went wrong, rather than what Node called it.
+ *
+ * A `cwd` that does not exist and a shell that does not exist are the *same*
+ * error to `spawn(2)`: both arrive as ENOENT, and Node fills the message in
+ * from the executable it was asked to run — `spawn /bin/zsh ENOENT`. Reading
+ * that, the one component known to be fine is the one accused, and the reader
+ * goes looking for a broken shell or a broken Node instead of the `path` they
+ * mistyped. So an ENOENT is re-described against the directory whenever the
+ * directory is the thing that is missing, and left alone when it is not.
+ */
+function spawnErrorMessage(err: NodeJS.ErrnoException, cwd: string): string {
+  if (err.code !== "ENOENT") return err.message;
+  return describeDirectory(cwd) ?? err.message;
 }
 
 /**

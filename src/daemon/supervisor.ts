@@ -6,7 +6,7 @@
  * so its whole job is: spawn, decide whether an exit was wanted, and bring the
  * process back on a backoff ladder when the config asks for it.
  *
- * Four rules drive the design:
+ * Five rules drive the design:
  *  - **A target owns exactly one process.** Its definition is normally the
  *    subapp's `start` script, but a `kind: "service"` command (SPEC §2.5) may
  *    claim it through {@link StartOptions.script}/{@link StartOptions.via};
@@ -19,6 +19,11 @@
  *  - **A stop is verified, never trusted.** A custom stop script runs first, but
  *    the process group is signalled afterwards regardless: a stop script that
  *    exits 0 without killing anything must not leave an orphan behind.
+ *  - **Ownership outlives the daemon.** Every spawn and every exit is written to
+ *    the journal in `state.ts`, and {@link ManagedSupervisor.reconcile} reads it
+ *    back at startup: a daemon that was SIGKILLed leaves its services running,
+ *    and the next one adopts them instead of reporting them stopped and
+ *    starting a second copy.
  *  - **Every timer is unref'd.** A pending restart backoff must never be the
  *    reason a daemon with nothing to do stays alive.
  */
@@ -34,11 +39,19 @@ import {
   spawnManaged,
   type LogWriter,
 } from "../process/index.js";
-import type { ProcessExit, ProcessHandle } from "../process/types.js";
+import type { ProcessExit, ProcessHandle, StopOptions as ProcessStopOptions } from "../process/types.js";
 import { errorMessage, U8Error } from "../util/errors.js";
 import type { Logger } from "../util/logger.js";
 import type { StatePaths } from "../util/paths.js";
 import type { StartOptions, StopOptions, Supervisor, Unsubscribe, WorkspaceHolder } from "./contracts.js";
+import {
+  inspectProcesses,
+  pidAlive,
+  processGroupState,
+  PID_IDENTITY_SLACK_MS,
+  type SupervisedJournal,
+  type SupervisedProcess,
+} from "./state.js";
 
 /** How long a freshly spawned process must survive before it counts as `running`. */
 export const START_GRACE_MS = 500;
@@ -48,6 +61,27 @@ export const RESTART_BACKOFF_MS: readonly number[] = [1_000, 2_000, 4_000, 8_000
 
 /** Consecutive auto-restarts before the supervisor gives up and stays `crashed`. */
 export const MAX_RESTART_ATTEMPTS = 10;
+
+/**
+ * How often an adopted process is checked for liveness.
+ *
+ * A re-parented process gives us no `exited` event to wait on — the only honest
+ * substitute is asking the kernel. It is a `kill(pid, 0)`, so the cost is a
+ * syscall per adopted service per quarter second, and it doubles as the resolution
+ * of the stop path.
+ */
+export const ADOPT_POLL_MS = 250;
+
+/**
+ * Grace between the SIGTERM and the SIGKILL sent to an orphaned process group
+ * during recovery.
+ *
+ * Deliberately far below `limits.stopTimeoutMs`: this runs before the daemon
+ * binds its socket, and every `u8` command is waiting on it. What is being
+ * signalled is a group whose leader is already dead, so there is nothing left to
+ * shut itself down gracefully.
+ */
+export const REAP_GRACE_MS = 1_000;
 
 export interface SupervisorTiming {
   startGraceMs: number;
@@ -60,10 +94,48 @@ export interface SupervisorDeps {
   paths: StatePaths;
   logger: Logger;
   /**
+   * Where spawns are recorded so they survive this process. Optional so a unit
+   * test can build a supervisor without a state dir; a daemon always passes one,
+   * because without it a `kill -9` strands every service it owns.
+   */
+  journal?: SupervisedJournal;
+  /**
    * Test seam. The production ladder starts at one second and gives up after ten
    * attempts, which no test can afford to wait through; nothing else overrides it.
    */
   timing?: Partial<SupervisorTiming>;
+}
+
+/** What became of one process the previous daemon left behind. */
+export interface RecoveredProcess {
+  targetId: TargetId;
+  pid: number;
+  /** Human-readable justification — logged, and worth reading in an incident. */
+  reason: string;
+}
+
+export interface ReconcileReport {
+  /** Back under supervision: status, stop and restart all work; live logs do not. */
+  adopted: RecoveredProcess[];
+  /** Signalled out of existence, because nothing could supervise them again. */
+  reaped: RecoveredProcess[];
+  /** Records that named nothing worth acting on (already dead, or a reused pid). */
+  dropped: RecoveredProcess[];
+}
+
+/**
+ * The supervisor plus the recovery pass, which is daemon-internal: it is called
+ * exactly once, by `createDaemon`, before the socket is bound. Keeping it off
+ * {@link Supervisor} is what lets every other collaborator go on coding against
+ * the frozen contract.
+ */
+export interface ManagedSupervisor extends Supervisor {
+  /**
+   * Re-establishes ownership of the processes the previous daemon recorded.
+   * Resolves once every survivor has been adopted or reaped, so whatever a
+   * client sees next is the truth.
+   */
+  reconcile(): Promise<ReconcileReport>;
 }
 
 /** Backoff for the n-th consecutive restart (1-based), clamped to the ladder's tail. */
@@ -97,6 +169,13 @@ interface Entry {
    */
   settleWaiters: Set<(state: ServiceState) => void>;
   /**
+   * True while the live process is one this daemon inherited rather than
+   * spawned. It changes two things and nothing else: there is no output pipe to
+   * stream, and an exit carries no status the kernel would tell us about — so
+   * both are worded differently rather than reported as something they are not.
+   */
+  adopted: boolean;
+  /**
    * The definition this process belongs to: the name of the `kind: "service"`
    * command that started it, or `undefined` for the target's own `start` script.
    * A start naming a *different* one replaces the process.
@@ -108,8 +187,8 @@ interface Entry {
   lock: Promise<void>;
 }
 
-export function createSupervisor(deps: SupervisorDeps): Supervisor {
-  const { workspace, paths, logger } = deps;
+export function createSupervisor(deps: SupervisorDeps): ManagedSupervisor {
+  const { workspace, paths, logger, journal } = deps;
   const timing: SupervisorTiming = {
     startGraceMs: deps.timing?.startGraceMs ?? START_GRACE_MS,
     restartBackoffMs: deps.timing?.restartBackoffMs ?? RESTART_BACKOFF_MS,
@@ -165,6 +244,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       state: { targetId: id, status: "stopped", stale: false, restartAttempts: 0 },
       flush: Promise.resolve(),
       stopRequested: false,
+      adopted: false,
       settleWaiters: new Set(),
       lock: Promise.resolve(),
     };
@@ -277,6 +357,30 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     return { ...env, ...subapp.env };
   };
 
+  // --- durable ownership ----------------------------------------------------
+
+  /**
+   * Writes the process into the journal so the next daemon can find it.
+   *
+   * `pgid` is the leader's own pid: `spawnManaged` spawns detached, so the
+   * leader is the group leader, and that is the id every signal is addressed to.
+   * A handle whose spawn failed reports `-1` and is not worth recording — there
+   * is nothing running to recover.
+   */
+  const remember = (entry: Entry, handle: ProcessHandle, script: string, cwd: string): void => {
+    if (handle.pid <= 0 || entry.fingerprint === undefined) return;
+    journal?.record({
+      targetId: entry.id,
+      pid: handle.pid,
+      pgid: handle.pid,
+      startedAt: handle.startedAt,
+      via: entry.via,
+      script,
+      cwd,
+      fingerprint: entry.fingerprint,
+    });
+  };
+
   // --- lifecycle ------------------------------------------------------------
 
   const onExit = (entry: Entry, handle: ProcessHandle, exit: ProcessExit): void => {
@@ -285,9 +389,14 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     entry.offOutput?.();
     entry.offOutput = undefined;
     entry.handle = undefined;
+    // Before anything that can throw: what is on disk must never claim to own a
+    // process that has already gone.
+    journal?.forget(entry.id, handle.pid);
 
+    const adopted = entry.adopted;
+    entry.adopted = false;
     const requested = exit.requested || entry.stopRequested;
-    notice(entry, exitNotice(exit));
+    notice(entry, exitNotice(exit, adopted));
 
     const common = { pid: undefined, exitCode: exit.code, signal: exit.signal, stale: false };
 
@@ -298,7 +407,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       return;
     }
 
-    const reason = crashReason(exit);
+    const reason = crashReason(exit, adopted);
     const policy = findSubapp(workspace.current(), entry.id)?.restart ?? "no";
     if (policy !== "on-crash") {
       setState(entry, { ...common, status: "crashed", lastError: reason });
@@ -374,19 +483,49 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       );
     }
 
-    const handle = spawnManaged(
-      { script, cwd: subapp.cwd, env: spawnEnv(subapp) },
-      { stopTimeoutMs: subapp.stopTimeoutMs, logger },
-    );
+    let handle: ProcessHandle;
+    try {
+      handle = spawnManaged(
+        { script, cwd: subapp.cwd, env: spawnEnv(subapp) },
+        { stopTimeoutMs: subapp.stopTimeoutMs, logger },
+      );
+    } catch (err) {
+      // `spawnManaged` throws only when there was no process to attach a
+      // lifecycle to, so this failure never reaches `onExit` — and everything
+      // `onExit` is *for* has to happen here instead, or the target ends up
+      // reported `stopped`, indistinguishable from one nobody has started, with
+      // an empty log behind the `u8 logs <target>` the CLI is about to print.
+      // No restart ladder: a `path` that names a file will not become a
+      // directory by being retried a second later.
+      const message = errorMessage(err);
+      notice(entry, `spawn failed: ${message}`);
+      setState(entry, {
+        status: "crashed",
+        pid: undefined,
+        startedAt: undefined,
+        exitCode: undefined,
+        signal: undefined,
+        lastError: message,
+        stale: false,
+        restartAttempts: auto ? entry.state.restartAttempts : 0,
+      });
+      closeLog(entry);
+      throw err;
+    }
 
     entry.handle = handle;
     entry.stopRequested = false;
+    entry.adopted = false;
     entry.via = via;
     // The script as spawned, not as the config reads now: a reload landing
     // between the engine resolving it and this spawn must leave the process
     // reported as stale, which is exactly what it is.
     entry.fingerprint = fingerprintOf(ws, entry.id, via, script);
     entry.offOutput = handle.onOutput((stream, text, ts) => appendLog(entry, stream, text, ts));
+    // Immediately, and before the state is published: from here on the process
+    // exists, and a daemon that dies in the next millisecond must still leave
+    // behind something that names it.
+    remember(entry, handle, script, subapp.cwd);
 
     setState(entry, {
       status: "starting",
@@ -473,6 +612,267 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     return { ...entry.state };
   };
 
+  // --- recovery -------------------------------------------------------------
+
+  /**
+   * Re-establishes ownership of a process this daemon did not spawn.
+   *
+   * Everything a supervisor needs is still reachable through the kernel: the pid
+   * says whether it lives, and the process group says how to stop it. The one
+   * thing that is gone for good is the stdout pipe — it belonged to a process
+   * that no longer exists — so {@link ProcessHandle.onOutput} accepts listeners
+   * and never calls them, and the caller says so out loud in the service log
+   * rather than leaving `u8 logs -f` looking merely quiet.
+   */
+  const adoptHandle = (rec: SupervisedProcess): ProcessHandle => {
+    const listeners = new Set<(stream: LogStream, text: string, ts: number) => void>();
+    let exit: ProcessExit | null = null;
+    let requested = false;
+    let poll: NodeJS.Timeout | undefined;
+    let resolveExited!: (e: ProcessExit) => void;
+    const exited = new Promise<ProcessExit>((resolve) => {
+      resolveExited = resolve;
+    });
+
+    const settle = (): void => {
+      if (exit) return;
+      if (poll !== undefined) {
+        clearInterval(poll);
+        poll = undefined;
+      }
+      // The leader is gone; sweep whatever it left in its group, exactly as
+      // `spawnManaged` does — the pid is still reserved while the group has
+      // members, so this addresses our survivors or nobody.
+      signalGroup("SIGKILL");
+      // No wait status: nothing in this process ever wait()ed on it, and
+      // inventing one would be a lie a dashboard would print.
+      exit = { code: null, signal: null, durationMs: Date.now() - rec.startedAt, requested };
+      resolveExited(exit);
+    };
+
+    const signalGroup = (sig: NodeJS.Signals): void => {
+      try {
+        process.kill(-rec.pgid, sig);
+      } catch {
+        // ESRCH (gone) and EPERM (not ours to signal) are both answers the
+        // liveness poll reports on its own terms.
+      }
+    };
+
+    poll = setInterval(() => {
+      if (!pidAlive(rec.pid)) settle();
+    }, ADOPT_POLL_MS);
+    // Background, like every supervisor timer: an adopted service must not be
+    // the reason a daemon with nothing to do stays alive.
+    poll.unref();
+
+    return {
+      pid: rec.pid,
+      startedAt: rec.startedAt,
+      exited,
+      async stop(o?: ProcessStopOptions): Promise<ProcessExit> {
+        if (exit) return exit;
+        requested = true;
+        const grace = o?.timeoutMs ?? workspace.current().limits.stopTimeoutMs;
+        signalGroup(o?.signal ?? "SIGTERM");
+        const escalate = setTimeout(() => signalGroup("SIGKILL"), grace);
+        escalate.unref();
+        try {
+          return await exited;
+        } finally {
+          clearTimeout(escalate);
+        }
+      },
+      kill(signal: NodeJS.Signals = "SIGTERM"): void {
+        if (exit) return;
+        signalGroup(signal);
+      },
+      onOutput(cb): () => void {
+        listeners.add(cb);
+        return () => {
+          listeners.delete(cb);
+        };
+      },
+    };
+  };
+
+  /** Puts an inherited process back under supervision, log caveat and all. */
+  const adopt = (entry: Entry, rec: SupervisedProcess): void => {
+    const ws = workspace.current();
+    const handle = adoptHandle(rec);
+    entry.handle = handle;
+    entry.adopted = true;
+    entry.stopRequested = false;
+    entry.via = rec.via;
+    entry.fingerprint = rec.fingerprint;
+    entry.offOutput = handle.onOutput((stream, text, ts) => appendLog(entry, stream, text, ts));
+
+    // Re-recorded under this daemon: the journal has to describe *this*
+    // process's owner, or a second crash would find nothing to adopt.
+    remember(entry, handle, rec.script, rec.cwd);
+
+    notice(
+      entry,
+      `adopted pid=${rec.pid} from a previous daemon${rec.via === undefined ? "" : ` via ${rec.via}`} — ` +
+        "it is supervised again (status, stop and restart all work), but its output pipe died with that " +
+        "daemon: no further live log lines will be captured until the target is restarted",
+    );
+
+    setState(entry, {
+      // It outlived its start grace under the previous daemon; there is nothing
+      // left to decide, and reporting `starting` would restart that clock for a
+      // process that has been up for hours.
+      status: "running",
+      pid: rec.pid,
+      startedAt: rec.startedAt,
+      exitCode: undefined,
+      signal: undefined,
+      lastError: undefined,
+      restartAttempts: 0,
+      stale: rec.fingerprint !== fingerprintOf(ws, entry.id, rec.via, definedScript(ws, entry.id, rec.via)),
+    });
+
+    void handle.exited
+      .then((result) => {
+        onExit(entry, handle, result);
+      })
+      .catch((err: unknown) => {
+        logger.error(`supervisor: exit handling failed for ${entry.id}: ${errorMessage(err)}`);
+      });
+  };
+
+  /**
+   * SIGTERM then SIGKILL to a group whose leader is already dead.
+   *
+   * Nothing can adopt a leaderless group: there is no process whose identity can
+   * be confirmed and no lifecycle to hang a status on. Leaving it would be
+   * worse than killing it — the next `u8 start` would run a second copy beside
+   * it, which is the failure this whole pass exists to prevent.
+   */
+  const reapGroup = async (pgid: number): Promise<boolean> => {
+    const signal = (sig: NodeJS.Signals): void => {
+      try {
+        process.kill(-pgid, sig);
+      } catch {
+        // Gone between the check and the signal; the poll below is the truth.
+      }
+    };
+    signal("SIGTERM");
+    const deadline = Date.now() + REAP_GRACE_MS;
+    while (Date.now() < deadline) {
+      if (processGroupState(pgid) !== "alive") return true;
+      await sleep(25);
+    }
+    signal("SIGKILL");
+    const hard = Date.now() + REAP_GRACE_MS;
+    while (Date.now() < hard) {
+      if (processGroupState(pgid) !== "alive") return true;
+      await sleep(25);
+    }
+    return processGroupState(pgid) !== "alive";
+  };
+
+  /**
+   * Decides what one inherited record still describes.
+   *
+   * The pid alone is not identity — pid reuse is real, and signalling a
+   * stranger's process group is the one mistake here that cannot be taken back —
+   * so a live pid is believed only when its real start time matches the one
+   * recorded at spawn. When the leader is gone, the *group* is asked instead:
+   * the kernel keeps a pid reserved for as long as a group still carries it, so
+   * a group that answers under a dead leader can only be the one we spawned.
+   */
+  const recover = async (
+    rec: SupervisedProcess,
+    live: Map<number, { startedAt: number }>,
+    report: ReconcileReport,
+  ): Promise<void> => {
+    const found = live.get(rec.pid);
+    if (found !== undefined) {
+      const drift = Math.abs(found.startedAt - rec.startedAt);
+      if (drift <= PID_IDENTITY_SLACK_MS) {
+        adopt(ensure(rec.targetId), rec);
+        report.adopted.push({ targetId: rec.targetId, pid: rec.pid, reason: "still running" });
+        return;
+      }
+      report.dropped.push({
+        targetId: rec.targetId,
+        pid: rec.pid,
+        reason: `pid ${rec.pid} now belongs to an unrelated process (started ${drift}ms from the record)`,
+      });
+      return;
+    }
+
+    const group = processGroupState(rec.pgid);
+    if (group === "gone") {
+      report.dropped.push({ targetId: rec.targetId, pid: rec.pid, reason: "already gone" });
+      return;
+    }
+    if (group === "foreign") {
+      report.dropped.push({
+        targetId: rec.targetId,
+        pid: rec.pid,
+        reason: `process group ${rec.pgid} is owned by another user and was left alone`,
+      });
+      return;
+    }
+
+    const done = await reapGroup(rec.pgid);
+    report.reaped.push({
+      targetId: rec.targetId,
+      pid: rec.pid,
+      reason: done
+        ? `its leader had exited, leaving process group ${rec.pgid} behind with nothing able to supervise it`
+        : `process group ${rec.pgid} survived SIGKILL; check it by hand`,
+    });
+    const entry = ensure(rec.targetId);
+    notice(
+      entry,
+      `stopped an orphaned process group (pgid=${rec.pgid}) left by a previous daemon: ` +
+        "its leader was already gone, so it could not be supervised again",
+    );
+    closeLog(entry);
+  };
+
+  const reconcile = async (): Promise<ReconcileReport> => {
+    const report: ReconcileReport = { adopted: [], reaped: [], dropped: [] };
+    const inherited = journal?.inherited() ?? [];
+    if (inherited.length === 0) return report;
+
+    let live: Map<number, { startedAt: number }>;
+    try {
+      live = await inspectProcesses(inherited.map((rec) => rec.pid));
+    } catch (err) {
+      // Without identities nothing may be adopted *or* killed: both decisions
+      // would be guesses about processes that may not be ours. Say exactly what
+      // is unaccounted for, and leave it to the person reading the log.
+      logger.error(
+        `cannot identify the ${inherited.length} process(es) a previous daemon left behind ` +
+          `(${errorMessage(err)}); not adopting or stopping any of them: ` +
+          inherited.map((rec) => `${rec.targetId}=pid ${rec.pid}`).join(", "),
+      );
+      for (const rec of inherited) {
+        report.dropped.push({
+          targetId: rec.targetId,
+          pid: rec.pid,
+          reason: "could not be identified; left running and unsupervised",
+        });
+      }
+      return report;
+    }
+
+    // Serially: reaping waits on signals, and one target's orphan tree has
+    // nothing to do with another's — but a startup that fans out kills is far
+    // harder to read in a log than one that does them in order.
+    for (const rec of inherited) {
+      await recover(rec, live, report).catch((err: unknown) => {
+        logger.error(`recovering ${rec.targetId} (pid ${rec.pid}) failed: ${errorMessage(err)}`);
+        report.dropped.push({ targetId: rec.targetId, pid: rec.pid, reason: errorMessage(err) });
+      });
+    }
+    return report;
+  };
+
   // --- public surface -------------------------------------------------------
 
   const stateOf = (id: TargetId): ServiceState => {
@@ -517,6 +917,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 
   return {
     state: stateOf,
+    reconcile,
 
     states(): ServiceState[] {
       const out: ServiceState[] = [];
@@ -619,16 +1020,29 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   };
 }
 
-function exitNotice(exit: ProcessExit): string {
+/**
+ * An adopted process is reported differently for one reason: nothing in this
+ * daemon ever wait()ed on it, so "no status" is a fact about who was watching
+ * rather than a failed spawn — and printing the spawn diagnosis would send a
+ * reader looking for a problem that is not there.
+ */
+function exitNotice(exit: ProcessExit, adopted = false): string {
   if (exit.signal !== null) return `exited signal=${exit.signal}`;
   if (exit.code !== null) return `exited code=${exit.code}`;
-  return "exited without a status";
+  return adopted ? "the adopted process is gone (no exit status was available)" : "exited without a status";
 }
 
-function crashReason(exit: ProcessExit): string {
+function crashReason(exit: ProcessExit, adopted = false): string {
   if (exit.signal !== null) return `terminated by ${exit.signal}`;
   if (exit.code !== null) return `exited with code ${exit.code}`;
-  return "exited without a status — the process could not be spawned";
+  return adopted
+    ? "the adopted process disappeared; its exit status was not observable"
+    : "exited without a status — the process could not be spawned";
+}
+
+/** Ref'd on purpose: recovery runs before the socket is bound, with nothing else pending. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function formatDelay(ms: number): string {

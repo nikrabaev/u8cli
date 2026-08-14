@@ -14,6 +14,9 @@
  *  - **One daemon per workspace.** The socket is asked who owns it *before*
  *    anything is constructed, so a second start refuses with
  *    `DAEMON_ALREADY_RUNNING` instead of racing the live daemon for its socket.
+ *    The pid file is asked too, and it is the question that matters when the
+ *    socket is *missing*: a daemon whose socket was deleted underneath it is
+ *    still running, still owns its services, and must not be duplicated.
  *  - **The pid file is written last.** It is the cleanup handle for a daemon that
  *    is already listening; writing it before `listen()` could clobber the entry
  *    of the daemon that won the socket.
@@ -31,13 +34,105 @@ import { fileURLToPath } from "node:url";
 import { discoverConfig } from "../config/index.js";
 import { ConfigError, errorMessage, isU8Error, U8Error } from "../util/errors.js";
 import { createLogger, type Logger } from "../util/logger.js";
-import { statePaths } from "../util/paths.js";
+import { statePaths, type StatePaths } from "../util/paths.js";
 import { VERSION } from "../version.js";
 import { createDaemon, type Daemon } from "./daemon.js";
 import { pingDaemon } from "./launch.js";
+import { commandIs, findProcessesMatching, pidAlive, processCommand } from "./state.js";
 
 /** How long the "is somebody already there?" probe waits before assuming nobody is. */
 const OWNER_PROBE_MS = 1_000;
+
+/**
+ * How long to give a predecessor that is already on its way out.
+ *
+ * A daemon unlinks its socket a moment before it exits, so a client can spawn
+ * its replacement into a window where the old process is still listed. Waiting
+ * costs a fraction of a second there and turns what would be a spurious refusal
+ * into an ordinary start.
+ */
+const PREDECESSOR_WAIT_MS = 2_000;
+
+/** What a daemon puts in `process.title`; the pid-file check identifies it by this. */
+export function daemonTitle(id: string): string {
+  return `u8 daemon ${id}`;
+}
+
+/**
+ * The pid of a daemon that is *running this workspace* according to the pid
+ * file, or `undefined` if the file names nobody who is.
+ *
+ * A live pid is not enough on its own — a pid file outlives the daemon that
+ * wrote it, and the number is eventually handed to something unrelated — so the
+ * process is asked what it is. The daemon publishes exactly that in its
+ * `process.title` (set before the pid file is written, so a file that exists
+ * always names an identifiable process), and only a positive match refuses a
+ * start: a check that cannot tell must fall back to the socket probe, or a
+ * recycled pid would lock a workspace out of ever starting a daemon again.
+ */
+export async function liveDaemonPid(paths: StatePaths): Promise<number | undefined> {
+  let pid: number;
+  try {
+    pid = Number(fs.readFileSync(paths.pidFile, "utf8").trim());
+  } catch {
+    return undefined; // never written, or already cleaned up
+  }
+  // Never ourselves: `runDaemonEntry` also runs inside someone else's process
+  // (a test, an embedder), and a daemon refusing to start because the pid file
+  // names its own caller would be refusing over nothing.
+  if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid || !pidAlive(pid)) return undefined;
+  const command = await processCommand(pid);
+  return command !== undefined && commandIs(command, daemonTitle(paths.id)) ? pid : undefined;
+}
+
+/**
+ * A live daemon for this workspace found in the process table rather than in a
+ * file — the case the pid file cannot answer, because the pid file was deleted
+ * along with the rest of the state dir.
+ *
+ * It only ever finds a daemon that got as far as *listening*: the title is set
+ * at that moment, so two daemons racing a cold start still resolve the way they
+ * always have — on the socket bind — and neither sees the other here.
+ */
+async function runningDaemonPid(paths: StatePaths): Promise<number | undefined> {
+  const found = await findProcessesMatching(daemonTitle(paths.id));
+  // `undefined` is "the process table could not be read". Refusing on a
+  // question we could not ask would strand the workspace; the socket probe and
+  // the bind are still there to catch a genuine second daemon.
+  return found?.find((pid) => pid !== process.pid);
+}
+
+/**
+ * Blocks until this process is the only daemon this workspace has, or throws.
+ *
+ * Two daemons over one workspace is the failure everything else here exists to
+ * prevent: they own two copies of every service, and only one of them is
+ * reachable, so the other's process tree can only be found with `pgrep`. A
+ * predecessor that is winding down is waited for; one that is staying is
+ * reported by pid, which is what a user needs in order to do anything about it.
+ */
+async function requireSoleOwnership(paths: StatePaths, logger: Logger): Promise<void> {
+  const deadline = Date.now() + PREDECESSOR_WAIT_MS;
+  let announced = false;
+  for (;;) {
+    const rival = (await liveDaemonPid(paths)) ?? (await runningDaemonPid(paths));
+    if (rival === undefined) return;
+    if (Date.now() >= deadline) {
+      throw new U8Error(
+        "DAEMON_ALREADY_RUNNING",
+        `a u8 daemon for this workspace is already running as pid ${rival}, but its socket ` +
+          `(${paths.socket}) is missing — it stops itself and its services once it notices that, so run ` +
+          `the command again in a moment; if it persists, stop it with "kill ${rival}"`,
+        { pid: rival, socket: paths.socket },
+      );
+    }
+    if (!announced) {
+      announced = true;
+      logger.info(`pid ${rival} still owns this workspace; waiting for it to finish before starting`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
 
 export interface EntryArgs {
   /** `--config <path>`; falls back to upward discovery from the cwd. */
@@ -218,14 +313,22 @@ export async function runDaemonEntry(argv: readonly string[]): Promise<number> {
       );
     }
 
+    // A silent socket does not mean a dead daemon: delete the socket file — or
+    // the whole state dir — and the daemon behind it is still running, still
+    // holding every service it spawned. Starting a second one here is what
+    // strands the first.
+    await requireSoleOwnership(paths, logger);
+
     daemon = createDaemon({ configPath, logger, idleMs: args.idleMs });
     await daemon.start();
+    // Before the pid file, so a file that exists always names a process the
+    // check above can identify. It is slow enough on macOS to be a window of its
+    // own, but a signal landing in it is remembered and replayed by `requestStop`.
+    process.title = daemonTitle(paths.id);
     // Only now: the socket is ours, so this file describes a daemon that exists.
     fs.writeFileSync(paths.pidFile, `${process.pid}\n`, { encoding: "utf8", mode: 0o600 });
-    // Before `process.title`, which is slow enough on macOS to be a window of
-    // its own: from here a signal has a daemon to shut down.
+    // From here a signal has a daemon to shut down.
     ready = true;
-    process.title = `u8 daemon ${paths.id}`;
   } catch (err) {
     const message = describe(err);
     logger.error(`daemon failed to start: ${message}`);

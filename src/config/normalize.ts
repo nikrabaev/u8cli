@@ -8,14 +8,19 @@
  * (target references, dependency cycles, reserved names, profile defaults)
  * lives here, reported as `ConfigError` issues addressed by dotted path.
  *
- * Pure: no filesystem access beyond path arithmetic, so it can be unit-tested
- * and re-run on every config reload.
+ * Almost pure: the only filesystem access is one `stat` per resolved app and
+ * subapp directory ({@link directoryWarnings}). This is the single layer that
+ * holds both halves of that diagnostic — the dotted config path and the
+ * absolute directory it resolved to — so checking anywhere else would mean
+ * duplicating the resolution. Everything else is path arithmetic, which keeps
+ * the whole function cheap enough to re-run on every config reload.
  */
 import path from "node:path";
 // The grammar, not the renderer: `parse.ts` imports nothing outside its own
 // module, so reading it here checks templates against the one true grammar
 // without coupling config to anything above it.
 import { parseTemplate, templateTokens } from "../template/parse.js";
+import { describeDirectory } from "../util/dirs.js";
 import { ConfigError, type ConfigIssue } from "../util/errors.js";
 import { resolvePath, workspaceId } from "../util/paths.js";
 import {
@@ -66,11 +71,13 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
   const apps: NormalizedApp[] = [];
   const subapps: NormalizedSubapp[] = [];
   const pendingDeps: Array<{ subapp: NormalizedSubapp; specs: string[]; configPath: string }> = [];
+  const dirChecks: DirectoryCheck[] = [];
 
   for (const [appName, entry] of Object.entries(raw.apps)) {
     const appPath = resolvePath(entry.path, rootDir);
     const app: NormalizedApp = { name: appName, path: appPath, template: entry.template, subapps: [] };
     const subappEntries = Object.entries(entry.subapps ?? {});
+    dirChecks.push({ at: `apps.${appName}.path`, dir: appPath });
 
     if (subappEntries.length === 0) {
       // Implicit subapp: the app entry *is* the subapp definition.
@@ -88,12 +95,18 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
       pendingDeps.push({ subapp, specs: entry.dependsOn ?? [], configPath: `apps.${appName}.dependsOn` });
     } else {
       for (const [subName, subEntry] of subappEntries) {
+        const subCwd = resolvePath(subEntry.path ?? ".", appPath);
+        // A subapp that inherits the app directory is already covered by the
+        // app's own check; only a `path` of its own is a second place to be wrong.
+        if (subCwd !== appPath) {
+          dirChecks.push({ at: `apps.${appName}.subapps.${subName}.path`, dir: subCwd, under: appPath });
+        }
         const subapp = buildSubapp({
           id: `${appName}.${subName}`,
           appName,
           name: subName,
           implicit: false,
-          cwd: resolvePath(subEntry.path ?? ".", appPath),
+          cwd: subCwd,
           baseEnv: workspaceEnv,
           defaults: entry,
           entry: subEntry,
@@ -222,8 +235,67 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
     plugins: normalizePlugins(raw.plugins ?? [], rootDir),
     builtins: { git: raw.builtins?.git ?? true, health: raw.builtins?.health ?? true },
     limits,
-    warnings: templateWarnings(raw, new Set(indicators.map((i) => i.name))),
+    // Directories first: a `path` that points at nothing explains every other
+    // odd thing about that app, including a template token that never resolves.
+    warnings: [...directoryWarnings(dirChecks), ...templateWarnings(raw, new Set(indicators.map((i) => i.name)))],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Directories
+// ---------------------------------------------------------------------------
+
+interface DirectoryCheck {
+  /** Dotted config path of the `path` entry that named this directory. */
+  at: string;
+  /** The resolved, absolute directory. */
+  dir: string;
+  /** The app directory a subapp's `path` was resolved against, when there is one. */
+  under?: string;
+}
+
+/**
+ * Non-fatal diagnostics for a `path` that names nothing on disk — the likeliest
+ * mistake in a first config, and one that is otherwise invisible until the
+ * process layer reports it against the *shell's* name (see `spawn.ts`).
+ *
+ * Warnings and not `ConfigError` issues, and the choice is deliberate:
+ *
+ *  - A missing directory is a fact about the filesystem, not a defect in the
+ *    document. The same config is right before and after `git clone`, so making
+ *    the load fail would make `u8` refuse to run for a reason its author cannot
+ *    fix in the config — a workspace with one repo not cloned yet (or one
+ *    volume not mounted) would lose the other nine apps too.
+ *  - The codebase already refuses to do that for the analogous case: a plugin
+ *    that fails to load is disabled and reported, never fatal.
+ *  - The blast radius is where it belongs. `spawn.ts` now fails that one target
+ *    with `no such directory: <dir>`, so the missing directory costs exactly the
+ *    target that needs it and nothing else.
+ *
+ * These reach `daemon.log`, addressed by dotted config path — the form that
+ * says which line of `u8.jsonc` to edit. `u8 status` says the same thing again
+ * addressed by *target*, because the row it is about to draw reads `stopped`
+ * either way; it stats the directories the snapshot already carries rather than
+ * plumbing these strings across the wire.
+ */
+function directoryWarnings(checks: readonly DirectoryCheck[]): string[] {
+  const out: string[] = [];
+  const broken = new Set<string>();
+
+  for (const { at, dir, under } of checks) {
+    // Nothing can exist under a directory that does not: reporting the subapp
+    // too would bury the single line its author has to act on.
+    if (under !== undefined && broken.has(under) && isInside(dir, under)) continue;
+    const problem = describeDirectory(dir);
+    if (problem === undefined) continue;
+    broken.add(dir);
+    out.push(`${at}: ${problem}`);
+  }
+  return out;
+}
+
+function isInside(dir: string, parent: string): boolean {
+  return dir === parent || dir.startsWith(parent.endsWith(path.sep) ? parent : parent + path.sep);
 }
 
 // ---------------------------------------------------------------------------

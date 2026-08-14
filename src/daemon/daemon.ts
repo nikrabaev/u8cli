@@ -23,7 +23,13 @@
  *    saves all drive the same sequence, which swaps the workspace, the plugin
  *    host and every indicator binding — two of them at once would interleave
  *    over that state. One runs, the rest collapse into a single follow-up.
+ *  - **The state dir is the daemon's licence to run.** It holds the socket
+ *    clients reach us on, the pid file `u8 daemon stop` finds us by, and the
+ *    journal that makes a crash recoverable. Losing it means nothing can talk to
+ *    this daemon, address it, or clean up after it — so a watchdog notices and
+ *    shuts it down rather than leaving a process tree nobody can reach.
  */
+import { statSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
 
 import { findProfile, loadWorkspaceFrom } from "../config/index.js";
@@ -45,8 +51,8 @@ import type {
   WorkspaceHolder,
 } from "./contracts.js";
 import { buildSnapshot, createHandlers, type HandlerDeps, type ReloadOutcome } from "./handlers.js";
-import { createStateStore } from "./state.js";
-import { createSupervisor } from "./supervisor.js";
+import { createStateStore, createSupervisedJournal, supervisedFile } from "./state.js";
+import { createSupervisor, type ReconcileReport } from "./supervisor.js";
 import { configSignature, watchConfig } from "./watch.js";
 
 /** Window over which one connection's log-push budget is measured. */
@@ -79,6 +85,17 @@ export const RUN_IDLE_CEILING_MS = 60 * 60_000;
  * cap of exactly that would give up in the instant the kill lands.
  */
 const DRAIN_GRACE_MS = 2_000;
+
+/**
+ * How often the daemon checks that its state dir and socket are still there.
+ *
+ * A `stat` of two paths twice a second is nothing next to what it buys: a
+ * workspace whose state dir was deleted (`rm -rf ~/.u8/<id>`, a cleanup script,
+ * a tmp reaper) otherwise leaves a daemon listening on a socket no client can
+ * find, owning services no `u8` command can reach, while the next command
+ * cheerfully starts a second daemon and a second copy of every service.
+ */
+export const STATE_WATCH_MS = 500;
 
 export interface DaemonOptions {
   /** Path to `u8.jsonc`. Symlink-resolved before the state dir is derived. */
@@ -141,10 +158,17 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   const paths = statePaths(configPath);
   const workspace: WorkspaceHolder = { current: () => ws };
 
+  /**
+   * What this daemon owns, on disk. Built before the supervisor because the
+   * supervisor writes to it from its very first spawn, and read before anything
+   * is spawned so `reconcile` sees the *previous* daemon's set.
+   */
+  const journal = createSupervisedJournal({ file: supervisedFile(paths.dir), logger });
+
   // Before the plugin host, which hands it to the `health` built-in: the host is
   // built (and rebuilt on reload) from here, and a supervisor declared below it
   // would still be in its temporal dead zone at cold start.
-  const supervisor = createSupervisor({ workspace, paths, logger });
+  const supervisor = createSupervisor({ workspace, paths, logger, journal });
 
   /**
    * Plugin failures are pushed as they happen so a connected client can banner
@@ -217,6 +241,7 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   let server: RpcServer | undefined;
   let idleTimer: NodeJS.Timeout | undefined;
   let idleDeadline: number | undefined;
+  let stateTimer: NodeJS.Timeout | undefined;
   let activeRuns = 0;
   let listening = false;
   let shutdownPromise: Promise<void> | undefined;
@@ -266,6 +291,53 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     // Indicators, backoffs and this timer are all "background": the listening
     // socket is what keeps the daemon alive, and it is closed on shutdown.
     idleTimer.unref();
+  };
+
+  // --- state-dir watchdog ---------------------------------------------------
+
+  /**
+   * Identity of the socket this daemon bound, captured at `listen()`.
+   *
+   * The path alone is not enough: a second daemon that binds it (after the file
+   * was removed) leaves the path present but pointing at *its* socket, and this
+   * daemon would go on listening to a socket nobody can dial.
+   */
+  let socketId: string | undefined;
+
+  const identify = (file: string): string | undefined => {
+    try {
+      const st = statSync(file);
+      return `${st.dev}:${st.ino}`;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
+   * Why this exists rather than trusting the filesystem: a daemon whose state
+   * dir has been deleted is unreachable *and* unrecorded — clients cannot find
+   * its socket, `u8 daemon stop` cannot find its pid, and the journal that would
+   * let the next daemon adopt its services is gone. The next `u8` command
+   * therefore starts a second daemon and a second copy of every service, while
+   * this one keeps its process tree alive with no way to address it.
+   *
+   * Shutting down is the honest response: it stops the services it owns, the way
+   * `u8 daemon stop` would have, and leaves the workspace clean for the daemon
+   * that replaces it.
+   */
+  const watchState = (): void => {
+    if (shutdownPromise !== undefined) return;
+    const gone =
+      identify(paths.dir) === undefined
+        ? `its state directory ${paths.dir} was removed`
+        : identify(paths.socket) !== socketId
+          ? `its socket ${paths.socket} was removed or replaced`
+          : undefined;
+    if (gone === undefined) return;
+    logger.error(`${gone}; stopping the services it owns and exiting so nothing is left stranded`);
+    void shutdown("the state directory was removed").catch((err: unknown) => {
+      logger.error(`shutdown after losing the state directory failed: ${errorMessage(err)}`);
+    });
   };
 
   const track = (handle: RunHandle): void => {
@@ -473,6 +545,33 @@ export function createDaemon(opts: DaemonOptions): Daemon {
 
   const staleIds = (): TargetId[] => supervisor.states().filter((s) => s.stale).map((s) => s.targetId);
 
+  // --- recovery -------------------------------------------------------------
+
+  /**
+   * Says out loud what the recovery pass did.
+   *
+   * A daemon that quietly adopts or kills processes it did not start is
+   * indistinguishable from one that lost them: whoever reads `u8 daemon logs`
+   * after an unclean stop has to be able to see, per target, which processes
+   * came back under supervision and which were stopped because nothing could
+   * supervise them again. The adopted ones additionally carry the log caveat in
+   * their own service log, where `u8 logs <target>` shows it.
+   */
+  const reportRecovery = (report: ReconcileReport): void => {
+    for (const proc of report.adopted) {
+      logger.info(
+        `adopted ${proc.targetId} (pid ${proc.pid}) from a previous daemon: ${proc.reason} — ` +
+          "live log capture is not available for it until it is restarted",
+      );
+    }
+    for (const proc of report.reaped) {
+      logger.warn(`stopped ${proc.targetId} (pid ${proc.pid}) left by a previous daemon: ${proc.reason}`);
+    }
+    for (const proc of report.dropped) {
+      logger.debug(`ignoring the record of ${proc.targetId} (pid ${proc.pid}): ${proc.reason}`);
+    }
+  };
+
   // --- context & handlers ---------------------------------------------------
 
   const context: DaemonContext = {
@@ -532,6 +631,10 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     if (idleTimer !== undefined) clearTimeout(idleTimer);
     idleTimer = undefined;
     idleDeadline = undefined;
+    // Before the socket is closed and unlinked, which is otherwise exactly the
+    // change the watchdog exists to notice.
+    if (stateTimer !== undefined) clearInterval(stateTimer);
+    stateTimer = undefined;
     // Before anything is torn down: a save landing mid-shutdown must not start
     // re-binding indicators that are on their way out.
     stopWatching?.();
@@ -588,6 +691,12 @@ export function createDaemon(opts: DaemonOptions): Daemon {
 
     listening = false;
     if (server) await server.close().catch(() => undefined);
+    // After the last stop pass, so what it flushes is the empty set: a record
+    // left behind here would send the next daemon hunting for a pid that this
+    // one has just stopped.
+    await journal.dispose().catch((err: unknown) => {
+      logger.warn(`flushing the supervised-process journal failed: ${errorMessage(err)}`);
+    });
     await removeOwnPidFile(paths.pidFile, logger);
     logger.info("stopped");
     resolveStopped(reason);
@@ -598,6 +707,12 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   const start = async (): Promise<void> => {
     if (listening) return;
     await mkdir(paths.dir, { recursive: true });
+
+    // First of all, and before anything can be spawned: services a previous
+    // daemon left running are either taken back or stopped here, so no plugin,
+    // indicator or client ever sees a target reported `stopped` while its
+    // process is alive — and `u8 start` cannot double it.
+    reportRecovery(await supervisor.reconcile());
 
     // Before the registry starts: plugin providers have to be in place for the
     // first activation pass, or every plugin cell would sit empty until the
@@ -642,6 +757,11 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     server = rpc;
     await rpc.listen();
     listening = true;
+    socketId = identify(paths.socket);
+    stateTimer = setInterval(watchState, STATE_WATCH_MS);
+    // Background, like every other daemon timer: the listening socket is what
+    // keeps the process alive, and `doShutdown` clears this one first.
+    stateTimer.unref();
 
     // Last: a reload that ran before the socket was bound would have nobody to
     // tell, and `config.reloaded` is how a client learns its snapshot moved.
