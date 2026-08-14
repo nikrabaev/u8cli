@@ -14,6 +14,9 @@
  *  - **`--config` skips discovery entirely**, so a workspace can be driven from
  *    anywhere — and `--cwd` moves the discovery *and* the relative resolution of
  *    `--config` together, which is what makes them composable.
+ *  - **The `daemon` subcommands key off the state dir**, not the config file
+ *    ({@link daemonLocationOf}), so a daemon outlives the `u8.jsonc` it was
+ *    started with.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -23,7 +26,7 @@ import { attach, ensureDaemon, type AttachedClient } from "../daemon/index.js";
 import type { RpcClient } from "../ipc/index.js";
 import { ConfigError, isU8Error, U8Error } from "../util/errors.js";
 import type { Logger } from "../util/logger.js";
-import { statePaths, type StatePaths } from "../util/paths.js";
+import { CONFIG_FILENAME, statePaths, type StatePaths } from "../util/paths.js";
 import { createStyler, shouldUseColor, type Styler } from "./format.js";
 import { writeLine, type CliIo } from "./io.js";
 
@@ -70,9 +73,65 @@ export function configPathOf(ctx: CliContext): string {
   }
 }
 
-/** State-dir layout for this workspace — sockets, pid file, `daemon.log`. */
-export function statePathsOf(ctx: CliContext): StatePaths {
-  return statePaths(configPathOf(ctx));
+/** A workspace's state dir, and whether its config is still on disk. */
+export interface DaemonLocation {
+  /** State-dir layout for this workspace — socket, pid file, `daemon.log`. */
+  paths: StatePaths;
+  /** The config the state dir is derived from; it may no longer exist. */
+  configPath: string;
+  /** False when the config is gone and the paths came from where it used to be. */
+  configFound: boolean;
+}
+
+/**
+ * Where the `daemon` subcommands look, which is the state dir rather than the
+ * config file.
+ *
+ * A `u8.jsonc` that a branch switch or a checkout rename took away leaves a
+ * daemon still supervising the workspace's processes, and these three commands
+ * are the only way left to see or stop it — requiring the file would strand
+ * those services on their ports with nothing but `kill` to reach them. Nothing
+ * on disk is needed to find them: the workspace id is a hash of the config
+ * *path*, so the path the config used to have is enough.
+ *
+ * Only these commands get the fallback. Every other subcommand has to read the
+ * config to know what it is even acting on.
+ */
+export function daemonLocationOf(ctx: CliContext): DaemonLocation {
+  const assumed = assumedConfigPath(ctx);
+  const orphaned = statePaths(assumed);
+  // A daemon still holding this directory's socket outranks upward discovery.
+  // Otherwise a nested workspace whose config went away is answered for by its
+  // *parent's* daemon: success reported about processes it never touched, and a
+  // `stop` that takes down the wrong one.
+  if (!fs.existsSync(assumed) && fs.existsSync(orphaned.socket)) {
+    return { paths: orphaned, configPath: assumed, configFound: false };
+  }
+  try {
+    const configPath = configPathOf(ctx);
+    return { paths: statePaths(configPath), configPath, configFound: true };
+  } catch (err) {
+    if (!isU8Error(err) || err.code !== "CONFIG_NOT_FOUND") throw err;
+    return { paths: orphaned, configPath: assumed, configFound: false };
+  }
+}
+
+/**
+ * Where this invocation's `u8.jsonc` would be, whether or not it is there. The
+ * directory is symlink-resolved because the id hashes the *real* path (`/tmp`
+ * is a symlink on macOS) — but the file itself is not required to exist, which
+ * is the whole point.
+ */
+function assumedConfigPath(ctx: CliContext): string {
+  const given = ctx.globals.config;
+  const candidate = given === undefined ? path.join(ctx.cwd, CONFIG_FILENAME) : path.resolve(ctx.cwd, given);
+  let dir: string;
+  try {
+    dir = fs.realpathSync(path.dirname(candidate));
+  } catch {
+    dir = path.dirname(candidate);
+  }
+  return path.join(dir, path.basename(candidate));
 }
 
 /**

@@ -500,6 +500,93 @@ describe("indicators, plugins, limits, templates", () => {
   });
 });
 
+/**
+ * SPEC §4: a bad template token "warns at load". Warnings are non-fatal by
+ * construction — the row renders a red `{ns@name!}` marker — so they ride on the
+ * normalized workspace instead of aborting the load like a `ConfigError` issue.
+ */
+describe("template warnings", () => {
+  it("says nothing about a clean config", () => {
+    const { ws } = loadFixture({
+      apps: { db: { path: ".", template: "{app@status} {git@branch} {health@status}" } },
+      indicators: { version: { cmd: "echo 1" } },
+      templates: { subapp: "{app@name:pad(10)} {x@version:dim}" },
+    });
+    expect(ws.warnings).toEqual([]);
+  });
+
+  it("collects parser warnings from workspace and per-entry templates, and still loads", () => {
+    const { ws } = loadFixture({
+      templates: { app: "{app@name", subapp: "{app@status:pad(x)}" },
+      apps: {
+        platform: {
+          path: ".",
+          template: "{app nam}",
+          subapps: { shell: { template: "{app@name:nope}" } },
+        },
+      },
+    });
+
+    expect(ws.subapps.map((s) => s.id)).toEqual(["platform.shell"]);
+    expect(ws.warnings).toEqual([
+      'templates.app: unterminated token "{app@name"',
+      'templates.subapp: pad() expects an integer width between 0 and 1000 in "{app@status:pad(x)}"',
+      'apps.platform.template: malformed token "{app nam}" (expected {ns@indicator})',
+      'apps.platform.subapps.shell.template: unknown modifier "nope" in "{app@name:nope}"',
+    ]);
+  });
+
+  it("flags a token whose namespace is neither core nor a declared plugin", () => {
+    const { ws } = loadFixture({
+      apps: { db: { path: "." } },
+      templates: { app: "{gti@branch}" },
+    });
+    expect(ws.warnings).toHaveLength(1);
+    expect(ws.warnings[0]).toContain("templates.app");
+    expect(ws.warnings[0]).toContain("gti");
+  });
+
+  it("accepts the namespace of a declared plugin and of an enabled built-in", () => {
+    const { ws } = loadFixture({
+      apps: { db: { path: "." } },
+      plugins: ["./plugins/deploy.ts", "@acme/metrics", "u8-plugin-notify", "./tools/audit/index.js"],
+      templates: {
+        app: "{deploy@state} {metrics@rps} {notify@last} {audit@score} {git@branch} {health@status}",
+      },
+    });
+    expect(ws.warnings).toEqual([]);
+  });
+
+  it("stops trusting a built-in namespace the config turned off", () => {
+    const { ws } = loadFixture({
+      apps: { db: { path: "." } },
+      builtins: { git: false },
+      templates: { app: "{git@branch} {health@status}" },
+    });
+    expect(ws.warnings).toHaveLength(1);
+    expect(ws.warnings[0]).toContain("{git@branch}");
+  });
+
+  it("flags an x@ token that names no declared indicator", () => {
+    const { ws } = loadFixture({
+      apps: { db: { path: "." } },
+      indicators: { version: { cmd: "echo 1" } },
+      templates: { app: "{x@version} {x@versoin}" },
+    });
+    expect(ws.warnings).toHaveLength(1);
+    expect(ws.warnings[0]).toContain("versoin");
+  });
+
+  it("never lets a template typo stop a workspace whose config is otherwise fatal", () => {
+    const e = configErrorFrom(() =>
+      loadFixture({ apps: { db: { path: ".", dependsOn: ["ghost"] } }, templates: { app: "{gti@x}" } }),
+    );
+    expect(issueLines(e)).toEqual([
+      'apps.db.dependsOn[0]: unknown target "ghost" — expected an app name or "app.subapp"',
+    ]);
+  });
+});
+
 describe("workspace identity", () => {
   it("reports the real config path, root dir and a stable id", () => {
     const { dir, ws } = loadFixture({ name: "demo", apps: { db: { path: "." } } });

@@ -230,7 +230,7 @@ class Registry implements IndicatorRegistry {
   private upsert(reg: IndicatorRegistration): ProviderEntry {
     const scope = reg.def.scope ?? "subapp";
     const key = providerKey(reg.ns, reg.name, scope);
-    const update = resolveUpdate(reg.def);
+    const update = resolveUpdate(reg.def, `${reg.ns}@${reg.name}`, this.logger);
     if (reg.def.value === undefined && reg.def.subscribe === undefined) {
       this.logger.warn(`${reg.ns}@${reg.name} defines neither value() nor subscribe(); it will stay empty`);
     } else if (reg.def.subscribe !== undefined && update.mode !== "event") {
@@ -648,9 +648,63 @@ function execIn(
     });
 }
 
-function resolveUpdate(def: IndicatorDef): IndicatorUpdate {
-  if (def.update) return def.update;
-  return def.value ? { mode: "poll", intervalMs: DEFAULT_POLL_INTERVAL_MS } : { mode: "event" };
+/**
+ * Normalizes `update` into the tagged union the scheduler branches on.
+ *
+ * Two spellings are in the wild: the `{ mode }` union of the plugin API and the
+ * shorthand SPEC §6 documents (`{ poll: 5000 }`, `{ event: true }`,
+ * `{ static: true }`). Both are honoured, because a plugin copied from the spec
+ * would otherwise fall through to "evaluate once and never again" — the worst
+ * kind of failure, since the cell keeps rendering a plausible value that has
+ * quietly stopped being true. A third spelling is loud rather than silent.
+ */
+function resolveUpdate(def: IndicatorDef, label: string, logger: Logger): IndicatorUpdate {
+  const fallback: IndicatorUpdate = def.value
+    ? { mode: "poll", intervalMs: DEFAULT_POLL_INTERVAL_MS }
+    : { mode: "event" };
+  if (def.update === undefined || def.update === null) return fallback;
+  const known = knownUpdate(def.update);
+  if (known) return known;
+  logger.warn(
+    `${label} declares an unrecognized update ${describeUpdate(def.update)}; expected ` +
+      `{ mode: "poll", intervalMs } | { mode: "event" } | { mode: "static" }, or the shorthand ` +
+      `{ poll: ms } | { event: true } | { static: true } — falling back to ` +
+      (fallback.mode === "poll" ? `poll every ${fallback.intervalMs}ms` : fallback.mode),
+  );
+  return fallback;
+}
+
+/**
+ * Undefined when the value matches neither spelling — the caller warns. Takes
+ * `unknown`: this runs against whatever a plugin actually exported, which the
+ * type system only ever saw if that plugin was written in TypeScript.
+ */
+function knownUpdate(raw: unknown): IndicatorUpdate | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const fields = raw as Record<string, unknown>;
+  const mode = fields["mode"];
+  if (mode === "poll") return pollUpdate(fields["intervalMs"]);
+  if (mode === "event") return { mode: "event" };
+  if (mode === "static") return { mode: "static" };
+  if (fields["poll"] !== undefined) return pollUpdate(fields["poll"]);
+  if (fields["event"] === true) return { mode: "event" };
+  if (fields["static"] === true) return { mode: "static" };
+  return undefined;
+}
+
+/** An interval that is not a positive number would make `setInterval` busy-loop. */
+function pollUpdate(intervalMs: unknown): IndicatorUpdate | undefined {
+  if (typeof intervalMs !== "number" || !Number.isFinite(intervalMs) || intervalMs <= 0) return undefined;
+  return { mode: "poll", intervalMs };
+}
+
+/** Best-effort: the offending value is arbitrary, and may not be serializable. */
+function describeUpdate(raw: unknown): string {
+  try {
+    return JSON.stringify(raw) ?? String(raw);
+  } catch {
+    return String(raw);
+  }
 }
 
 /** A poll provider must give up inside its own interval or ticks pile up. */

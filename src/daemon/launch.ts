@@ -148,7 +148,8 @@ export interface AttachedClient {
  * `ensureDaemon` + `client.attach`, with the reconnect story the transport does
  * not own: the IPC client can re-open a socket, but the daemon has no memory of
  * a connection that died, so the attach and every log subscription are re-sent
- * here. A daemon that idle-exited in the meantime is spawned again.
+ * here. A daemon that died is spawned again; a daemon that announced its own
+ * shutdown is waited for, never restarted.
  */
 export async function attach(opts: AttachOptions): Promise<AttachedClient> {
   const logger = opts.logger ?? nullLogger;
@@ -168,6 +169,17 @@ export async function attach(opts: AttachOptions): Promise<AttachedClient> {
   let snapshot: Snapshot;
   let closed = false;
   let recovering = false;
+  /**
+   * Set by the daemon's own `daemon.shutdown` announcement, which is the only
+   * thing that tells a deliberate stop apart from a crash — on the socket the
+   * two look identical.
+   *
+   * It downgrades recovery to connect-only. Spawning here would undo the very
+   * thing that was asked for: `u8 daemon stop` (or a SIGTERM) with a dashboard
+   * open would report success and get a fresh daemon a second later. Whoever
+   * *does* bring one back is still worth re-attaching to, and that clears it.
+   */
+  let announcedStop = false;
 
   const sendAttach = async (): Promise<Snapshot> => {
     const next = await client.request("client.attach", { clientVersion, interactive: opts.interactive });
@@ -185,9 +197,11 @@ export async function attach(opts: AttachOptions): Promise<AttachedClient> {
         await sleepDetached(backoff(attempt));
         if (closed) return;
         try {
-          await connectOrSpawn(client, location, opts);
+          if (announcedStop) await client.connect();
+          else await connectOrSpawn(client, location, opts);
           await handshake(client, logger);
           const fresh = await sendAttach();
+          announcedStop = false;
           logger.debug(`re-attached after ${attempt} attempt(s)`);
           emit(reattachCbs, fresh, logger);
           return;
@@ -199,8 +213,11 @@ export async function attach(opts: AttachOptions): Promise<AttachedClient> {
       if (closed) return;
       const failure = new U8Error(
         "DAEMON_UNREACHABLE",
-        `lost the daemon on ${location.paths.socket} and could not re-attach after ${attempts} attempts: ` +
-          errorMessage(last),
+        announcedStop
+          ? `the daemon on ${location.paths.socket} was stopped and nothing took its place after ` +
+            `${attempts} attempts — any u8 command starts a new one`
+          : `lost the daemon on ${location.paths.socket} and could not re-attach after ${attempts} attempts: ` +
+            errorMessage(last),
       );
       logger.warn(failure.message);
       emit(lostCbs, failure, logger);
@@ -209,11 +226,19 @@ export async function attach(opts: AttachOptions): Promise<AttachedClient> {
     }
   };
 
+  // Before the first connect, and kept across reconnects: the announcement
+  // arrives moments before the socket closes, and missing it is what turns a
+  // stop into a respawn.
+  const offShutdown = client.on("daemon.shutdown", () => {
+    announcedStop = true;
+  });
+
   try {
     await connectOrSpawn(client, location, opts);
     await handshake(client, logger);
     snapshot = await sendAttach();
   } catch (err) {
+    offShutdown();
     await client.close().catch(() => undefined);
     throw err;
   }
@@ -239,6 +264,7 @@ export async function attach(opts: AttachOptions): Promise<AttachedClient> {
     onLost: (cb) => subscription(lostCbs, cb),
     async close(): Promise<void> {
       closed = true;
+      offShutdown();
       await client.close();
     },
   };

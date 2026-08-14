@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { RawWorkspaceConfig } from "../../src/config/index.js";
 import type { IndicatorRegistry } from "../../src/daemon/contracts.js";
 import { createIndicatorRegistry } from "../../src/indicators/index.js";
-import type { IndicatorResult } from "../../src/plugin/types.js";
+import type { IndicatorResult, IndicatorUpdate } from "../../src/plugin/types.js";
 import {
   FIXTURE_DIRS,
   changeRecorder,
@@ -201,6 +201,125 @@ describe("update modes", () => {
 
     await registry.stop();
     expect([...disposed].sort()).toEqual([...SUBAPPS].sort());
+  });
+});
+
+/**
+ * SPEC §6 documents `{ poll: 5000 }` / `{ event: true }` / `{ static: true }`,
+ * while the implemented union is `{ mode, intervalMs }`. A plugin copied from
+ * the spec must work, not freeze on its first value with no diagnostic.
+ */
+describe("update spellings", () => {
+  /** The spec spelling is not in `IndicatorUpdate`; a JS plugin author writes it anyway. */
+  const spelled = (update: Record<string, unknown>): IndicatorUpdate => update as unknown as IndicatorUpdate;
+
+  it("polls a provider whose update is spelled { poll: ms }", async () => {
+    const calls = new Map<string, number>();
+    registry.register({
+      ns: "t",
+      name: "specpoll",
+      def: {
+        scope: "subapp",
+        update: spelled({ poll: 40 }),
+        value: (ctx) => {
+          const id = ctx.target?.id ?? "?";
+          const seen = (calls.get(id) ?? 0) + 1;
+          calls.set(id, seen);
+          return String(seen);
+        },
+      },
+    });
+
+    await registry.start();
+    await delay(220);
+
+    // ~5 ticks of 40 ms per owner; a provider stuck on its first value shows 1.
+    for (const id of SUBAPPS) expect(calls.get(id) ?? 0).toBeGreaterThanOrEqual(3);
+    expect(logger.warnings.filter((w) => w.includes("t@specpoll"))).toEqual([]);
+  });
+
+  it("treats { event: true } as event mode, subscription and all", async () => {
+    const pulled: string[] = [];
+    const subscribed: string[] = [];
+    registry.register({
+      ns: "t",
+      name: "specevent",
+      def: {
+        scope: "subapp",
+        update: spelled({ event: true }),
+        value: (ctx) => {
+          pulled.push(ctx.target?.id ?? "?");
+          return "pulled";
+        },
+        subscribe: (ctx, emit) => {
+          subscribed.push(ctx.target?.id ?? "?");
+          emit("pushed");
+        },
+      },
+    });
+
+    await registry.start();
+
+    expect([...subscribed].sort()).toEqual([...SUBAPPS].sort());
+    expect(pulled).toEqual([]);
+    expect(registry.get("t", "specevent", "gateway")?.value).toBe("pushed");
+    expect(logger.warnings.filter((w) => w.includes("t@specevent"))).toEqual([]);
+  });
+
+  it("treats { static: true } as static mode, so refresh() never re-pulls it", async () => {
+    const calls: string[] = [];
+    registry.register({
+      ns: "t",
+      name: "specstatic",
+      def: {
+        scope: "subapp",
+        update: spelled({ static: true }),
+        value: (ctx) => {
+          calls.push(ctx.target?.id ?? "?");
+          return "constant";
+        },
+      },
+    });
+
+    await registry.start();
+    expect([...calls].sort()).toEqual([...SUBAPPS].sort());
+
+    registry.refresh();
+    await delay(80);
+    expect(calls).toHaveLength(SUBAPPS.length);
+    expect(logger.warnings.filter((w) => w.includes("t@specstatic"))).toEqual([]);
+  });
+
+  it("warns, naming the provider, about an update it cannot recognize", async () => {
+    registry.register({
+      ns: "t",
+      name: "weird",
+      def: { scope: "subapp", update: spelled({ tick: 40 }), value: () => "v" },
+    });
+
+    await registry.start();
+
+    const warning = logger.warnings.find((w) => w.includes("t@weird"));
+    expect(warning).toBeDefined();
+    expect(warning).toContain("tick");
+    // Loud, but still useful: it falls back to the default poll rather than
+    // going inert, so the cell is never a permanently stale value.
+    await waitFor(() => registry.get("t", "weird", "gateway")?.value === "v", "t@weird to be pulled");
+  });
+
+  it("rejects a poll interval that is not a positive number instead of busy-looping", async () => {
+    registry.register({
+      ns: "t",
+      name: "nointerval",
+      def: { scope: "subapp", update: spelled({ mode: "poll" }), value: () => "v" },
+    });
+
+    await registry.start();
+
+    // `setInterval(fn, undefined)` fires every millisecond forever; the default
+    // interval plus a warning is the only sane reading of a missing one.
+    expect(logger.warnings.find((w) => w.includes("t@nointerval"))).toBeDefined();
+    await waitFor(() => registry.get("t", "nointerval", "gateway")?.value === "v", "t@nointerval");
   });
 });
 

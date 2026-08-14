@@ -116,6 +116,19 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   // Throws for an unreadable or invalid config: a daemon without a workspace has
   // nothing to serve, and the caller (entry.ts) reports it before forking off.
   let ws = loadWorkspaceFrom(opts.configPath);
+
+  /**
+   * SPEC §4: an unknown or malformed template token "warns at load". The
+   * workspace only *collects* those warnings — this is the one place a load
+   * happens, at cold start and again on every reload, so it is where they are
+   * said out loud (`u8 daemon logs`). Non-fatal by design: the token still
+   * renders as a red `{ns@name!}` marker and the workspace still serves.
+   */
+  const reportConfigWarnings = (loaded: NormalizedWorkspace): void => {
+    for (const warning of loaded.warnings) logger.warn(`config: ${warning}`);
+  };
+  reportConfigWarnings(ws);
+
   /** Symlink-resolved: the workspace id, the state dir and every reload use it. */
   const configPath = ws.configPath;
   /**
@@ -406,6 +419,7 @@ export function createDaemon(opts: DaemonOptions): Daemon {
 
     ws = next;
     configError = undefined;
+    reportConfigWarnings(ws);
     if (!findProfile(ws, activeProfile)) {
       const fallback = ws.defaultProfile;
       logger.warn(`active profile "${activeProfile}" is gone; falling back to "${fallback}"`);

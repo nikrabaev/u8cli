@@ -24,7 +24,11 @@
   "files": [
     "dist",
     "schema.json",
-    "README.md"
+    "README.md",
+    "docs/CONFIG.md",
+    "docs/PLUGINS.md",
+    "docs/SPEC.md",
+    "examples"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/gen-schema.js",

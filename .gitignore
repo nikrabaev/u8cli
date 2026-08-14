@@ -5,3 +5,4 @@ dist/
 coverage/
 .u8-test/
 *.tgz
+.idea/

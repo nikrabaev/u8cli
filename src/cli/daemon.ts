@@ -8,6 +8,10 @@
  * that nobody is there. `daemon logs` does not even need that much — the log is
  * a file in the state dir, readable while the daemon is down, which is exactly
  * when it matters.
+ *
+ * And none of them require `u8.jsonc` to still exist: these are the commands a
+ * user reaches for *because* the workspace changed under a running daemon, so
+ * they resolve the state dir through {@link daemonLocationOf}.
  */
 import fs from "node:fs";
 import fsp from "node:fs/promises";
@@ -16,8 +20,9 @@ import { pingDaemon } from "../daemon/index.js";
 import { createRpcClient, type RpcClient } from "../ipc/index.js";
 import { readLastLines } from "../process/index.js";
 import { isU8Error } from "../util/errors.js";
+import { CONFIG_FILENAME } from "../util/paths.js";
 import { formatUptime } from "../indicators/index.js";
-import { configPathOf, statePathsOf, type CliContext } from "./context.js";
+import { daemonLocationOf, type CliContext, type DaemonLocation } from "./context.js";
 import { EXIT_FAILURE, EXIT_INTERRUPTED } from "./errors.js";
 import { formatDuration, renderTable } from "./format.js";
 import { writeLine, writeLines } from "./io.js";
@@ -34,11 +39,13 @@ export const DEFAULT_DAEMON_LOG_LINES = 50;
 const TAIL_POLL_MS = 200;
 
 export async function daemonStatusCommand(ctx: CliContext): Promise<number> {
-  const paths = statePathsOf(ctx);
+  const location = daemonLocationOf(ctx);
+  const paths = location.paths;
   const client = await connectExisting(paths.socket);
   if (!client) {
     writeLine(ctx.io.stdout, `daemon: ${ctx.style.dim("not running")}`);
     writeLine(ctx.io.stdout, ctx.style.dim(`  socket ${paths.socket}`));
+    explainMissingConfig(ctx, location);
     // Non-zero so `u8 daemon status && …` means what it looks like it means.
     return EXIT_FAILURE;
   }
@@ -74,12 +81,14 @@ function idleExit(inMs: number | null): string {
 }
 
 export async function daemonStopCommand(ctx: CliContext): Promise<number> {
-  const paths = statePathsOf(ctx);
+  const location = daemonLocationOf(ctx);
+  const paths = location.paths;
   const client = await connectExisting(paths.socket);
   if (!client) {
     // Idempotent on purpose: "make sure it is stopped" is the actual intent, and
     // a script that runs it twice should not fail the second time.
     writeLine(ctx.io.stdout, ctx.style.dim("no daemon running for this workspace"));
+    explainMissingConfig(ctx, location);
     return 0;
   }
 
@@ -112,14 +121,13 @@ export interface DaemonLogsOptions {
 }
 
 export async function daemonLogsCommand(ctx: CliContext, opts: DaemonLogsOptions): Promise<number> {
-  const paths = statePathsOf(ctx);
-  // Resolves (and validates) the config the same way every other command does,
-  // so a missing workspace fails with CONFIG_NOT_FOUND rather than an empty log.
-  configPathOf(ctx);
+  const location = daemonLocationOf(ctx);
+  const paths = location.paths;
 
   const lines = opts.lines ?? DEFAULT_DAEMON_LOG_LINES;
   if (!fs.existsSync(paths.daemonLog)) {
     writeLine(ctx.io.stderr, ctx.style.dim(`no daemon log yet at ${paths.daemonLog}`));
+    explainMissingConfig(ctx, location);
     return opts.follow === true ? 0 : EXIT_FAILURE;
   }
 
@@ -133,6 +141,25 @@ export async function daemonLogsCommand(ctx: CliContext, opts: DaemonLogsOptions
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Says why there was nothing to report, when the reason is that this state dir
+ * was derived from a config that is not there.
+ *
+ * Without it "no daemon running for this workspace" is indistinguishable from
+ * "nothing to clean up" — and the daemon the user is after may well be alive
+ * under the *old* path, since moving `u8.jsonc` moves the workspace id with it.
+ */
+function explainMissingConfig(ctx: CliContext, location: DaemonLocation): void {
+  if (location.configFound) return;
+  writeLine(
+    ctx.io.stderr,
+    ctx.style.dim(
+      `no ${CONFIG_FILENAME} at ${location.configPath} — run \`u8 init\` to create one, or ` +
+        `\`u8 daemon stop --config <path>\` naming the config the daemon was started with`,
+    ),
+  );
+}
 
 /** A client for a daemon that already exists, or `undefined` if nobody answers. */
 async function connectExisting(socketPath: string): Promise<RpcClient | undefined> {

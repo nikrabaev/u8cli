@@ -173,9 +173,11 @@ A dependency counts as ready when:
 wins, and the rule above is the fallback. See [PLUGINS.md](PLUGINS.md#readiness).)
 
 Readiness is polled every 100 ms up to that dependency's `readyTimeout` (default 60 s). On timeout
-the dependent is **not** started, is reported `skipped` with the reason, and blocks its own
-dependents in turn — one unready service never silently drops half a stack. Only dependencies that
-are part of the same run are waited on.
+the dependent is **not** started and is reported `failed` with the reason
+(`dependency "db" did not become ready within 60000ms`); it blocks its own dependents in turn, which
+are reported `skipped` (`not started: dependency "api" never became ready`). A timed-out dependency
+therefore fails the run — `u8 start` exits 1 — rather than silently dropping half a stack. Only
+dependencies that are part of the same run are waited on.
 
 `u8 stop` walks the same graph in reverse.
 

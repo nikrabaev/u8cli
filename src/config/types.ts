@@ -143,6 +143,14 @@ export interface NormalizedWorkspace {
   plugins: PluginRef[];
   builtins: { git: boolean; health: boolean };
   limits: Limits;
+  /**
+   * Non-fatal load diagnostics, `path: message` per line — today, template
+   * typos (SPEC §4). Deliberately *not* `ConfigError` issues: a bad token
+   * renders as a red `{ns@name!}` marker and must never stop a workspace
+   * loading, so these are carried for the daemon and CLI to surface instead of
+   * thrown. Empty when the config is clean.
+   */
+  warnings: string[];
 }
 
 export const DEFAULT_LIMITS: Limits = {

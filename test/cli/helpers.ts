@@ -116,6 +116,33 @@ export function createWorkspace(
   return ws;
 }
 
+/**
+ * A second workspace *inside* another one, tracked for teardown like any other.
+ * The overlap is the point: upward discovery reaches the parent's `u8.jsonc`
+ * from here, so this is what tells a command addressing the inner workspace
+ * apart from one that merely found the outer one.
+ */
+export function createNestedWorkspace(parent: Workspace, rel: string, config: object): Workspace {
+  const dir = path.join(parent.dir, rel);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const configPath = path.join(dir, "u8.jsonc");
+  const write = (value: object): void => {
+    fs.writeFileSync(configPath, JSON.stringify(value, null, 2), "utf8");
+  };
+  write(config);
+
+  const ws: Workspace = {
+    dir,
+    configPath,
+    paths: statePaths(configPath),
+    file: (r: string) => path.join(dir, r),
+    rewrite: write,
+  };
+  workspaces.push(ws);
+  return ws;
+}
+
 /** An empty directory, for the cases that must run without a workspace at all. */
 export function createEmptyDir(): Workspace {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "u8-cli-empty-")));

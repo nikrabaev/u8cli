@@ -30,8 +30,9 @@ export default definePlugin({
 ```
 
 `definePlugin` is an identity function that pins the types; the shape is what matters, so a plain
-object works too. The definition may be the default export, the module itself, or a transpiled
-CommonJS `exports.default` — all three are unwrapped.
+object works too — and that is the portable form, because importing it requires `u8cli` to be
+installed in the workspace (see [Resolution](#resolution)). The definition may be the default export,
+the module itself, or a transpiled CommonJS `exports.default` — all three are unwrapped.
 
 `name` must match `^[A-Za-z0-9][A-Za-z0-9_-]*$` and may not be `app` or `x` (reserved for the core
 commands and config-defined indicators). Two plugins claiming the same name is an error for the
@@ -47,6 +48,13 @@ second one.
 `.ts` (and `.mts`, `.cts`) files go through [jiti](https://github.com/unjs/jiti), so a TypeScript
 plugin needs no build step, and `./neighbour.js` specifiers written the NodeNext way resolve to their
 `.ts` sources. Everything else is a plain dynamic `import`.
+
+A local plugin file's **own** imports resolve like any other Node module: from that file's directory
+upward — the workspace's `node_modules`, never u8cli's. Importing `u8cli/plugin` therefore only works
+where the workspace itself has `u8cli` installed (`npm i -D u8cli`); a plugin dropped into a
+workspace that has no `node_modules` has to be import-free, which it can be, because a plugin may be
+a plain object. Type-only imports are the exception: they are erased before the file runs, so they
+cost nothing at runtime — but your editor and `tsc` still need the install to resolve them.
 
 Load order is **built-ins first, then `plugins` in config order**, and load order is the contract: it
 decides the sequence hooks run in and which readiness verdict wins.
@@ -337,13 +345,11 @@ cache, editing a plugin *file* does not reload it — stop the daemon (`u8 daemo
 
 ## A complete plugin
 
-`plugins/ports.ts` — an indicator, a command, a hook and lifecycle, in one file. This is the file
-verbatim as it was run against a copy of `examples/demo`; the transcript below is that run.
+`plugins/ports.ts` — an indicator, a command, a hook and lifecycle, in one file. It imports nothing,
+so it runs in a copy of `examples/demo` as-is, with no `node_modules` and no install step; this is
+the file verbatim as it was run there, and the transcript below is that run.
 
 ```ts
-import { definePlugin } from "u8cli/plugin";
-import type { CommandContext, TargetInfo } from "u8cli/plugin";
-
 /** Connects to a TCP port and exits 0 when something answers. */
 const probe = (port: string) =>
   `node -e 'const s=require("net").connect(${port},"127.0.0.1");` +
@@ -351,19 +357,12 @@ const probe = (port: string) =>
   `s.setTimeout(1000,()=>{s.destroy();process.exit(1)})'`;
 
 /** A target opts in by declaring PORT in its env. */
-function portOf(target: TargetInfo | undefined): string | undefined {
-  const port = target?.env["PORT"];
+function portOf(env: Record<string, string> | undefined): string | undefined {
+  const port = env?.["PORT"];
   return port !== undefined && /^\d+$/.test(port) ? port : undefined;
 }
 
-async function check(ctx: CommandContext, port: string): Promise<void> {
-  ctx.log(`probing :${port}`);
-  const res = await ctx.exec(probe(port), { timeoutMs: 3_000, env: { ...ctx.target.env } });
-  if (!res.ok) throw new Error(`nothing is listening on :${port}`);
-  ctx.log(`:${port} is open`);
-}
-
-export default definePlugin({
+export default {
   name: "ports",
 
   indicators: {
@@ -372,7 +371,7 @@ export default definePlugin({
       description: "Whether the target's $PORT accepts connections",
       update: { mode: "poll", intervalMs: 5_000 },
       async value(ctx) {
-        const port = portOf(ctx.target);
+        const port = portOf(ctx.target?.env);
         if (port === undefined) return "";
         if (ctx.service?.status !== "running") return { value: `:${port}`, tone: "muted" };
         const res = await ctx.exec(probe(port), { timeoutMs: 2_000 });
@@ -385,11 +384,14 @@ export default definePlugin({
     check: {
       kind: "task",
       description: "Fail unless the target's $PORT is listening",
-      appliesTo: (target) => portOf(target) !== undefined,
+      appliesTo: (target) => portOf(target.env) !== undefined,
       async run(ctx) {
-        const port = portOf(ctx.target);
+        const port = portOf(ctx.target.env);
         if (port === undefined) return;
-        await check(ctx, port);
+        ctx.log(`probing :${port}`);
+        const res = await ctx.exec(probe(port), { timeoutMs: 3_000, env: { ...ctx.target.env } });
+        if (!res.ok) throw new Error(`nothing is listening on :${port}`);
+        ctx.log(`:${port} is open`);
       },
     },
   },
@@ -397,7 +399,7 @@ export default definePlugin({
   hooks: {
     "app:start": {
       async post(ctx) {
-        const port = portOf(ctx.target);
+        const port = portOf(ctx.target.env);
         if (port === undefined || ctx.result?.ok !== true) return;
         ctx.logger.info(`${ctx.target.id} started; :${port} should come up`);
       },
@@ -405,7 +407,7 @@ export default definePlugin({
   },
 
   setup(ctx) {
-    const withPort = ctx.targets.filter((t) => portOf(t) !== undefined);
+    const withPort = ctx.targets.filter((t) => portOf(t.env) !== undefined);
     ctx.store.set("watched", withPort.map((t) => t.id));
     ctx.logger.info(`watching ports for ${withPort.length} targets`);
   },
@@ -413,8 +415,12 @@ export default definePlugin({
   teardown() {
     // Nothing long-lived here; a plugin holding timers or watchers frees them now.
   },
-});
+};
 ```
+
+In a workspace that *does* have `u8cli` installed, prefer the typed form: wrap the object in
+`definePlugin(…)` and annotate the callbacks from `u8cli/plugin`. The example is import-free only so
+that it runs with no install.
 
 Wire it up:
 
@@ -430,32 +436,32 @@ And run it:
 
 ```console
 $ u8 start
-✓ db                ok 10ms
-✓ platform.shell    ok 10ms
-✓ api               ok 5ms
-✓ platform.auth-mfe ok 1ms
+✓ db                ok 11ms
+✓ platform.shell    ok 11ms
+✓ api               ok 1ms
+✓ platform.auth-mfe ok 2ms
 …
 
 $ u8 status
 u8-demo · profile full · 4/4 running
-  running  db               healthy   19s   -
-  running  api              healthy   17s   3000 :3000
+  running  db               healthy   14s   -
+  running  api              healthy   12s   3000 :3000
 platform             platform
-  running  shell            healthy   20s   3100 :3100
-  running  auth-mfe         healthy   12s   3101 :3101
+  running  shell            healthy   15s   3100 :3100
+  running  auth-mfe         healthy   7s    3101 :3101
 
 $ u8 run ports:check
 - db                skipped — command "ports:check" does not apply to this target
-✓ platform.auth-mfe ok 36ms
-✓ platform.shell    ok 37ms
-✓ api               ok 37ms
+✓ api               ok 40ms
+✓ platform.shell    ok 40ms
+✓ platform.auth-mfe ok 41ms
 
 TARGET             RESULT     TIME  DETAIL
 db                 - skipped  0ms   command "ports:check" does not apply to this target
-api                ✓ ok       37ms
-platform.shell     ✓ ok       37ms
-platform.auth-mfe  ✓ ok       36ms
-ports:check: 1 skipped, 3 ok in 37ms (run mssicuna-6c351adc)
+api                ✓ ok       40ms
+platform.shell     ✓ ok       40ms
+platform.auth-mfe  ✓ ok       41ms
+ports:check: 1 skipped, 3 ok in 41ms (run msspr9xj-61ee1ad7)
 ```
 
 `db` has no `PORT`, so `appliesTo` skipped it and `{ports@open}` is blank for it. (The `platform`
@@ -465,10 +471,10 @@ up in the daemon log:
 
 ```console
 $ u8 daemon logs | grep ports
-2026-08-14T05:29:50.398Z INFO  [daemon:ports] watching ports for 3 targets
-2026-08-14T05:29:50.444Z INFO  [daemon:ports] platform.shell started; :3100 should come up
-2026-08-14T05:29:52.701Z INFO  [daemon:ports] api started; :3000 should come up
-2026-08-14T05:29:57.899Z INFO  [daemon:ports] platform.auth-mfe started; :3101 should come up
+2026-08-14T08:56:55.756Z INFO  [daemon:ports] watching ports for 3 targets
+2026-08-14T08:56:55.794Z INFO  [daemon:ports] platform.shell started; :3100 should come up
+2026-08-14T08:56:58.025Z INFO  [daemon:ports] api started; :3000 should come up
+2026-08-14T08:57:03.185Z INFO  [daemon:ports] platform.auth-mfe started; :3101 should come up
 ```
 
 ### Publishing it as a package
@@ -488,8 +494,10 @@ it and export the object directly.
 
 ## Debugging
 
-- `U8_LOG_LEVEL=debug u8 daemon stop && u8 status` — restart the daemon with verbose logging, then
-  `u8 daemon logs -f`. Your `ctx.logger` lines appear as `[daemon:<plugin>]`.
+- `u8 daemon stop && U8_LOG_LEVEL=debug u8 status` — restart the daemon with verbose logging, then
+  `u8 daemon logs -f`. The daemon reads `U8_LOG_LEVEL` from its own environment, which it inherits
+  from whichever command *spawns* it, so the variable belongs on the command after the stop, not on
+  the stop. Your `ctx.logger` lines appear as `[daemon:<plugin>]`.
 - `u8 status --json | jq .plugins` — what loaded, and why the rest did not.
 - A plugin's failure never takes the daemon down, so a wedged dashboard is not it — check
   `u8 daemon logs` first.

@@ -12,6 +12,10 @@
  * and re-run on every config reload.
  */
 import path from "node:path";
+// The grammar, not the renderer: `parse.ts` imports nothing outside its own
+// module, so reading it here checks templates against the one true grammar
+// without coupling config to anything above it.
+import { parseTemplate, templateTokens } from "../template/parse.js";
 import { ConfigError, type ConfigIssue } from "../util/errors.js";
 import { resolvePath, workspaceId } from "../util/paths.js";
 import {
@@ -22,6 +26,7 @@ import {
   type RawWorkspaceConfig,
 } from "./schema.js";
 import {
+  CORE_COMMAND_NAMESPACE,
   type CustomIndicatorDef,
   DEFAULT_HEALTH,
   DEFAULT_LIMITS,
@@ -43,6 +48,13 @@ export const DEFAULT_INDICATOR_INTERVAL_MS = 5_000;
 
 /** Profile synthesized when the config declares none. */
 export const IMPLICIT_PROFILE_NAME = "all";
+
+/**
+ * The `x@` namespace, mirrored from `CUSTOM_NAMESPACE` in `src/indicators`:
+ * config sits below the indicator layer and cannot import it, and the letter is
+ * part of the config language (SPEC §2.7) rather than of the registry.
+ */
+const CUSTOM_INDICATOR_NAMESPACE = "x";
 
 export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string): NormalizedWorkspace {
   const issues: ConfigIssue[] = [];
@@ -210,6 +222,7 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
     plugins: normalizePlugins(raw.plugins ?? [], rootDir),
     builtins: { git: raw.builtins?.git ?? true, health: raw.builtins?.health ?? true },
     limits,
+    warnings: templateWarnings(raw, new Set(indicators.map((i) => i.name))),
   };
 }
 
@@ -333,6 +346,89 @@ function coreCommands(subapps: readonly NormalizedSubapp[]): NormalizedCommand[]
     make("app:stop", "Stop the selected services", "stop"),
     make("app:restart", "Restart the selected services", null),
   ];
+}
+
+// ---------------------------------------------------------------------------
+// Templates
+// ---------------------------------------------------------------------------
+
+/**
+ * Non-fatal template diagnostics — SPEC §4: an unknown token "warns at load".
+ *
+ * They are warnings and not `ConfigError` issues on purpose: a mistyped token
+ * renders as a red `{ns@name!}` marker, and a dashboard that is otherwise fine
+ * must keep loading. Until these were collected, the parser's warnings went
+ * nowhere and a one-character typo was only discoverable by eye.
+ *
+ * Only *authored* templates are checked. The defaults reference `git@`/`health@`
+ * and would light up the moment someone disabled a built-in they never asked for.
+ */
+function templateWarnings(raw: RawWorkspaceConfig, declaredIndicators: ReadonlySet<string>): string[] {
+  const out: string[] = [];
+  const namespaces = knownNamespaces(raw);
+
+  const check = (template: string | undefined, at: string): void => {
+    if (template === undefined) return;
+    const parsed = parseTemplate(template);
+    for (const warning of parsed.warnings) out.push(`${at}: ${warning.message}`);
+    for (const { ns, name } of templateTokens(parsed)) {
+      const token = `{${ns}@${name}}`;
+      if (ns === CUSTOM_INDICATOR_NAMESPACE) {
+        // The only namespace whose *names* this layer knows in full.
+        if (!declaredIndicators.has(name)) {
+          out.push(`${at}: ${token} names no indicator declared under "indicators"`);
+        }
+      } else if (!namespaces.has(ns)) {
+        out.push(
+          `${at}: ${token} uses unknown namespace "${ns}" — expected ` +
+            `${[...namespaces].map((n) => `"${n}"`).join(", ")} or "${CUSTOM_INDICATOR_NAMESPACE}"`,
+        );
+      }
+    }
+  };
+
+  check(raw.templates?.app, "templates.app");
+  check(raw.templates?.subapp, "templates.subapp");
+  for (const [appName, app] of Object.entries(raw.apps)) {
+    check(app.template, `apps.${appName}.template`);
+    for (const [subName, subapp] of Object.entries(app.subapps ?? {})) {
+      check(subapp.template, `apps.${appName}.subapps.${subName}.template`);
+    }
+  }
+  return out;
+}
+
+/** Core, the enabled built-ins, and whatever the declared plugins are likely called. */
+function knownNamespaces(raw: RawWorkspaceConfig): Set<string> {
+  const out = new Set<string>([CORE_COMMAND_NAMESPACE]);
+  if (raw.builtins?.git ?? true) out.add("git");
+  if (raw.builtins?.health ?? true) out.add("health");
+  for (const spec of raw.plugins ?? []) for (const guess of pluginNamespaces(spec)) out.add(guess);
+  return out;
+}
+
+/**
+ * What a declared plugin is *probably* called. Its real namespace is the `name`
+ * its module exports, which only the daemon knows once it has loaded it, so this
+ * guesses from the spec — file basename, package name, `index.ts`'s directory —
+ * and guesses generously: this warning is advisory, and crying wolf over a
+ * perfectly good plugin would be worse than staying quiet about a typo.
+ */
+function pluginNamespaces(spec: string): string[] {
+  const segments = spec.split("/").filter((s) => s.length > 0 && s !== "." && s !== "..");
+  const last = segments.at(-1);
+  if (last === undefined) return [];
+  const base = last.replace(/\.[cm]?[jt]sx?$/i, "");
+  const out = [base];
+  // `./plugins/index.ts` and `@acme/metrics` are both named by the segment before.
+  const parent = segments.at(-2);
+  if (parent !== undefined && (base === "index" || parent.startsWith("@"))) {
+    out.push(parent.slice(parent.startsWith("@") ? 1 : 0));
+  }
+  // The `<prefix>-plugin-<name>` package convention: `u8-plugin-git` is `git@`.
+  const suffix = /-plugin-(.+)$/.exec(base)?.[1];
+  if (suffix !== undefined) out.push(suffix);
+  return out;
 }
 
 // ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ import { CONFIG_DEBOUNCE_MS, CONFIG_POLL_MS, configSignature, watchConfig } from
 import { createRpcClient, type RpcClient } from "../../src/ipc/index.js";
 import type { RpcNotificationPayload, ServiceState } from "../../src/ipc/protocol.js";
 import { nullLogger } from "../../src/util/logger.js";
+import { recordingLogger } from "../indicators/helpers.js";
 import {
   cleanup,
   cleanupStateHome,
@@ -747,5 +748,50 @@ describe("watchConfig", () => {
     // Ten poll intervals and a debounce window: nothing may arrive late either.
     await delay(500);
     expect(changes).toBe(1);
+  });
+});
+
+/**
+ * SPEC §4: an unknown template token "warns at load". The workspace only
+ * *collects* those warnings, and a load happens in exactly one place — the
+ * daemon, at cold start and again on every reload — so that is where they have
+ * to be said out loud. Until they were, a one-character typo was discoverable
+ * only by spotting the red `{ns@name!}` marker by eye.
+ */
+describe("config warnings", () => {
+  it("says a template typo out loud at load, and again after a reload", async () => {
+    const ws = hotWorkspace({ templates: { subapp: "{gti@branch} {app@name}" } });
+    track(ws);
+    const logger = recordingLogger("daemon");
+    const daemon = createDaemon({ configPath: ws.configPath, logger, idleMs: 0 });
+    await daemon.start();
+
+    try {
+      expect(logger.warnings.filter((w) => w.includes("{gti@branch}"))).toHaveLength(1);
+
+      const client = createRpcClient({ socketPath: ws.paths.socket, timeoutMs: 5_000 });
+      await client.connect();
+      ws.rewrite(baseConfig({ templates: { subapp: "{helth@status} {app@name}" } }));
+      expect(await client.request("workspace.reload", {})).toEqual({ ok: true });
+      await client.close();
+
+      expect(logger.warnings.some((w) => w.includes("{helth@status}"))).toBe(true);
+    } finally {
+      await daemon.shutdown("test over");
+    }
+  });
+
+  it("stays quiet for a config whose templates are clean", async () => {
+    const ws = hotWorkspace();
+    track(ws);
+    const logger = recordingLogger("daemon");
+    const daemon = createDaemon({ configPath: ws.configPath, logger, idleMs: 0 });
+    await daemon.start();
+
+    try {
+      expect(logger.warnings.filter((w) => w.startsWith("daemon config:"))).toEqual([]);
+    } finally {
+      await daemon.shutdown("test over");
+    }
   });
 });
