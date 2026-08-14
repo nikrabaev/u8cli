@@ -1,7 +1,11 @@
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_LIMITS, DEFAULT_TEMPLATES } from "../../src/config/types.js";
+import {
+  DEFAULT_LIMITS,
+  DEFAULT_PROTOS_INTERVAL_MS,
+  DEFAULT_TEMPLATES,
+} from "../../src/config/types.js";
 import { cleanupWorkspaces, cmd, configErrorFrom, issueLines, loadFixture, sub } from "./helpers.js";
 
 afterEach(cleanupWorkspaces);
@@ -529,7 +533,9 @@ describe("indicators, plugins, limits, templates", () => {
     const { ws } = loadFixture({ apps: { db: { path: "." } } });
     expect(ws.limits).toEqual(DEFAULT_LIMITS);
     expect(ws.templates).toEqual(DEFAULT_TEMPLATES);
-    expect(ws.builtins).toEqual({ git: true, health: true });
+    // protos is the exception: nothing to link until a workspace configures it.
+    expect(ws.builtins).toEqual({ git: true, health: true, protos: false });
+    expect(ws.builtinOptions).toEqual({});
   });
 
   it("maps the raw limit names onto the millisecond model", () => {
@@ -563,6 +569,101 @@ describe("indicators, plugins, limits, templates", () => {
     const { ws } = loadFixture({ apps: { db: { path: ".", template: "ROW {app@name}" } } });
     expect(ws.apps[0]?.template).toBe("ROW {app@name}");
     expect(sub(ws, "db").template).toBe("ROW {app@name}");
+  });
+});
+
+/**
+ * `builtins` and `plugins` each accept two shapes — a switch or a spec on its
+ * own, and the same thing carrying options. Enablement and configuration are
+ * separated on the way out (`builtins` vs `builtinOptions`) so that "off" and
+ * "configured" never have to be read out of one field.
+ */
+describe("built-ins and plugin options", () => {
+  const app = { db: { path: "." } };
+
+  it("takes a boolean for each built-in and carries no options", () => {
+    const { ws } = loadFixture({ apps: app, builtins: { git: false, health: true, protos: false } });
+    expect(ws.builtins).toEqual({ git: false, health: true, protos: false });
+    expect(ws.builtinOptions).toEqual({});
+  });
+
+  it("reads an options object as enabled-and-configured", () => {
+    const { ws } = loadFixture({
+      apps: app,
+      builtins: { protos: { packages: ["@myorg/protos", "@myorg/react-query"] } },
+    });
+    expect(ws.builtins.protos).toBe(true);
+    expect(ws.builtinOptions).toEqual({
+      protos: {
+        packages: ["@myorg/protos", "@myorg/react-query"],
+        intervalMs: DEFAULT_PROTOS_INTERVAL_MS,
+      },
+    });
+  });
+
+  it("maps the raw protos interval onto the millisecond model", () => {
+    const { ws } = loadFixture({
+      apps: app,
+      builtins: { protos: { packages: ["protos"], interval: 250 } },
+    });
+    expect(ws.builtinOptions["protos"]).toEqual({ packages: ["protos"], intervalMs: 250 });
+  });
+
+  it("refuses to enable protos with nothing to link", () => {
+    const e = configErrorFrom(() => loadFixture({ apps: app, builtins: { protos: true } }));
+    expect(issueLines(e)).toEqual([
+      'builtins.protos: the protos built-in has nothing to link until it is told which packages are shared: replace true with { "packages": ["@myorg/protos"] }',
+    ]);
+  });
+
+  it("keeps a bare plugin spec working exactly as before", () => {
+    const { dir, ws } = loadFixture({ apps: app, plugins: ["./plugins/deploy.ts", "u8-plugin-thing"] });
+    expect(ws.plugins).toEqual([
+      { spec: "./plugins/deploy.ts", resolved: path.join(dir, "plugins/deploy.ts") },
+      { spec: "u8-plugin-thing" },
+    ]);
+  });
+
+  it("carries plugin options through untouched, whatever their shape", () => {
+    // Verbatim matters: the options belong to the plugin's factory, and this
+    // layer cannot know which key means what.
+    const options = {
+      endpoint: "http://localhost:9090",
+      retries: 3,
+      nested: { deep: [1, null, { ok: true }] },
+      off: false,
+    };
+    const { dir, ws } = loadFixture({
+      apps: app,
+      plugins: [{ spec: "./plugins/metrics.ts", options }, { spec: "@acme/notify" }],
+    });
+    expect(ws.plugins).toEqual([
+      { spec: "./plugins/metrics.ts", resolved: path.join(dir, "plugins/metrics.ts"), options },
+      { spec: "@acme/notify" },
+    ]);
+    expect(ws.plugins[0]?.options).toEqual(options);
+  });
+
+  it("trusts the protos namespace in templates only once it is configured", () => {
+    const configured = loadFixture({
+      apps: app,
+      builtins: { protos: { packages: ["@myorg/protos"] } },
+      templates: { app: "{protos@version}" },
+    });
+    expect(configured.ws.warnings).toEqual([]);
+
+    const unconfigured = loadFixture({ apps: app, templates: { app: "{protos@version}" } });
+    expect(unconfigured.ws.warnings).toHaveLength(1);
+    expect(unconfigured.ws.warnings[0]).toContain("{protos@version}");
+  });
+
+  it("trusts the namespace of a plugin declared in object form", () => {
+    const { ws } = loadFixture({
+      apps: app,
+      plugins: [{ spec: "@acme/metrics", options: { endpoint: "x" } }],
+      templates: { app: "{metrics@rps}" },
+    });
+    expect(ws.warnings).toEqual([]);
   });
 });
 

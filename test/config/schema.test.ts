@@ -31,4 +31,27 @@ describe("jsonSchema", () => {
     const names = apps["propertyNames"] as Record<string, unknown>;
     expect(names["pattern"]).toBe("^[A-Za-z0-9][A-Za-z0-9_-]*$");
   });
+
+  /**
+   * The generated schema is what an editor completes and underlines against, so
+   * the two-shapes-per-entry keys have to reach it as real unions — an `anyOf`
+   * an editor can offer both halves of, not a widened `any`.
+   */
+  it("emits both shapes of a built-in and of a plugin entry as unions", () => {
+    const props = (jsonSchema() as Record<string, Record<string, unknown>>)["properties"] ?? {};
+
+    const builtins = props["builtins"] as Record<string, Record<string, Record<string, unknown>>>;
+    expect(builtins["properties"]?.["git"]?.["type"]).toBe("boolean");
+    const protos = (builtins["properties"]?.["protos"]?.["anyOf"] ?? []) as Record<string, unknown>[];
+    expect(protos.map((branch) => branch["type"])).toEqual(["boolean", "object"]);
+    expect(protos[1]?.["required"]).toEqual(["packages"]);
+    expect(protos[1]?.["additionalProperties"]).toBe(false);
+
+    const plugins = props["plugins"] as Record<string, Record<string, unknown>>;
+    const entry = (plugins["items"]?.["anyOf"] ?? []) as Record<string, unknown>[];
+    expect(entry.map((branch) => branch["type"])).toEqual(["string", "object"]);
+    expect(entry[1]?.["required"]).toEqual(["spec"]);
+    // Options are the plugin's own business: any object passes.
+    expect(Object.keys((entry[1]?.["properties"] ?? {}) as object).sort()).toEqual(["options", "spec"]);
+  });
 });

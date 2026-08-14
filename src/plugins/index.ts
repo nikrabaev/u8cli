@@ -10,6 +10,7 @@ export {
   createPluginHost,
   LOAD_TIMEOUT_MS,
   READINESS_TIMEOUT_MS,
+  type BuiltinDaemonState,
   type LoadablePluginHost,
   type PluginHostDeps,
 } from "./host.js";
@@ -30,4 +31,12 @@ export {
 
 export { pluginBaseContext, withStore, type BaseContextInput } from "./context.js";
 
-export { declaredNameOf, RESERVED_NAMESPACES, validatePluginDefinition } from "./validate.js";
+export {
+  declaredNameOf,
+  instantiatePlugin,
+  PLUGIN_FACTORY_EXPORT,
+  pluginFactoryOf,
+  RESERVED_NAMESPACES,
+  validatePluginDefinition,
+  type PluginFactory,
+} from "./validate.js";

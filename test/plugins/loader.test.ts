@@ -4,8 +4,9 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { NormalizedWorkspace } from "../../src/config/types.js";
 import type { SnapshotPlugin } from "../../src/ipc/protocol.js";
-import { builtinAvailable, BUILTIN_NAMES, BUILTIN_SPEC_PREFIX, pluginSources } from "../../src/plugins/index.js";
+import { builtinAvailable, BUILTIN_SPEC_PREFIX, pluginSources } from "../../src/plugins/index.js";
 import { cleanupPlugins, createFixture, installPackage, PLUGIN_SDK } from "./helpers.js";
 
 afterEach(async () => {
@@ -184,13 +185,72 @@ describe("built-ins", () => {
   });
 
   it("only records the built-ins this install actually ships", async () => {
-    const host = createFixture({ config: { builtins: {} } }).host();
+    const fixture = createFixture({ config: { builtins: {} } });
+    const host = fixture.host();
     await host.load();
 
-    const shipped = BUILTIN_NAMES.filter((name) => builtinAvailable(name));
-    expect(host.list().map((p) => p.spec)).toEqual(shipped.map((name) => `${BUILTIN_SPEC_PREFIX}${name}`));
+    const shipped = pluginSources(fixture.ws).filter((s) => s.builtin !== undefined && builtinAvailable(s.builtin));
+    expect(host.list().map((p) => p.spec)).toEqual(shipped.map((s) => s.spec));
     // Whatever ships must load: a built-in that throws is a u8cli bug.
     expect(host.list().every((p) => p.ok)).toBe(true);
+  });
+
+  /**
+   * `protos` ships with u8cli like the other two, but a workspace that never
+   * mentions it must not pay for it — not an import, not a record, not a cell.
+   * The gate is the source list: a disabled built-in is never even resolved.
+   */
+  it("leaves protos out of the load order until the workspace enables it", async () => {
+    const fixture = createFixture({ config: { builtins: {} } });
+    expect(specs(fixture)).not.toContain(`${BUILTIN_SPEC_PREFIX}protos`);
+
+    const host = fixture.host();
+    await host.load();
+    expect(host.list().map((p) => p.spec)).not.toContain(`${BUILTIN_SPEC_PREFIX}protos`);
+
+    const enabled: NormalizedWorkspace = {
+      ...fixture.ws,
+      builtins: { git: false, health: false, protos: true },
+    };
+    expect(pluginSources(enabled).map((s) => s.spec)).toEqual([`${BUILTIN_SPEC_PREFIX}protos`]);
+  });
+});
+
+/**
+ * Options ride along with the source, so the one place that knows what a
+ * workspace asked for is the one place that says what a plugin is built from.
+ */
+describe("options on a source", () => {
+  it("carries a declared plugin's options and a built-in's alike", () => {
+    const fixture = createFixture();
+    const ws: NormalizedWorkspace = {
+      ...fixture.ws,
+      builtins: { git: false, health: false, protos: true },
+      builtinOptions: { protos: { packages: ["@myorg/protos"] } },
+      plugins: [{ spec: "./plugins/demo.js", options: { verbose: true } }, { spec: "pkg" }],
+    };
+
+    expect(pluginSources(ws).map((s) => [s.spec, s.options])).toEqual([
+      [`${BUILTIN_SPEC_PREFIX}protos`, { packages: ["@myorg/protos"] }],
+      ["./plugins/demo.js", { verbose: true }],
+      ["pkg", undefined],
+    ]);
+  });
+
+  /**
+   * An empty options object is the same as none: the host only refuses a plugin
+   * with no factory when a *setting* would otherwise be silently dropped.
+   */
+  it("treats an empty options object as no options at all", () => {
+    const fixture = createFixture();
+    const ws: NormalizedWorkspace = {
+      ...fixture.ws,
+      builtins: { git: false, health: false, protos: true },
+      builtinOptions: { protos: {} },
+      plugins: [{ spec: "./plugins/demo.js", options: {} }],
+    };
+
+    expect(pluginSources(ws).every((s) => s.options === undefined)).toBe(true);
   });
 });
 
@@ -329,6 +389,76 @@ describe("isolation-lite", () => {
     await host.load();
 
     expect(host.list()).toHaveLength(1);
+  });
+});
+
+/**
+ * What a plugin may call the things it contributes. The namespace is added for
+ * it either way; the question is what may follow the namespace.
+ */
+describe("contributed names", () => {
+  it("accepts a sub-command spelled with a colon, and namespaces the whole of it", async () => {
+    const fixture = createFixture({
+      config: { plugins: ["./plugins/shared.js"] },
+      files: {
+        "plugins/shared.js": `export default {
+          name: "shared",
+          commands: {
+            link: { run: () => undefined },
+            "link:protos": { run: () => undefined },
+            "unlink:react-query": { run: () => undefined },
+          },
+        };`,
+      },
+    });
+
+    const host = fixture.host();
+    await host.load();
+
+    expect(record(host.list(), "./plugins/shared.js").ok).toBe(true);
+    expect(host.commands().map((c) => c.name)).toEqual([
+      "shared:link",
+      "shared:link:protos",
+      "shared:unlink:react-query",
+    ]);
+  });
+
+  it("rejects a colon with nothing on one side of it", async () => {
+    const fixture = createFixture({
+      config: { plugins: ["./plugins/half.js"] },
+      files: {
+        "plugins/half.js": `export default { name: "half", commands: { "link:": { run: () => undefined } } };`,
+      },
+    });
+
+    const host = fixture.host();
+    await host.load();
+
+    expect(record(host.list(), "./plugins/half.js").error).toContain("invalid name in commands.link:");
+    expect(host.commands()).toEqual([]);
+  });
+
+  /**
+   * `:` introduces a modifier inside a template token (`{git@branch:max(20)}`),
+   * so an indicator that used one could never be rendered — the parser would
+   * read the tail as a modifier it has never heard of.
+   */
+  it("still refuses a colon in an indicator name", async () => {
+    const fixture = createFixture({
+      config: { plugins: ["./plugins/cells.js"] },
+      files: {
+        "plugins/cells.js": `export default {
+          name: "cells",
+          indicators: { "linked:protos": { value: () => "1" } },
+        };`,
+      },
+    });
+
+    const host = fixture.host();
+    await host.load();
+
+    expect(record(host.list(), "./plugins/cells.js").error).toContain("invalid name in indicators.linked:protos");
+    expect(host.indicators()).toEqual([]);
   });
 });
 

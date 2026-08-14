@@ -35,11 +35,24 @@ export function skeletonConfig(name: string): string {
   //   "version": { "cmd": "jq -r .version package.json", "interval": 60000 }
   // },
 
-  // Local files (./…) or npm package names, loaded into the daemon.
-  // "plugins": ["./plugins/deploy.ts"],
+  // Local files (./…) or npm package names, loaded into the daemon. An entry may
+  // also be an object, whose "options" are passed to the plugin's factory export.
+  // "plugins": [
+  //   "./plugins/deploy.ts",
+  //   { "spec": "@acme/u8-metrics", "options": { "endpoint": "http://localhost:9090" } }
+  // ],
 
-  // The git and health plugins are built in and enabled by default.
-  // "builtins": { "git": true, "health": true },
+  // Built-in plugins. git and health are on by default and take no options.
+  // The protos built-in stays off until you name the shared packages it links;
+  // it then contributes link/unlink commands and per-package version indicators.
+  // "builtins": {
+  //   "git": true,
+  //   "health": true,
+  //   "protos": {
+  //     "packages": ["@myorg/protos", "@myorg/react-query"],
+  //     "interval": 10000
+  //   }
+  // },
 
   // "limits": { "stopTimeout": 10000, "readyTimeout": 60000, "taskConcurrency": 4 },
 

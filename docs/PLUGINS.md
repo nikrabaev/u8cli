@@ -4,11 +4,11 @@ A plugin is a module that contributes **indicators**, **commands**, **hooks** an
 signal to one workspace. Plugins are loaded into the daemon and run inside it — the vite model:
 trusted code, no sandbox, full access to the machine.
 
-`git` and `health` are built-in plugins; everything below is how they are written.
+`git`, `health` and `protos` are built-in plugins; everything below is how they are written.
 
 ```jsonc
 // u8.jsonc
-"plugins": ["./plugins/ports.ts", "@acme/u8-plugin-k8s"]
+"plugins": ["./plugins/ports.ts", { "spec": "@acme/u8-plugin-k8s", "options": { "context": "staging" } }]
 ```
 
 ---
@@ -37,6 +37,72 @@ the module itself, or a transpiled CommonJS `exports.default` — all three are 
 `name` must match `^[A-Za-z0-9][A-Za-z0-9_-]*$` and may not be `app` or `x` (reserved for the core
 commands and config-defined indicators). Two plugins claiming the same name is an error for the
 second one.
+
+### Configuration: the factory export
+
+A plugin that needs no configuration exports a definition object, as above. A plugin that **does**
+exports a **factory** instead: a function from its options to a definition.
+
+```jsonc
+// u8.jsonc — a bare string is "no options"; the object form carries them
+"plugins": [
+  "./plugins/ports.ts",
+  { "spec": "@acme/u8-plugin-k8s", "options": { "context": "staging", "namespace": "acme" } }
+]
+```
+
+```ts
+// @acme/u8-plugin-k8s
+import { definePlugin } from "u8cli/plugin";
+
+export default (options: { context?: string; namespace?: string }) => {
+  if (options.context === undefined) throw new Error('"context" is required');
+  return definePlugin({
+    name: "k8s",
+    indicators: { … },
+    commands: { … },
+  });
+};
+```
+
+What `u8.jsonc` wrote under `options` reaches the factory **verbatim**. Config validation only checks
+that it is an object: the keys mean whatever your plugin says they mean, and u8 knowing every
+plugin's schema is not a thing worth building. So validate them yourself and throw — the throw
+disables the plugin carrying *your* message, which is the point of doing it there.
+
+Three export shapes count as a factory:
+
+| Shape | Use it when |
+| --- | --- |
+| `export default (options) => definePlugin({ … })` | the usual form |
+| `export const createPlugin = (options) => …` | the module also wants a ready-made instance as its `default` export — what the built-in `health` does, so that importing the module directly still yields a working plugin. It is found on the module or on its default export |
+| `module.exports = (options) => …` | a CommonJS plugin |
+
+A factory listed as a bare string is called with `{}` — omitting `options` is not the same as
+omitting the factory. It runs at load, between the import and `setup()`, and shares their 10 s
+deadline.
+
+Two things can go wrong, and both disable the plugin rather than the daemon:
+
+- **The factory throws.** Reported as `creating it from its options failed: <your message>`.
+- **Options for a plugin that has no factory.** An error, not a silent no-op — a workspace that
+  configured a plugin which cannot read configuration would otherwise show every sign of having been
+  configured and none of the effect:
+
+```console
+$ u8 status                 # "plugins": [{ "spec": "./plugins/ports.ts", "options": { … } }]
+u8-demo · profile full · 0/4 running
+  stopped  db               n/a              {ports@open!}
+  …
+plugin "ports" is disabled: plugin "./plugins/ports.ts": options were configured for it, but it exports a plugin definition rather than a factory — export a function taking its options (export default (options) => definePlugin({ ... })), or remove the options from u8.jsonc
+```
+
+The plugin is gone, so its tokens render as the red `{ports@open!}` marker — the same as any unknown
+indicator.
+
+The built-in `protos` is a factory plugin configured this way; `builtins.protos` in
+[CONFIG.md](CONFIG.md#protos) is where its options are written, and built-ins additionally receive
+the live daemon state no config value could stand in for (`health` gets the supervisor that way).
 
 ### Resolution
 
@@ -261,6 +327,20 @@ commands: {
 
 Targets run in parallel under the workspace's concurrency cap (`--serial` / `--concurrency` /
 `limits.taskConcurrency`).
+
+### Sub-commands
+
+A command key may use `:` to build a hierarchy under your own namespace: the built-in `protos`
+registers `link` and a `link:<package>` per configured package, invoked as `protos:link` and
+`protos:link:react-query`. Every segment is still a bare name (letters, digits, `.`, `_`, `-`), and
+your namespace is still prefixed for you, so this claims nothing outside it.
+
+It is what a *generated* command set is for. `u8 run <command> [targets…]` spends its trailing
+arguments on targets, so a command cannot take one — a plugin that would otherwise want
+`u8 run protos:link @myorg/protos` registers one command per package at load instead.
+
+Indicator names do not allow `:`, and deliberately: a colon separates modifiers inside a template
+token (`{git@branch:max(20)}`), so such a name would be unrenderable.
 
 ---
 
@@ -510,4 +590,6 @@ it and export the object directly.
   refcounted watcher, and `groupBy: "app"` commands.
 - [`src/plugins/builtin/health.ts`](../src/plugins/builtin/health.ts) — an event indicator, lifecycle
   hooks and a `readiness()` implementation.
+- [`src/plugins/builtin/protos.ts`](../src/plugins/builtin/protos.ts) — a factory plugin: its
+  indicators and commands are generated from its options, and it registers nothing without them.
 - [SPEC §6](SPEC.md#6-plugin-sdk-u8cliplugin) — the design record.

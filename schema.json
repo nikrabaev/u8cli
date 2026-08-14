@@ -33,8 +33,33 @@
     "plugins": {
       "type": "array",
       "items": {
-        "type": "string",
-        "minLength": 1
+        "anyOf": [
+          {
+            "type": "string",
+            "minLength": 1
+          },
+          {
+            "type": "object",
+            "properties": {
+              "spec": {
+                "type": "string",
+                "minLength": 1
+              },
+              "options": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "additionalProperties": {}
+              }
+            },
+            "required": [
+              "spec"
+            ],
+            "additionalProperties": false
+          }
+        ]
       }
     },
     "builtins": {
@@ -45,6 +70,35 @@
         },
         "health": {
           "type": "boolean"
+        },
+        "protos": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "packages": {
+                  "minItems": 1,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^(?:@[A-Za-z0-9][A-Za-z0-9._-]*\\/)?[A-Za-z0-9][A-Za-z0-9._-]*$"
+                  }
+                },
+                "interval": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "packages"
+              ],
+              "additionalProperties": false
+            }
+          ]
         }
       },
       "additionalProperties": false

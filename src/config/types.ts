@@ -106,6 +106,13 @@ export interface PluginRef {
   spec: string;
   /** Resolved absolute path for local specs; undefined for bare package names. */
   resolved?: string;
+  /**
+   * Passed verbatim to the plugin's factory export. A plugin that needs
+   * configuration exports a function taking these instead of a definition
+   * object; options given to a plugin with no factory are a config error, since
+   * silently ignoring them would look like the setting had taken effect.
+   */
+  options?: Record<string, unknown>;
 }
 
 export interface Limits {
@@ -122,6 +129,28 @@ export interface Templates {
   app: string;
   subapp: string;
 }
+
+/** Which built-in plugins are active. All default to on except `protos`, which
+ * has nothing to do until a workspace names the packages it shares. */
+export interface BuiltinFlags {
+  git: boolean;
+  health: boolean;
+  protos: boolean;
+}
+
+/**
+ * `builtins.protos` — links locally-built shared packages into the subapps that
+ * consume them, so a contract change can be tried end to end before it is
+ * published. Today that means yalc.
+ */
+export interface ProtosOptions {
+  /** Shared package names, e.g. `["@myorg/protos", "@myorg/react-query"]`. */
+  packages: string[];
+  /** How often the installed/linked versions are re-read. */
+  intervalMs: number;
+}
+
+export const DEFAULT_PROTOS_INTERVAL_MS = 10_000;
 
 export interface NormalizedWorkspace {
   /** Real (symlink-resolved) path of `u8.jsonc`. */
@@ -141,7 +170,14 @@ export interface NormalizedWorkspace {
   commands: NormalizedCommand[];
   indicators: CustomIndicatorDef[];
   plugins: PluginRef[];
-  builtins: { git: boolean; health: boolean };
+  builtins: BuiltinFlags;
+  /**
+   * Options for the built-ins, keyed by built-in name. Separate from the enable
+   * flags so `builtins.protos: false` and "configured but disabled" stay
+   * distinguishable, and so the host can hand a built-in its options the same
+   * way it hands a third-party plugin {@link PluginRef.options}.
+   */
+  builtinOptions: Record<string, Record<string, unknown>>;
   limits: Limits;
   /**
    * Non-fatal load diagnostics, `path: message` per line — today, template

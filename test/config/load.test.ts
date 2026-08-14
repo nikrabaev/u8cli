@@ -134,6 +134,104 @@ describe("validation", () => {
   });
 });
 
+/**
+ * `builtins` and `plugins` both accept a plain value or the same value carrying
+ * options. Every message here has to name the offending key: a union that only
+ * says "Invalid input" is exactly what this layer exists to prevent.
+ */
+describe("builtin and plugin options", () => {
+  const apps = { db: { path: "." } };
+
+  it("rejects options for a built-in that takes none", () => {
+    const e = configErrorFrom(() => loadFixture({ apps, builtins: { git: { verbose: true } } }));
+    expect(issueLines(e)).toEqual(['builtins.git: the "git" built-in takes no options: use true or false']);
+
+    const health = configErrorFrom(() => loadFixture({ apps, builtins: { health: {} } }));
+    expect(issueLines(health)).toEqual([
+      'builtins.health: the "health" built-in takes no options: use true or false',
+    ]);
+  });
+
+  it("still reports a non-boolean built-in as a type error", () => {
+    const e = configErrorFrom(() => loadFixture({ apps, builtins: { git: "yes" } }));
+    expect(issueLines(e)).toEqual(["builtins.git: Invalid input: expected boolean, received string"]);
+  });
+
+  it("names the missing packages instead of the failed union", () => {
+    const e = configErrorFrom(() => loadFixture({ apps, builtins: { protos: {} } }));
+    expect(issueLines(e)).toEqual([
+      'builtins.protos.packages: the protos built-in needs "packages": the shared packages it links, e.g. ["@myorg/protos"]',
+    ]);
+  });
+
+  it("rejects an empty package list", () => {
+    const e = configErrorFrom(() => loadFixture({ apps, builtins: { protos: { packages: [] } } }));
+    expect(issueLines(e)).toEqual([
+      'builtins.protos.packages: "packages" must name at least one shared package, e.g. ["@myorg/protos"]',
+    ]);
+  });
+
+  it("rejects anything that is not a package name, addressed by index", () => {
+    const e = configErrorFrom(() =>
+      loadFixture({ apps, builtins: { protos: { packages: ["@myorg/protos", "../local/protos"] } } }),
+    );
+    expect(issueLines(e)).toEqual([
+      'builtins.protos.packages[1]: invalid shared package name: expected "name" or "@scope/name"',
+    ]);
+  });
+
+  it("rejects a duplicate package, pointing at the entry to delete", () => {
+    const e = configErrorFrom(() =>
+      loadFixture({
+        apps,
+        builtins: { protos: { packages: ["@myorg/protos", "@myorg/react-query", "@myorg/protos"] } },
+      }),
+    );
+    expect(issueLines(e)).toEqual(['builtins.protos.packages[2]: duplicate package "@myorg/protos"']);
+  });
+
+  it("rejects a non-positive interval and an unknown option key", () => {
+    const interval = configErrorFrom(() =>
+      loadFixture({ apps, builtins: { protos: { packages: ["p"], interval: 0 } } }),
+    );
+    expect(interval.issues.map((i) => i.path)).toEqual(["builtins.protos.interval"]);
+
+    const unknown = configErrorFrom(() =>
+      loadFixture({ apps, builtins: { protos: { packages: ["p"], intervall: 10 } } }),
+    );
+    expect(issueLines(unknown)).toEqual(['builtins.protos: Unrecognized key: "intervall"']);
+  });
+
+  it("falls back to the union summary when nothing matched the shape", () => {
+    const e = configErrorFrom(() => loadFixture({ apps, builtins: { protos: 3 } }));
+    expect(issueLines(e)).toEqual([
+      'builtins.protos: expected false, or options like { "packages": ["@myorg/protos"] }',
+    ]);
+  });
+
+  it("addresses a malformed plugin entry inside the entry", () => {
+    const noSpec = configErrorFrom(() => loadFixture({ apps, plugins: [{ options: { a: 1 } }] }));
+    expect(noSpec.issues.map((i) => i.path)).toEqual(["plugins[0].spec"]);
+
+    const typo = configErrorFrom(() =>
+      loadFixture({ apps, plugins: ["./ok.ts", { spec: "./x.ts", optionz: {} }] }),
+    );
+    expect(issueLines(typo)).toEqual(['plugins[1]: Unrecognized key: "optionz"']);
+
+    const notAnObject = configErrorFrom(() =>
+      loadFixture({ apps, plugins: [{ spec: "./x.ts", options: 3 }] }),
+    );
+    expect(notAnObject.issues.map((i) => i.path)).toEqual(["plugins[0].options"]);
+  });
+
+  it("explains what a plugin entry may be when it is neither shape", () => {
+    const e = configErrorFrom(() => loadFixture({ apps, plugins: [3] }));
+    expect(issueLines(e)).toEqual([
+      'plugins[0]: expected a package name or path, or { "spec": "…", "options": { … } }',
+    ]);
+  });
+});
+
 describe("entry points", () => {
   it("loads a config by explicit path", () => {
     const dir = writeConfig({ apps: { db: { path: "." } } });

@@ -26,8 +26,8 @@ rejected everywhere, so a typo is an error at load rather than a setting that si
 | `name` | string | basename of the workspace directory | Workspace label in the dashboard header and `u8 status`. |
 | `env` | `{ [k: string]: string }` | `{}` | Environment for every spawned process; the bottom layer of the merge. |
 | `templates` | object | see [Templates](#templates) | Row templates for app and subapp rows. |
-| `plugins` | string[] | `[]` | npm package names, or paths (`./`, `/`, `~`) to local files. |
-| `builtins` | `{ git?: boolean, health?: boolean }` | both `true` | Switches off a built-in plugin. |
+| `plugins` | `(string \| { spec, options })[]` | `[]` | npm package names, or paths (`./`, `/`, `~`) to local files — each optionally with options. |
+| `builtins` | object | `git` and `health` on, `protos` off | Switches a built-in off, or configures one. |
 | `limits` | object | see [Limits](#limits) | Log rotation, timeouts, concurrency, daemon idle exit. |
 | `indicators` | `{ [name: string]: IndicatorDef }` | `{}` | Config-defined `{x@…}` indicators. |
 | `apps` | `{ [name: string]: App }` | **required** | The repos u8 manages. |
@@ -420,6 +420,7 @@ plugin.
 | `{git@dirty}` | app | Changed-file count including untracked; empty when clean |
 | `{git@ahead}` / `{git@behind}` | app | Commits vs upstream; empty when zero or no upstream |
 | `{health@status}` | subapp | `healthy`, `unhealthy`, `starting`, `n/a` |
+| `{protos@<alias>}` / `{protos@linked}` | subapp | Shared-package versions, once [protos](#protos) is configured |
 | `{x@<name>}` | as declared | Your config-defined indicators |
 | `{<plugin>@<name>}` | as declared | Plugin indicators |
 
@@ -451,18 +452,222 @@ longer matches the config. It clears on the next restart.
 ## Plugins
 
 ```jsonc
-"plugins": ["./plugins/deploy.ts", "@acme/u8-plugin-k8s"],
-"builtins": { "git": true, "health": true }
+"plugins": [
+  "./plugins/deploy.ts",
+  { "spec": "@acme/u8-plugin-k8s", "options": { "context": "staging" } }
+]
 ```
 
-An entry starting with `.`, `/` or `~` is a path resolved against the workspace directory (a missing
+An entry is either a **bare spec** or `{ "spec": …, "options": { … } }` — the same spec, plus
+settings for that plugin. Any other key in the object is rejected (`plugins[0]: Unrecognized key:
+"opts"`), and so is anything that is neither string nor object (`expected a package name or path, or
+{ "spec": "…", "options": { … } }`).
+
+A spec starting with `.`, `/` or `~` is a path resolved against the workspace directory (a missing
 extension is tried as `.ts`, `.mts`, `.js`, `.mjs`, `.cjs`); anything else is an npm package resolved
 from the **workspace's own** `node_modules`. Load order is built-ins first, then this list in order —
 and load order is the order hooks run in.
 
+`options` are passed to the plugin **verbatim**: u8 validates only that they form an object, because
+what the keys mean belongs to the plugin. A plugin that takes options exports a *factory* — a
+function from options to a definition — and giving options to a plugin that exports a plain
+definition object is an error rather than a silent no-op, because a setting that looks applied and
+is not is the hardest kind of config bug to see. See
+[PLUGINS.md](PLUGINS.md#configuration-the-factory-export).
+
 A plugin that fails to load is **disabled**, not fatal: `u8 status` prints a warning on stderr, the
 dashboard shows it, and `u8 status --json` reports it under `plugins[].error`. See
 [PLUGINS.md](PLUGINS.md).
+
+### Built-ins
+
+`builtins` switches a built-in plugin off — and, for one that takes configuration, is where it is
+configured:
+
+```jsonc
+"builtins": {
+  "health": false,
+  "protos": { "packages": ["@myorg/protos", "@myorg/react-query"] }
+}
+```
+
+| Built-in | Accepts | Default | Registers |
+| --- | --- | --- | --- |
+| `git` | `true` / `false` | `true` | `{git@branch}`, `{git@dirty}`, `{git@ahead}`, `{git@behind}`, `git:fetch`, `git:pull` |
+| `health` | `true` / `false` | `true` | `{health@status}`, the `dependsOn` readiness signal |
+| `protos` | `false`, or an options object | **off** | Nothing until configured; see [protos](#protos) |
+
+`git` and `health` are on because they cost nothing until a workspace has a checkout or a
+healthcheck. `protos` is the exception: it has nothing to do until it is told which packages are
+shared, so it stays off — and enabling it *is* configuring it.
+
+Every way of getting that wrong is a load error rather than a setting that quietly does nothing — and
+an invalid config keeps the last-good one in service:
+
+| Written | Error |
+| --- | --- |
+| `"git": {}` (any object) | `the "git" built-in takes no options: use true or false` — same for `health` |
+| `"protos": true` | `the protos built-in has nothing to link until it is told which packages are shared: replace true with { "packages": ["@myorg/protos"] }` |
+| `"protos": {}` | `the protos built-in needs "packages": the shared packages it links, e.g. ["@myorg/protos"]` |
+| `"protos": { "packages": [] }` | `"packages" must name at least one shared package, e.g. ["@myorg/protos"]` |
+| the same package twice | `duplicate package "@myorg/protos"`, pointed at the entry to delete |
+| `"packages": ["./protos"]` | `invalid shared package name: expected "name" or "@scope/name"` |
+| any other key in the object | `Unrecognized key: "watch"` |
+| `"protos": "yes"` | `expected false, or options like { "packages": ["@myorg/protos"] }` |
+
+```console
+$ u8 status
+invalid workspace config (/Users/me/work/acme/u8.jsonc)
+  • builtins.protos: the protos built-in has nothing to link until it is told which packages are shared: replace true with { "packages": ["@myorg/protos"] }
+```
+
+`"protos": false` and leaving it out are the same thing: off, registering nothing — no commands, no
+indicators, nothing polled.
+
+---
+
+## protos
+
+A shared-contracts repo — `.proto` files that build into packages like `@myorg/protos` and
+`@myorg/react-query` — is consumed by most of the subapps around it. The local loop when a contract
+changes is: edit the protos, build them, `yalc publish`, then `yalc add` the package in each consumer
+that needs the new version.
+
+The `protos` built-in owns **that last step and the visibility around it**: commands that link and
+unlink, and indicators showing which version each subapp is actually on. Consumers are detected from
+each subapp's own `package.json`, so nothing has to be listed twice.
+
+```jsonc
+"builtins": {
+  "protos": {
+    "packages": ["@myorg/protos", "@myorg/react-query"],
+    "interval": 10000
+  }
+}
+```
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `packages` | string[] | **required** | The shared package names, `name` or `@scope/name`. At least one, no duplicates. |
+| `interval` | int > 0 (ms) | `10000` | How often the installed/linked versions are re-read. |
+
+### Link and unlink only
+
+u8 drives `yalc` and nothing else. It never builds the shared repo, never runs `yalc publish`, never
+watches for changes and never runs an install — those are yours, and a dashboard that ran them
+uninvited would be guessing at your package manager and your build.
+
+Two consequences worth knowing before the first run:
+
+- **`yalc add` fails if the package was never published.** The link comes from yalc's store, which
+  `yalc publish` fills. u8 says so when it happens: the failure reads `yalc add failed — is the
+  package built and "yalc publish"ed? Do that in the shared-contracts repo, then link again. yalc
+  said: …`, with yalc's own words after the advice — a failed target is shown as a single ~80-column
+  cell, so the half worth that budget is the half that says what to do next.
+- **Unlinking does not reinstall `node_modules`.** `yalc remove` restores the dependency range in
+  `package.json`, but the directory still holds the linked copy — so the code that runs is still the
+  local build until you run your own package manager's install. The command logs a line per package
+  saying exactly that; it does not run the install for you.
+
+`yalc` itself is yours too: it is not bundled, and a machine without it gets `yalc is not on PATH —
+install it ("npm i -g yalc"), then "u8 daemon stop". A running daemon keeps the PATH it started
+with, so a fresh install stays invisible to it until it restarts.` rather than a bare ENOENT.
+
+That second sentence is the part people need: the daemon runs these commands and inherits its `PATH`
+once, when it is spawned. Install `yalc` and re-run without restarting and you get the same error
+back while `which yalc` succeeds in your shell — so `u8 daemon stop` (the next command starts a fresh
+daemon) is half the fix, not a footnote.
+
+### Commands it registers
+
+`u8 run <command> [targets…]` spends its trailing arguments on **targets**, so a command can never
+take a package name — which is why each configured package gets its own command at load, named after
+the package:
+
+| Command | Acts on |
+| --- | --- |
+| `protos:link` | every configured package the target consumes |
+| `protos:unlink` | every configured package currently linked in the target |
+| `protos:link:<alias>` | that one package |
+| `protos:unlink:<alias>` | that one package |
+
+The alias is the package's last segment — `@myorg/react-query` → `react-query`, so
+`u8 run protos:link:react-query platform.shell`. Where that would be ambiguous, the whole name is
+flattened instead: configure `@myorg/protos` and `@other/protos` and you get `myorg-protos` and
+`other-protos`. The same fallback covers a segment that would collide with the `linked` indicator or
+that is not a legal command name. Aliases are derived in config order, so a given config always
+produces the same command names.
+
+Selection is the usual one: the targets you name, or the active profile if you name none. Within
+that selection, a target is **skipped** — reported, not failed — when it has nothing to do:
+`protos:link` skips a subapp whose `package.json` does not depend on any configured package, and
+`protos:unlink` skips one with no link in place. Each subapp is linked separately, even two subapps
+of the same repo: they have their own `node_modules` and their own `.yalc`.
+
+```console
+$ u8 run protos:link
+- db                skipped — command "protos:link" does not apply to this target
+✓ api               ok 301ms
+✓ platform.shell    ok 296ms
+✓ platform.auth-mfe ok 296ms
+```
+
+A run links every package it can and fails at the end with the ones it could not, rather than
+stopping at the first — a partial link is a state you can finish by hand. The one exception is a
+missing `yalc`: there is nothing to retry, so the target fails immediately without attempting the
+rest. Each `yalc` invocation is echoed into the target's run log with its output
+(`u8 logs <target> --run <runId>`).
+
+### Indicators
+
+| Token | Scope | Value |
+| --- | --- | --- |
+| `{protos@<alias>}` | subapp | What that package effectively is here — one per configured package |
+| `{protos@linked}` | subapp | `2 local` when two packages are linked here; empty when none are |
+
+Each cell has four states, read from the subapp's own `package.json`, `.yalc/` and `node_modules/` —
+never from a shell command, so the poll is cheap:
+
+| State | Renders | Meaning |
+| --- | --- | --- |
+| absent | empty | This subapp does not depend on the package |
+| linked | `1.4.2 local` (yellow) | A yalc link is in place: the version is the local build's own |
+| installed | `1.4.2` (green) | The published copy in `node_modules` |
+| declared | `^1.4.0` (dim) | Depended on, but nothing installed yet — the range from `package.json` |
+
+Add them to a row like any other token:
+
+```jsonc
+"templates": {
+  "subapp": "  {app@status:pad(8)} {app@name:max(16):pad(16)} {protos@protos:pad(12)} {protos@react-query:pad(12)} {protos@linked:pad(8)}"
+}
+```
+
+```console
+$ u8 status
+u8-demo · profile full · 0/4 running
+  stopped  db
+  stopped  api              1.4.2 local  2.0.1        1 local
+platform             platform
+  stopped  shell            ^1.4.0
+  stopped  auth-mfe                      2.0.0
+```
+
+All four states in one screen: `db` consumes neither package, `api` is on a local build of one and
+the published copy of the other, `shell` declares `@myorg/protos` with nothing installed yet, and
+`auth-mfe` has `@myorg/react-query` as a `devDependency`.
+
+The details that decide which state you see:
+
+- A dependency counts from `dependencies`, `devDependencies` or `peerDependencies` — the first of
+  those it appears in.
+- **Linked** needs both halves of what `yalc add` does: the `file:.yalc/…` range in `package.json`
+  *and* the `.yalc/<pkg>` directory. Either alone is a leftover, and the cell falls back to whatever
+  is really installed. A linked copy whose own version cannot be read renders as bare `local`.
+- The subapp's **own** `node_modules` is what is inspected, not a hoisted root: that is the tree its
+  dev server resolves from.
+- A directory that is not a node project, or a `package.json` caught half-written by an install,
+  renders blank; the next poll picks it up.
 
 ---
 
@@ -472,7 +677,9 @@ The daemon watches `u8.jsonc` (a directory watch plus a stat poll, so editor ren
 caught) and re-validates on change.
 
 - Templates, indicators, commands, profiles and the plugin list are **hot-applied**. The plugin host
-  is only rebuilt when the `plugins` list itself changed.
+  is only rebuilt when the set of plugins it was built from changed — the `plugins` entries, the
+  `builtins` toggles, or any plugin's `options`. Options count because a plugin is *built* from them:
+  adding a package to `builtins.protos` rebuilds `protos` so the new commands and indicators exist.
 - **Running processes are never touched.** They keep their spawn-time definition; if the effective
   script, cwd or env changed, the target's status becomes `stale` and the change takes effect on the
   next restart.
@@ -499,8 +706,16 @@ caught) and re-validates on change.
   },
 
   // Local file (jiti loads .ts) or an npm package from this workspace's node_modules.
+  // An entry may also be { "spec": …, "options": { … } }; the options reach the
+  // plugin's factory export verbatim.
   "plugins": ["./plugins/ports.ts"],
-  // "builtins": { "git": false },   // turn a built-in off
+
+  "builtins": {
+    // "git": false,                          // turn a built-in off
+    // protos is off until configured: this enables protos:link / protos:unlink
+    // and a {protos@…} cell per package.
+    "protos": { "packages": ["@myorg/protos", "@myorg/react-query"] }
+  },
 
   "limits": { "taskConcurrency": 4, "readyTimeout": 60000, "daemonIdle": 600000 },
 

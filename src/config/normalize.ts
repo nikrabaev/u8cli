@@ -25,16 +25,20 @@ import { ConfigError, type ConfigIssue } from "../util/errors.js";
 import { resolvePath, workspaceId } from "../util/paths.js";
 import {
   BARE_NAME_PATTERN,
+  type RawBuiltins,
   type RawHealth,
   type RawLimits,
+  type RawPlugin,
   type RawRunnable,
   type RawWorkspaceConfig,
 } from "./schema.js";
 import {
+  type BuiltinFlags,
   CORE_COMMAND_NAMESPACE,
   type CustomIndicatorDef,
   DEFAULT_HEALTH,
   DEFAULT_LIMITS,
+  DEFAULT_PROTOS_INTERVAL_MS,
   DEFAULT_TEMPLATES,
   type HealthCheckDef,
   type Limits,
@@ -44,6 +48,7 @@ import {
   type NormalizedSubapp,
   type NormalizedWorkspace,
   type PluginRef,
+  type ProtosOptions,
   type TargetId,
   type Templates,
 } from "./types.js";
@@ -209,6 +214,10 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
     });
   }
 
+  // --- plugins & built-ins --------------------------------------------------
+  const plugins = normalizePlugins(raw.plugins ?? [], rootDir);
+  const { builtins, builtinOptions } = normalizeBuiltins(raw.builtins, issues);
+
   if (issues.length > 0) throw new ConfigError("invalid workspace config", issues, configPath);
 
   const cycle = findCycle(subapps);
@@ -232,12 +241,16 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
     defaultProfile,
     commands,
     indicators,
-    plugins: normalizePlugins(raw.plugins ?? [], rootDir),
-    builtins: { git: raw.builtins?.git ?? true, health: raw.builtins?.health ?? true },
+    plugins,
+    builtins,
+    builtinOptions,
     limits,
     // Directories first: a `path` that points at nothing explains every other
     // odd thing about that app, including a template token that never resolves.
-    warnings: [...directoryWarnings(dirChecks), ...templateWarnings(raw, new Set(indicators.map((i) => i.name)))],
+    warnings: [
+      ...directoryWarnings(dirChecks),
+      ...templateWarnings(raw, { plugins, builtins }, new Set(indicators.map((i) => i.name))),
+    ],
   };
 }
 
@@ -435,9 +448,13 @@ function coreCommands(subapps: readonly NormalizedSubapp[]): NormalizedCommand[]
  * Only *authored* templates are checked. The defaults reference `git@`/`health@`
  * and would light up the moment someone disabled a built-in they never asked for.
  */
-function templateWarnings(raw: RawWorkspaceConfig, declaredIndicators: ReadonlySet<string>): string[] {
+function templateWarnings(
+  raw: RawWorkspaceConfig,
+  loaded: { plugins: readonly PluginRef[]; builtins: BuiltinFlags },
+  declaredIndicators: ReadonlySet<string>,
+): string[] {
   const out: string[] = [];
-  const namespaces = knownNamespaces(raw);
+  const namespaces = knownNamespaces(loaded);
 
   const check = (template: string | undefined, at: string): void => {
     if (template === undefined) return;
@@ -471,11 +488,16 @@ function templateWarnings(raw: RawWorkspaceConfig, declaredIndicators: ReadonlyS
 }
 
 /** Core, the enabled built-ins, and whatever the declared plugins are likely called. */
-function knownNamespaces(raw: RawWorkspaceConfig): Set<string> {
+function knownNamespaces({
+  plugins,
+  builtins,
+}: {
+  plugins: readonly PluginRef[];
+  builtins: BuiltinFlags;
+}): Set<string> {
   const out = new Set<string>([CORE_COMMAND_NAMESPACE]);
-  if (raw.builtins?.git ?? true) out.add("git");
-  if (raw.builtins?.health ?? true) out.add("health");
-  for (const spec of raw.plugins ?? []) for (const guess of pluginNamespaces(spec)) out.add(guess);
+  for (const [name, enabled] of Object.entries(builtins)) if (enabled) out.add(name);
+  for (const { spec } of plugins) for (const guess of pluginNamespaces(spec)) out.add(guess);
   return out;
 }
 
@@ -526,10 +548,63 @@ function mergeTemplates(raw: RawWorkspaceConfig["templates"]): Templates {
   };
 }
 
-function normalizePlugins(specs: readonly string[], rootDir: string): PluginRef[] {
-  return specs.map((spec) =>
-    isLocalSpec(spec) ? { spec, resolved: resolvePath(spec, rootDir) } : { spec },
-  );
+/**
+ * A plugin entry is either a bare spec or `{ spec, options }`; both land on the
+ * same {@link PluginRef}. Options are carried through verbatim — this layer has
+ * no idea what any given plugin's options mean, and guessing would be worse than
+ * passing them on.
+ */
+function normalizePlugins(entries: readonly RawPlugin[], rootDir: string): PluginRef[] {
+  return entries.map((entry) => {
+    const { spec, options } = typeof entry === "string" ? { spec: entry, options: undefined } : entry;
+    const ref: PluginRef = { spec };
+    if (isLocalSpec(spec)) ref.resolved = resolvePath(spec, rootDir);
+    if (options !== undefined) ref.options = options;
+    return ref;
+  });
+}
+
+/**
+ * `builtins` carries two different things — whether a built-in is on, and how it
+ * is configured — so they are separated here: an object entry means *enabled and
+ * configured*, and the options are keyed by built-in name for the plugin host to
+ * hand over the same way it hands a third-party plugin its `options`.
+ *
+ * `git` and `health` default to on: they cost nothing until a workspace has a
+ * git repo or a healthcheck. `protos` defaults to off and cannot be switched on
+ * with a bare `true`, because without `packages` there is nothing for it to
+ * link, and registering commands that can only fail would be worse than staying
+ * quiet.
+ */
+function normalizeBuiltins(
+  raw: RawBuiltins | undefined,
+  issues: ConfigIssue[],
+): { builtins: BuiltinFlags; builtinOptions: Record<string, Record<string, unknown>> } {
+  const builtinOptions: Record<string, Record<string, unknown>> = {};
+  const protos = raw?.protos;
+
+  if (protos === true) {
+    issues.push({
+      path: "builtins.protos",
+      message:
+        "the protos built-in has nothing to link until it is told which packages are shared: " +
+        'replace true with { "packages": ["@myorg/protos"] }',
+    });
+  } else if (typeof protos === "object") {
+    builtinOptions["protos"] = {
+      packages: [...protos.packages],
+      intervalMs: protos.interval ?? DEFAULT_PROTOS_INTERVAL_MS,
+    } satisfies ProtosOptions;
+  }
+
+  return {
+    builtins: {
+      git: raw?.git ?? true,
+      health: raw?.health ?? true,
+      protos: builtinOptions["protos"] !== undefined,
+    },
+    builtinOptions,
+  };
 }
 
 function isLocalSpec(spec: string): boolean {

@@ -4,8 +4,11 @@
  */
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { NormalizedWorkspace } from "../../src/config/types.js";
+import type { ServiceState } from "../../src/ipc/protocol.js";
 import type { IndicatorResult } from "../../src/plugin/types.js";
-import type { PluginHostDeps } from "../../src/plugins/index.js";
+import { createPluginHost, type LoadablePluginHost, type PluginHostDeps } from "../../src/plugins/index.js";
+import { nullLogger } from "../../src/util/logger.js";
 import {
   cleanupPlugins,
   commandContext,
@@ -17,9 +20,38 @@ import {
   type Fixture,
 } from "./helpers.js";
 
+/** Hosts built over a patched workspace (see {@link hostOver}), disposed with the rest. */
+const patchedHosts: LoadablePluginHost[] = [];
+
 afterEach(async () => {
+  for (const host of patchedHosts.splice(0)) await host.dispose().catch(() => undefined);
   await cleanupPlugins();
 });
+
+/**
+ * A host over the fixture's workspace with part of the normalized model
+ * replaced — `plugins` with their options, or `builtinOptions`.
+ *
+ * The host's input is `NormalizedWorkspace`, so these tests state that model
+ * directly instead of routing through a config file: how JSONC becomes options
+ * is normalization's contract, and pinning it here would test that layer twice
+ * and this one not at all.
+ */
+function hostOver(
+  fixture: Fixture,
+  patch: Partial<NormalizedWorkspace>,
+  deps: Partial<PluginHostDeps> = {},
+): LoadablePluginHost {
+  const ws: NormalizedWorkspace = { ...fixture.ws, ...patch };
+  const host = createPluginHost({ workspace: { current: () => ws }, logger: nullLogger, ...deps });
+  patchedHosts.push(host);
+  return host;
+}
+
+/** A supervisor's answer for `api`, as the `health` built-in consumes it. */
+function services(state: ServiceState) {
+  return { state: () => state, states: () => [state] };
+}
 
 /**
  * Polls until `read` returns something, so a test can assert that a child was
@@ -485,9 +517,166 @@ describe("indicator results", () => {
 });
 
 /**
- * A built-in is *constructed* by the host, not merely imported: `health` needs
- * live lifecycle state, and the plugin SDK — the contract for third-party
- * plugins — deliberately has no channel for it.
+ * A plugin that needs configuration exports a *factory* — a function taking its
+ * options — instead of a definition object. The host is where the workspace's
+ * options meet it.
+ */
+describe("options and factories", () => {
+  it("calls a factory with the options the workspace configured", async () => {
+    const fixture = createFixture({
+      files: {
+        "plugins/greeter.js": `export default (options) => ({
+          name: "greeter",
+          indicators: { greeting: { value: () => options.greeting + "/" + options.times } },
+        });`,
+      },
+    });
+
+    const host = hostOver(fixture, {
+      plugins: [{ spec: "./plugins/greeter.js", options: { greeting: "hi", times: 2 } }],
+    });
+    await host.load();
+
+    expect(host.list()).toEqual([{ name: "greeter", spec: "./plugins/greeter.js", ok: true }]);
+    expect(await host.indicators()[0]?.def.value?.(indicatorContext(fixture))).toBe("hi/2");
+  });
+
+  it("calls a factory with an empty object when nothing configured it", async () => {
+    const fixture = createFixture({
+      config: { plugins: ["./plugins/bare.js"] },
+      files: {
+        "plugins/bare.js": `export default (options) => ({
+          name: "bare",
+          indicators: { opts: { value: () => JSON.stringify(options) } },
+        });`,
+      },
+    });
+
+    const host = fixture.host();
+    await host.load();
+
+    expect(host.list()).toEqual([{ name: "bare", spec: "./plugins/bare.js", ok: true }]);
+    expect(await host.indicators()[0]?.def.value?.(indicatorContext(fixture))).toBe("{}");
+  });
+
+  it("prefers a named createPlugin export over the instance a module also exports", async () => {
+    const fixture = createFixture({
+      files: {
+        // The `health` shape: importing the module directly still yields a
+        // working plugin, but a configured host builds its own.
+        "plugins/dual.js": `export const createPlugin = (options) => ({
+          name: "dual",
+          indicators: { mode: { value: () => String(options.mode ?? "unset") } },
+        });
+        export default createPlugin({ mode: "instance" });`,
+      },
+    });
+
+    const host = hostOver(fixture, { plugins: [{ spec: "./plugins/dual.js", options: { mode: "configured" } }] });
+    await host.load();
+
+    expect(await host.indicators()[0]?.def.value?.(indicatorContext(fixture))).toBe("configured");
+  });
+
+  it("loads a plugin that exports a plain definition object, unchanged", async () => {
+    const fixture = createFixture({
+      config: { plugins: ["./plugins/plain.js"] },
+      files: {
+        "plugins/plain.js": `export default {
+          name: "plain",
+          indicators: { fixed: { value: () => "42" } },
+          commands: { go: { run: () => undefined } },
+        };`,
+      },
+    });
+
+    const host = fixture.host();
+    await host.load();
+
+    expect(host.list()).toEqual([{ name: "plain", spec: "./plugins/plain.js", ok: true }]);
+    expect(host.commands().map((c) => c.name)).toEqual(["plain:go"]);
+    expect(await host.indicators()[0]?.def.value?.(indicatorContext(fixture))).toBe("42");
+  });
+
+  /**
+   * The failure worth catching: a plugin that cannot read configuration, loaded
+   * next to configuration written for it, would show every sign of the setting
+   * having taken — it loads, it renders — and none of its effect.
+   */
+  it("disables a plugin that was given options but exports no factory", async () => {
+    const fixture = createFixture({
+      files: {
+        "plugins/plain.js": `export default {
+          name: "plain",
+          indicators: { fixed: { value: () => "42" } },
+        };`,
+      },
+    });
+
+    const seen: Array<[string, string]> = [];
+    const host = hostOver(
+      fixture,
+      { plugins: [{ spec: "./plugins/plain.js", options: { packages: ["@myorg/protos"] } }] },
+      { onError: (plugin, error) => seen.push([plugin, error]) },
+    );
+    await host.load();
+
+    const entry = host.list()[0];
+    expect(entry).toMatchObject({ name: "plain", spec: "./plugins/plain.js", ok: false });
+    expect(entry?.error).toContain("options were configured for it");
+    expect(entry?.error).toContain("factory");
+    expect(host.indicators()).toEqual([]);
+    // Reported under the name the plugin declared, so a banner can name it.
+    expect(seen).toEqual([["plain", expect.stringContaining("./plugins/plain.js")]]);
+  });
+
+  it("says so when a factory is async instead of letting it look malformed", async () => {
+    const fixture = createFixture({
+      config: { plugins: ["./plugins/slow.js"] },
+      files: { "plugins/slow.js": `export default async (options) => ({ name: "slow" });` },
+    });
+
+    const host = fixture.host();
+    await host.load();
+
+    expect(host.list()[0]?.error).toContain("returned a promise");
+    expect(host.list()[0]?.error).toContain("setup()");
+  });
+
+  it("disables a factory that throws and keeps loading the rest", async () => {
+    const fixture = createFixture({
+      files: {
+        "plugins/strict.js": `export default (options) => {
+          if (!options.packages?.length) throw new Error("packages must name at least one package");
+          return { name: "strict" };
+        };`,
+        "plugins/fine.js": `export default { name: "fine", commands: { go: { run: () => undefined } } };`,
+      },
+    });
+
+    const seen: Array<[string, string]> = [];
+    const host = hostOver(
+      fixture,
+      { plugins: [{ spec: "./plugins/strict.js", options: { packages: [] } }, { spec: "./plugins/fine.js" }] },
+      { onError: (plugin, error) => seen.push([plugin, error]) },
+    );
+    await host.load();
+
+    expect(host.list().map((p) => [p.spec, p.ok])).toEqual([
+      ["./plugins/strict.js", false],
+      ["./plugins/fine.js", true],
+    ]);
+    expect(host.list()[0]?.error).toContain("packages must name at least one package");
+    expect(host.commands().map((c) => c.name)).toEqual(["fine:go"]);
+    expect(seen.map(([, error]) => error)).toHaveLength(1);
+  });
+});
+
+/**
+ * A built-in is *constructed* by the host, not merely imported: it takes what
+ * the workspace configured for it, plus — for `health` — live lifecycle state,
+ * which the plugin SDK (the contract for *third-party* plugins) deliberately has
+ * no channel for.
  */
 describe("built-in options", () => {
   function healthFixture(): Fixture {
@@ -505,21 +694,36 @@ describe("built-in options", () => {
     });
   }
 
-  it("hands a built-in the daemon's state through its factory export", async () => {
+  it("builds a built-in from the workspace's builtinOptions", async () => {
     const fixture = healthFixture();
-    const target = targetInfo(fixture);
-    const stopped = serviceState("api", "stopped");
     // The supervisor's word — the process is gone — against a caller still
     // holding a `running` state, which is what a crash looks like from here.
-    const services = { state: () => stopped, states: () => [stopped] };
+    const stopped = serviceState("api", "stopped");
 
-    const wired = fixture.host({ builtinOptions: { health: { services, workspace: fixture.workspace } } });
-    await wired.load();
-    expect(wired.list()).toEqual([{ name: "health", spec: "builtin:health", ok: true }]);
-    expect(await wired.readiness(target, serviceState("api"))).toBe("n/a");
+    const host = hostOver(fixture, { builtinOptions: { health: { services: services(stopped) } } });
+    await host.load();
+
+    expect(host.list()).toEqual([{ name: "health", spec: "builtin:health", ok: true }]);
+    expect(await host.readiness(targetInfo(fixture), serviceState("api"))).toBe("n/a");
   });
 
-  it("still loads a built-in that gets no options, from its default export", async () => {
+  it("merges the daemon's own state over them", async () => {
+    const fixture = healthFixture();
+    const stopped = serviceState("api", "stopped");
+
+    const host = hostOver(
+      fixture,
+      // A workspace could never write a supervisor into its config; if it
+      // somehow names the same key, the daemon's live state is the truth.
+      { builtinOptions: { health: { services: services(serviceState("api")) } } },
+      { builtinState: { health: { services: services(stopped), workspace: fixture.workspace } } },
+    );
+    await host.load();
+
+    expect(await host.readiness(targetInfo(fixture), serviceState("api"))).toBe("n/a");
+  });
+
+  it("still loads a built-in that nothing configured", async () => {
     const fixture = healthFixture();
     const host = fixture.host();
     await host.load();
@@ -527,5 +731,20 @@ describe("built-in options", () => {
     // No supervisor to contradict it, so the handed-in state is all it has: the
     // target counts as live and its first probe has not landed yet.
     expect(await host.readiness(targetInfo(fixture), serviceState("api"))).toBe("pending");
+  });
+
+  it("never loads a built-in the workspace has not enabled", async () => {
+    const fixture = createFixture();
+    const host = hostOver(fixture, {
+      builtins: { git: false, health: false, protos: false },
+      // Options for a built-in that is switched off buy it nothing: the module
+      // is never imported, so it costs neither a load nor a record.
+      builtinOptions: { protos: { packages: ["@myorg/protos"] } },
+    });
+    await host.load();
+
+    expect(host.list()).toEqual([]);
+    expect(host.indicators()).toEqual([]);
+    expect(host.commands()).toEqual([]);
   });
 });

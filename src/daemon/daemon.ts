@@ -184,7 +184,10 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       onError: (plugin, error) => {
         server?.broadcast("plugin.error", { plugin, error });
       },
-      builtinOptions: {
+      // What a built-in is *configured* with travels with the workspace the host
+      // already holds (`builtinOptions` in the normalized model); this is only
+      // the live daemon state no config value could stand in for.
+      builtinState: {
         // The supervisor is the only source of the lifecycle edges the plugin
         // SDK cannot report — a crash, and an automatic restart. Without it a
         // crashed service keeps its last verdict and is probed for the life of
@@ -813,10 +816,15 @@ export function createDaemon(opts: DaemonOptions): Daemon {
  * toggles included, since disabling `git` is as much a change to the host as
  * dropping a local plugin file. Comparing it is what keeps an unrelated edit
  * from tearing every plugin down and setting it back up.
+ *
+ * Options are part of the identity: a plugin is *built* from them, so editing
+ * the packages `protos` links is exactly as much a change as swapping the plugin
+ * — and a reload that kept the old instance would leave a user staring at a
+ * setting that visibly did not take.
  */
 function pluginKey(ws: NormalizedWorkspace): string {
   return pluginSources(ws)
-    .map((source) => source.spec)
+    .map((source) => `${source.spec} ${JSON.stringify(source.options ?? {})}`)
     .join("\n");
 }
 

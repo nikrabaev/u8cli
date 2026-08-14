@@ -6,11 +6,16 @@
  * against: indicators for the registry, commands and hooks for the engine, and
  * a readiness verdict for `dependsOn` gating.
  *
- * Five rules shape it:
- *  - **Isolation-lite.** A plugin that throws at import, at validation or in
- *    `setup()` is disabled and recorded with its error. The daemon serves the
- *    rest of the workspace as if it had never been listed; `list()` is the only
- *    place the failure shows up, and the daemon turns it into `plugin.error`.
+ * Six rules shape it:
+ *  - **Isolation-lite.** A plugin that throws at import, in its factory, at
+ *    validation or in `setup()` is disabled and recorded with its error. The
+ *    daemon serves the rest of the workspace as if it had never been listed;
+ *    `list()` is the only place the failure shows up, and the daemon turns it
+ *    into `plugin.error`.
+ *  - **Options come from the workspace.** A plugin module may export a factory
+ *    instead of a definition; the host calls it with what the config declared
+ *    (`PluginRef.options`, or `builtinOptions[name]` for a built-in), plus the
+ *    live daemon state a built-in cannot get any other way.
  *  - **Nothing a plugin starts outlives it.** Every context the host builds
  *    carries an abort signal it owns, so a command a plugin shelled out to is
  *    reaped when the plugin is torn down, disabled, or misses its deadline —
@@ -57,7 +62,7 @@ import {
   type BuiltinName,
   type PluginSource,
 } from "./load.js";
-import { declaredNameOf, validatePluginDefinition } from "./validate.js";
+import { declaredNameOf, instantiatePlugin, validatePluginDefinition } from "./validate.js";
 
 /**
  * Deadline for one `readiness()` call. Generous next to the engine's 100 ms
@@ -70,24 +75,19 @@ export const READINESS_TIMEOUT_MS = 2_000;
 export const LOAD_TIMEOUT_MS = 10_000;
 
 /**
- * Named export a built-in may offer alongside its default one: a factory the
- * host calls with {@link PluginHostDeps.builtinOptions}. It is how a built-in
- * receives daemon state the plugin SDK has no channel for — the SDK is the
- * contract for *third-party* plugins, and widening it so `health` can see
- * process lifecycle would hand every plugin the supervisor.
+ * Live daemon state a built-in is constructed with, keyed by built-in name.
  *
- * The default export stays a working, unwired instance, so importing the module
- * directly (or loading it as a plain plugin) behaves exactly as before.
+ * It is *merged over* what the workspace configured for that built-in
+ * (`NormalizedWorkspace.builtinOptions[name]`) and handed to its factory. Only
+ * built-ins get it: they ship inside u8cli, so the daemon knows what each one
+ * accepts, whereas widening the plugin SDK so `health` could see process
+ * lifecycle would hand the supervisor to every third-party plugin.
+ *
+ * `health` is the only built-in that needs any today — `git` and `protos` work
+ * from config and the filesystem alone.
  */
-const BUILTIN_FACTORY = "createPlugin";
-
-/**
- * Per-built-in construction options, passed to that built-in's
- * {@link BUILTIN_FACTORY} export. Only built-ins get these: they ship inside
- * u8cli, so the daemon knows what each one accepts.
- */
-export type BuiltinPluginOptions = {
-  [K in BuiltinName]?: K extends "health" ? HealthPluginOptions : object;
+export type BuiltinDaemonState = {
+  [K in BuiltinName]?: K extends "health" ? HealthPluginOptions : Record<string, unknown>;
 };
 
 export interface PluginHostDeps {
@@ -95,8 +95,8 @@ export interface PluginHostDeps {
   logger: Logger;
   /** Reports a disabled plugin so the daemon can push `plugin.error`. */
   onError?(plugin: string, error: string): void;
-  /** Live daemon state for the built-ins that can use it; see {@link BUILTIN_FACTORY}. */
-  builtinOptions?: BuiltinPluginOptions;
+  /** See {@link BuiltinDaemonState}; the workspace supplies the rest. */
+  builtinState?: BuiltinDaemonState;
   readinessTimeoutMs?: number;
   loadTimeoutMs?: number;
 }
@@ -160,23 +160,23 @@ export function createPluginHost(deps: PluginHostDeps): LoadablePluginHost {
   // -------------------------------------------------------------------------
 
   /**
-   * What to validate as the plugin definition: whatever the module exported,
-   * unless it is a built-in offering a {@link BUILTIN_FACTORY} — then the
-   * definition is what that factory builds from the daemon's options. A throw
-   * here is a load failure like any other, so the plugin is disabled rather
-   * than taking the daemon with it.
+   * What a plugin is constructed with: the workspace's own options, plus — for a
+   * built-in — the live daemon state config cannot express, which wins because
+   * no config value could stand in for a supervisor.
+   *
+   * `undefined` rather than `{}` when there is nothing, so a plugin that exports
+   * no factory is only an error when a user actually configured it.
    */
-  const instantiate = (mod: unknown, source: PluginSource): unknown => {
-    const builtin = source.builtin;
-    if (builtin === undefined || typeof mod !== "object" || mod === null) return mod;
-    const factory = (mod as Record<string, unknown>)[BUILTIN_FACTORY];
-    if (typeof factory !== "function") return mod;
-    return (factory as (opts: object) => unknown)(deps.builtinOptions?.[builtin] ?? {});
+  const optionsFor = (source: PluginSource): Record<string, unknown> | undefined => {
+    const state = source.builtin === undefined ? undefined : deps.builtinState?.[source.builtin];
+    if (state === undefined) return source.options;
+    return { ...source.options, ...state };
   };
 
   /**
    * Imports, validates and sets up one plugin. Everything that can go wrong
-   * throws; the caller turns that into a disabled plugin.
+   * throws — a factory that refuses its options included; the caller turns that
+   * into a disabled plugin rather than a dead daemon.
    */
   const build = async (
     source: PluginSource,
@@ -184,7 +184,7 @@ export function createPluginHost(deps: PluginHostDeps): LoadablePluginHost {
     abort: AbortController,
   ): Promise<LoadedPlugin> => {
     const mod = await importPluginModule(source, ws.rootDir);
-    const def = validatePluginDefinition(instantiate(mod, source), source.spec);
+    const def = validatePluginDefinition(instantiatePlugin(mod, optionsFor(source), source.spec), source.spec);
 
     const clash = loaded.find((p) => p.name === def.name);
     if (clash) {

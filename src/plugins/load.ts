@@ -26,8 +26,14 @@ import type { NormalizedWorkspace } from "../config/types.js";
 import { errorMessage, U8Error } from "../util/errors.js";
 import { resolvePath } from "../util/paths.js";
 
-/** Plugins that ship with u8cli, in the order they load. */
-export const BUILTIN_NAMES = ["git", "health"] as const;
+/**
+ * Plugins that ship with u8cli, in the order they load.
+ *
+ * Shipping one is not enabling it: `protos` registers nothing until a workspace
+ * turns it on and names the packages it shares, which is why it is the one
+ * built-in that defaults to off (`BuiltinFlags`).
+ */
+export const BUILTIN_NAMES = ["git", "health", "protos"] as const;
 
 export type BuiltinName = (typeof BUILTIN_NAMES)[number];
 
@@ -48,27 +54,52 @@ export interface PluginSource {
   /** Absolute path for local specs, pre-resolved by config normalization. */
   resolved?: string;
   builtin?: BuiltinName;
+  /**
+   * What the workspace configured for this plugin: `PluginRef.options` for a
+   * declared one, `builtinOptions[name]` for a built-in. Absent — not `{}` —
+   * when the workspace said nothing, because the host tells the two apart: only
+   * options a user actually wrote make a plugin without a factory an error.
+   */
+  options?: Record<string, unknown>;
 }
 
 /**
  * Every plugin the workspace wants, in load order: built-ins first (SPEC §2.8),
  * then `plugins` in config order. Load order is the order hooks run in, so it is
  * part of the contract rather than an implementation detail.
+ *
+ * A source carries its options, so the one place that knows what a workspace
+ * asked for is the one place that answers "what should this plugin be built
+ * with" — the daemon adds only the live state config cannot express.
  */
 export function pluginSources(ws: NormalizedWorkspace): PluginSource[] {
   const out: PluginSource[] = [];
   for (const name of BUILTIN_NAMES) {
     if (!ws.builtins[name]) continue;
-    out.push({ spec: `${BUILTIN_SPEC_PREFIX}${name}`, kind: "builtin", builtin: name });
+    out.push(
+      withOptions(
+        { spec: `${BUILTIN_SPEC_PREFIX}${name}`, kind: "builtin", builtin: name },
+        ws.builtinOptions?.[name],
+      ),
+    );
   }
   for (const ref of ws.plugins) {
     out.push(
-      isLocalSpec(ref.spec)
-        ? { spec: ref.spec, kind: "local", resolved: ref.resolved ?? resolvePath(ref.spec, ws.rootDir) }
-        : { spec: ref.spec, kind: "package" },
+      withOptions(
+        isLocalSpec(ref.spec)
+          ? { spec: ref.spec, kind: "local", resolved: ref.resolved ?? resolvePath(ref.spec, ws.rootDir) }
+          : { spec: ref.spec, kind: "package" },
+        ref.options,
+      ),
     );
   }
   return out;
+}
+
+/** Attaches options only when there are some: an absent key means "unconfigured". */
+function withOptions(source: PluginSource, options: Record<string, unknown> | undefined): PluginSource {
+  if (options === undefined || Object.keys(options).length === 0) return source;
+  return { ...source, options };
 }
 
 /** A path spec, per SPEC §2.8: anything else is an npm package name. */

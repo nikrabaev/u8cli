@@ -1,5 +1,6 @@
 /**
- * Structural validation of what a plugin module exported.
+ * Structural validation of what a plugin module exported — and, when that export
+ * is a factory, the call that turns the workspace's options into a definition.
  *
  * Plugins are trusted code (SPEC §6), so this is not a sandbox — it is the
  * difference between "your plugin is missing a `run` function" and a
@@ -10,10 +11,101 @@
 import { BARE_NAME_PATTERN, CORE_COMMAND_NAMESPACE, NAME_PATTERN } from "../config/index.js";
 import { CUSTOM_NAMESPACE } from "../indicators/index.js";
 import type { HookDef, IndicatorDef, PluginCommandDef, PluginDefinition } from "../plugin/types.js";
-import { U8Error } from "../util/errors.js";
+import { errorMessage, U8Error } from "../util/errors.js";
 
 /** Namespaces a plugin may not claim: `app:start` and `{x@version}` are taken. */
 export const RESERVED_NAMESPACES: ReadonlySet<string> = new Set([CORE_COMMAND_NAMESPACE, CUSTOM_NAMESPACE]);
+
+/**
+ * Named export a plugin may offer instead of a function default export, for a
+ * module that wants to keep exporting a ready-made instance as its default (the
+ * `health` built-in does: importing it directly still yields a working plugin).
+ */
+export const PLUGIN_FACTORY_EXPORT = "createPlugin";
+
+/** A plugin module's factory form: its options in, a definition out. */
+export type PluginFactory = (options: Record<string, unknown>) => unknown;
+
+/**
+ * The factory a module exports, if it exports one.
+ *
+ * Four shapes, because a plugin is authored in whatever module system its
+ * workspace uses: the module *is* a function (CJS `module.exports = fn`), its
+ * default export is one, or either carries the {@link PLUGIN_FACTORY_EXPORT}
+ * named export.
+ */
+export function pluginFactoryOf(mod: unknown): PluginFactory | undefined {
+  if (typeof mod === "function") return mod as PluginFactory;
+  if (!isRecord(mod)) return undefined;
+  const fromDefault = mod["default"];
+  if (typeof fromDefault === "function") return fromDefault as PluginFactory;
+  const named = mod[PLUGIN_FACTORY_EXPORT];
+  if (typeof named === "function") return named as PluginFactory;
+  const nested = isRecord(fromDefault) ? fromDefault[PLUGIN_FACTORY_EXPORT] : undefined;
+  if (typeof nested === "function") return nested as PluginFactory;
+  return undefined;
+}
+
+/**
+ * Turns what a module exported into the thing to validate: the definition
+ * itself, or whatever its factory builds from `options`.
+ *
+ * Options with nowhere to go are an error rather than a shrug. A workspace that
+ * configured a plugin which cannot read configuration would otherwise show every
+ * sign of having been configured — the plugin loads, the dashboard renders — and
+ * none of the setting's effect, which is the single hardest kind of config bug
+ * to see.
+ *
+ * @throws U8Error `PLUGIN_LOAD` for that case, and for a factory that throws.
+ */
+export function instantiatePlugin(
+  mod: unknown,
+  options: Record<string, unknown> | undefined,
+  spec: string,
+): unknown {
+  const factory = pluginFactoryOf(mod);
+  if (!factory) {
+    if (options === undefined || Object.keys(options).length === 0) return mod;
+    throw fail(
+      spec,
+      `options were configured for it, but it exports a plugin definition rather than a factory — ` +
+        `export a function taking its options (export default (options) => definePlugin({ ... })), ` +
+        `or remove the options from u8.jsonc`,
+      declaredName(mod),
+    );
+  }
+  let built: unknown;
+  try {
+    built = factory(options ?? {});
+  } catch (err) {
+    // Same shape as a setup() failure: the plugin is disabled and the author
+    // gets told which of its two phases refused.
+    throw fail(spec, `creating it from its options failed: ${errorMessage(err)}`, declaredName(mod));
+  }
+  if (isThenable(built)) {
+    // Named, because the generic "expected a plugin definition object, got a
+    // object" a Promise would otherwise earn sends an author looking in
+    // precisely the wrong place.
+    throw fail(
+      spec,
+      `its factory returned a promise: build the definition synchronously and do async work in setup(), ` +
+        `which the host awaits and deadlines`,
+    );
+  }
+  return built;
+}
+
+function isThenable(value: unknown): boolean {
+  return isRecord(value) && typeof value["then"] === "function";
+}
+
+/** The `name` a non-factory module declared, so a failure can be attributed. */
+function declaredName(mod: unknown): string | undefined {
+  const candidate = unwrapDefault(mod);
+  if (!isRecord(candidate)) return undefined;
+  const name = candidate["name"];
+  return typeof name === "string" && name.length > 0 ? name : undefined;
+}
 
 /**
  * Narrows a module to a plugin definition.
@@ -60,7 +152,7 @@ export function validatePluginDefinition(mod: unknown, spec: string): PluginDefi
 
   for (const [key, def] of Object.entries(commands)) {
     const at = `commands.${key}`;
-    requireBareName(key, spec, name, at);
+    requireCommandName(key, spec, name, at);
     requireRecord(def, spec, name, at);
     if (typeof (def as Record<string, unknown>)["run"] !== "function") {
       throw fail(spec, `${at} must define a run() function`, name);
@@ -141,6 +233,28 @@ function requireBareName(key: string, spec: string, plugin: string, at: string):
   throw fail(
     spec,
     `invalid name in ${at}: use letters, digits, ".", "_" or "-" — the namespace is added for you`,
+    plugin,
+  );
+}
+
+/**
+ * A command may name sub-commands with `:` — `link:protos` under the `protos`
+ * plugin is invoked as `protos:link:protos`, next to the `protos:link` that does
+ * every package at once. Every segment is still a bare name, and the plugin's
+ * own namespace is still added for it, so this only buys a *hierarchy* under a
+ * namespace nobody else can claim.
+ *
+ * Indicators deliberately do not get this: `:` separates modifiers inside a
+ * template token (`{git@branch:max(20)}`), so a colon in an indicator name would
+ * be unrenderable rather than merely unusual.
+ */
+function requireCommandName(key: string, spec: string, plugin: string, at: string): void {
+  const segments = key.split(":");
+  if (segments.length > 0 && segments.every((segment) => BARE_NAME_PATTERN.test(segment))) return;
+  throw fail(
+    spec,
+    `invalid name in ${at}: use letters, digits, ".", "_" or "-", or ":" between them for a sub-command ` +
+      `(link:protos) — the plugin's namespace is added for you`,
     plugin,
   );
 }

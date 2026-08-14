@@ -14,6 +14,7 @@ import {
   connect,
   createWorkspace,
   delay,
+  SERVICE_SCRIPT,
   waitFor,
   type Workspace,
 } from "../daemon/helpers.js";
@@ -150,6 +151,48 @@ describe("plugins in a live daemon", () => {
   });
 
   /**
+   * The whole options path, end to end and nothing stubbed: JSONC → normalized
+   * `PluginRef.options` → the module's factory → an indicator whose value could
+   * only have come from what the user wrote in `u8.jsonc`.
+   */
+  it("builds a factory plugin from the options in u8.jsonc", async () => {
+    const ws = createWorkspace(
+      {
+        builtins: { git: false, health: false },
+        plugins: [
+          { spec: "./plugins/shared.js", options: { packages: ["@myorg/protos", "@myorg/react-query"] } },
+        ],
+        apps: { api: { path: "api", scripts: { start: "sleep 30" } } },
+      },
+      ["api", "plugins"],
+    );
+    fs.writeFileSync(path.join(ws.dir, "package.json"), JSON.stringify({ type: "module" }), "utf8");
+    fs.writeFileSync(
+      ws.file("plugins/shared.js"),
+      `export default (options) => ({
+         name: "shared",
+         indicators: {
+           packages: {
+             update: { mode: "poll", intervalMs: 100 },
+             value: () => options.packages.join(" "),
+           },
+         },
+       });\n`,
+      "utf8",
+    );
+
+    const client = await connect(ws);
+    const snapshot = await client.request("client.attach", { clientVersion: "test" });
+    expect(snapshot.plugins).toEqual([{ name: "shared", spec: "./plugins/shared.js", ok: true }]);
+
+    const cell = await pollFor(async () => {
+      const fresh = await client.request("workspace.snapshot", {});
+      return indicator(fresh.indicators, "shared", "packages");
+    }, "the configured indicator to reach a client snapshot");
+    expect(cell?.value).toBe("@myorg/protos @myorg/react-query");
+  });
+
+  /**
    * The daemon owns the host's lifecycle at both ends. Nothing else would notice
    * if `dispose()` fell out of the shutdown sequence: a plugin's watchers and
    * children would simply ride the process down, or outlive it.
@@ -163,6 +206,46 @@ describe("plugins in a live daemon", () => {
     await client.request("daemon.stop", {});
     await waitFor(() => fs.existsSync(ws.file("teardown.txt")), "the plugin teardown to run");
     expect(fs.readFileSync(ws.file("teardown.txt"), "utf8").trim()).toBe("torn");
+  });
+});
+
+/**
+ * The other half of the plugin host in a daemon: the built-ins, which are
+ * *constructed* from what the workspace configured plus the daemon's own state.
+ * Nothing between the config file and the client's snapshot is stubbed here.
+ */
+describe("a configured built-in in a live daemon", () => {
+  it("loads only what the workspace enabled, and serves its indicator", async () => {
+    const ws = createWorkspace(
+      {
+        builtins: { git: false, health: true },
+        apps: {
+          api: {
+            path: "api",
+            scripts: { start: SERVICE_SCRIPT },
+            health: { cmd: "true", interval: 200, timeout: 1_000, threshold: 1 },
+          },
+        },
+        profiles: { all: { default: true, targets: ["api"] } },
+      },
+      ["api"],
+    );
+
+    const client = await connect(ws);
+    const snapshot = await client.request("client.attach", { clientVersion: "test" });
+    // Every other built-in ships with u8cli and is switched off here: an
+    // unconfigured one is never loaded, so it never even earns a record.
+    expect(snapshot.plugins).toEqual([{ name: "health", spec: "builtin:health", ok: true }]);
+
+    const run = await client.request("service.start", {});
+    await client.request("run.await", { runId: run.runId });
+
+    const cell = await pollFor(async () => {
+      const fresh = await client.request("workspace.snapshot", {});
+      const value = indicator(fresh.indicators, "health", "status");
+      return value?.value === "healthy" ? value : undefined;
+    }, "the health@status cell to reach a client snapshot");
+    expect(cell).toMatchObject({ ns: "health", name: "status", scope: "subapp", owner: "api" });
   });
 });
 

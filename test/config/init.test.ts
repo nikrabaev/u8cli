@@ -8,7 +8,7 @@ import {
   validateConfig,
   writeSkeletonConfig,
 } from "../../src/config/index.js";
-import { cleanupWorkspaces, sub, tmpWorkspace, u8ErrorFrom } from "./helpers.js";
+import { cleanupWorkspaces, sub, tmpWorkspace, u8ErrorFrom, writeConfig } from "./helpers.js";
 
 afterEach(cleanupWorkspaces);
 
@@ -33,7 +33,17 @@ describe("writeSkeletonConfig", () => {
   it("documents every optional feature as a commented example", () => {
     const dir = tmpWorkspace({});
     const text = fs.readFileSync(writeSkeletonConfig(dir), "utf8");
-    for (const feature of ["subapps", "profiles", "commands", "hooks", "health", "indicators", "plugins"]) {
+    for (const feature of [
+      "subapps",
+      "profiles",
+      "commands",
+      "hooks",
+      "health",
+      "indicators",
+      "plugins",
+      "builtins",
+      "protos",
+    ]) {
       expect(text).toMatch(new RegExp(`//.*"?${feature}"?`));
     }
   });
@@ -65,4 +75,48 @@ describe("writeSkeletonConfig", () => {
     expect(uncommented).toContain('"subapps"');
     validateConfig(parseConfigText(uncommented));
   });
+
+  /**
+   * The line-by-line uncommenting above only ever produces *empty* blocks, so it
+   * proves the punctuation and nothing about the bodies. These two blocks are
+   * the config reference for shapes that carry configuration, and a stale
+   * example there teaches the wrong thing — so they are enabled whole and put
+   * through a real load.
+   */
+  it("keeps its plugin and built-in examples loadable as written", () => {
+    const skeleton = skeletonConfig("demo");
+    const ws = loadWorkspace(
+      writeConfig(
+        `{
+  "apps": { "example": { "path": "." } },
+  ${uncommentBlock(skeleton, "plugins")}
+  ${uncommentBlock(skeleton, "builtins")}
+}`,
+      ),
+    );
+
+    expect(ws.builtins.protos).toBe(true);
+    expect(ws.builtinOptions["protos"]).toEqual({
+      packages: ["@myorg/protos", "@myorg/react-query"],
+      intervalMs: 10_000,
+    });
+    expect(ws.plugins.map((p) => p.spec)).toEqual(["./plugins/deploy.ts", "@acme/u8-metrics"]);
+    expect(ws.plugins[1]?.options).toEqual({ endpoint: "http://localhost:9090" });
+  });
 });
+
+/** Lifts one commented `"key": …` block out of the skeleton, comment markers off. */
+function uncommentBlock(skeleton: string, key: string): string {
+  const lines = skeleton.split("\n");
+  const start = lines.findIndex((line) => line.trim().startsWith(`// "${key}"`));
+  if (start < 0) throw new Error(`the skeleton documents no "${key}" block`);
+
+  const out: string[] = [];
+  for (const line of lines.slice(start)) {
+    const bare = line.replace(/^\s*\/\/ ?/, "");
+    out.push(bare);
+    // The closing brace of the block itself is the only one at column zero.
+    if (/^[}\]],?$/.test(bare)) return out.join("\n");
+  }
+  throw new Error(`the "${key}" block is never closed`);
+}

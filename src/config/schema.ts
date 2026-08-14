@@ -21,10 +21,38 @@ export const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 /** Command and `x@` indicator names: bare, but dots are allowed (`db.migrate`). */
 export const BARE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+/**
+ * An npm package name: `name` or `@scope/name`. Deliberately looser than the
+ * registry's own rules (which also ban uppercase and cap the length) — the point
+ * is to catch a path, a shell word or a half-typed scope before it reaches
+ * `yalc`, not to re-litigate what npm will accept for a package that is already
+ * installed.
+ */
+export const PACKAGE_NAME_PATTERN = /^(?:@[A-Za-z0-9][A-Za-z0-9._-]*\/)?[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
 const nameKey = (what: string) =>
   z
     .string()
     .regex(NAME_PATTERN, `invalid ${what} name: use letters, digits, "_" or "-" (no ".", ":" or "@")`);
+
+const packageName = (what: string) =>
+  z
+    .string()
+    .regex(PACKAGE_NAME_PATTERN, `invalid ${what} name: expected "name" or "@scope/name"`);
+
+/** Reported per offending index so the message points at the entry to delete. */
+const rejectDuplicatePackages = (packages: readonly string[], ctx: z.RefinementCtx<readonly string[]>) => {
+  const seen = new Set<string>();
+  packages.forEach((name, index) => {
+    if (seen.has(name)) {
+      ctx.addIssue({ code: "custom", message: `duplicate package "${name}"`, path: [index] });
+    }
+    seen.add(name);
+  });
+};
+
+const isPlainObject = (value: unknown): boolean =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
 
 const posInt = z.number().int().positive();
 
@@ -116,6 +144,73 @@ export const indicatorSchema = z.strictObject({
   scope: z.enum(["subapp", "app"]).optional(),
 });
 
+/**
+ * Whatever a plugin's own options are: this layer only checks that they form an
+ * object, because the meaning of the keys belongs to the plugin, and validating
+ * them here would mean u8 knowing every plugin's schema. They travel through
+ * normalization untouched and reach the plugin's factory verbatim.
+ */
+const optionsMap = z.record(z.string().min(1), z.unknown());
+
+/** A plugin entry: a bare spec, or the same spec plus options for its factory. */
+export const pluginSchema = z.union(
+  [
+    z.string().min(1),
+    z.strictObject({
+      /** npm package name, or a path relative to the workspace root. */
+      spec: z.string().min(1),
+      options: optionsMap.optional(),
+    }),
+  ],
+  { error: 'expected a package name or path, or { "spec": "…", "options": { … } }' },
+);
+
+/**
+ * Options for the `protos` built-in. Unlike `git` and `health` it is *off* until
+ * configured: it has nothing to link until a workspace names the packages its
+ * subapps share, which is why enabling it with a bare `true` is rejected in
+ * `normalize.ts` with a message that says what is missing.
+ */
+export const protosOptionsSchema = z.strictObject({
+  packages: z
+    .array(packageName("shared package"), {
+      // A missing `packages` is the mistake this built-in invites, and zod's
+      // default ("expected array, received undefined") never mentions protos.
+      error: (issue) =>
+        issue.input === undefined
+          ? 'the protos built-in needs "packages": the shared packages it links, e.g. ["@myorg/protos"]'
+          : undefined,
+    })
+    .min(1, '"packages" must name at least one shared package, e.g. ["@myorg/protos"]')
+    .superRefine(rejectDuplicatePackages),
+  /** How often installed/linked versions are re-read; ms. */
+  interval: posInt.optional(),
+});
+
+/**
+ * A built-in that takes no options today. Passing it an object is rejected
+ * rather than accepted-and-ignored, which would read exactly like a setting that
+ * had taken effect.
+ */
+const optionlessBuiltin = (name: string) =>
+  z.boolean({
+    error: (issue) =>
+      isPlainObject(issue.input)
+        ? `the "${name}" built-in takes no options: use true or false`
+        : undefined,
+  });
+
+export const builtinsSchema = z.strictObject({
+  git: optionlessBuiltin("git").optional(),
+  health: optionlessBuiltin("health").optional(),
+  /** `true` is rejected in `normalize.ts`: enabling protos means configuring it. */
+  protos: z
+    .union([z.boolean(), protosOptionsSchema], {
+      error: 'expected false, or options like { "packages": ["@myorg/protos"] }',
+    })
+    .optional(),
+});
+
 export const limitsSchema = z.strictObject({
   logMaxBytes: posInt.optional(),
   logKeep: posInt.optional(),
@@ -136,14 +231,9 @@ export const workspaceConfigSchema = z.strictObject({
       subapp: z.string().optional(),
     })
     .optional(),
-  /** npm package names or paths relative to the workspace root. */
-  plugins: z.array(z.string().min(1)).optional(),
-  builtins: z
-    .strictObject({
-      git: z.boolean().optional(),
-      health: z.boolean().optional(),
-    })
-    .optional(),
+  /** npm package names or paths relative to the workspace root, with optional options. */
+  plugins: z.array(pluginSchema).optional(),
+  builtins: builtinsSchema.optional(),
   limits: limitsSchema.optional(),
   /**
    * Keys are validated in `normalize.ts` so the reserved-namespace rule can be
@@ -156,6 +246,9 @@ export const workspaceConfigSchema = z.strictObject({
 });
 
 export type RawWorkspaceConfig = z.infer<typeof workspaceConfigSchema>;
+export type RawPlugin = z.infer<typeof pluginSchema>;
+export type RawBuiltins = z.infer<typeof builtinsSchema>;
+export type RawProtosOptions = z.infer<typeof protosOptionsSchema>;
 export type RawApp = z.infer<typeof appSchema>;
 export type RawSubapp = z.infer<typeof subappSchema>;
 export type RawCommand = z.infer<typeof commandSchema>;
