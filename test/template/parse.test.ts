@@ -163,6 +163,8 @@ describe("shipped defaults", () => {
       }),
       plain,
     );
-    expect(out).toBe(`  ● ${"gateway".padEnd(22)} healthy`);
+    // status and health carry pad() because without colour they fall back to
+    // words of varying width ("running"/"starting"), which would shift the row.
+    expect(out).toBe(`  ${"●".padEnd(8)} ${"gateway".padEnd(22)} ${"healthy".padEnd(9)}`);
   });
 });

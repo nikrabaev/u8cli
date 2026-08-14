@@ -22,6 +22,21 @@ export function workspaceId(realConfigPath: string): string {
   return createHash("sha256").update(realConfigPath).digest("hex").slice(0, 12);
 }
 
+/**
+ * The kernel caps a unix socket's PATH (104 bytes on macOS, 108 on Linux), and
+ * exceeding it fails at connect() with a bare EINVAL that names no cause. A long
+ * $HOME or a custom `U8_STATE_HOME` reaches it easily, so fall back to the system
+ * temp dir. Daemon and clients derive this identically from the workspace id, so
+ * they still agree on where to meet.
+ */
+const MAX_SOCKET_PATH = 100;
+
+function socketPathFor(dir: string, id: string): string {
+  const preferred = path.join(dir, "daemon.sock");
+  if (Buffer.byteLength(preferred) <= MAX_SOCKET_PATH) return preferred;
+  return path.join(os.tmpdir(), `u8-${id}.sock`);
+}
+
 export interface StatePaths {
   id: string;
   dir: string;
@@ -39,7 +54,7 @@ export function statePaths(realConfigPath: string): StatePaths {
   return {
     id,
     dir,
-    socket: path.join(dir, "daemon.sock"),
+    socket: socketPathFor(dir, id),
     pidFile: path.join(dir, "daemon.pid"),
     daemonLog: path.join(dir, "daemon.log"),
     stateFile: path.join(dir, "state.json"),

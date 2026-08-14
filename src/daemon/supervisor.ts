@@ -6,7 +6,12 @@
  * so its whole job is: spawn, decide whether an exit was wanted, and bring the
  * process back on a backoff ladder when the config asks for it.
  *
- * Three rules drive the design:
+ * Four rules drive the design:
+ *  - **A target owns exactly one process.** Its definition is normally the
+ *    subapp's `start` script, but a `kind: "service"` command (SPEC §2.5) may
+ *    claim it through {@link StartOptions.script}/{@link StartOptions.via};
+ *    starting a *different* definition therefore replaces what is running,
+ *    while starting the same one again stays a no-op.
  *  - **A start is only real once it survives a grace period.** A service that
  *    dies in its first half second never reached `running`; reporting it as
  *    running and then instantly as crashed would make every dashboard row lie,
@@ -17,7 +22,7 @@
  *  - **Every timer is unref'd.** A pending restart backoff must never be the
  *    reason a daemon with nothing to do stays alive.
  */
-import { coreStartScript, coreStopScript, findSubapp } from "../config/index.js";
+import { commandTargets, coreStartScript, coreStopScript, findCommand, findSubapp } from "../config/index.js";
 import type { NormalizedSubapp, NormalizedWorkspace, TargetId } from "../config/types.js";
 import type { LogLine, LogStream, ServiceState } from "../ipc/protocol.js";
 import {
@@ -84,6 +89,12 @@ interface Entry {
    * misread as a crash — and auto-restarted.
    */
   stopRequested: boolean;
+  /**
+   * The definition this process belongs to: the name of the `kind: "service"`
+   * command that started it, or `undefined` for the target's own `start` script.
+   * A start naming a *different* one replaces the process.
+   */
+  via?: string;
   /** Start script + cwd + env as of the spawn; compared by {@link Supervisor.markStale}. */
   fingerprint?: string;
   /** Serializes start/stop per target so the two can never interleave. */
@@ -199,10 +210,41 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 
   // --- spawn-time definition ------------------------------------------------
 
-  const fingerprintOf = (ws: NormalizedWorkspace, id: TargetId): string => {
+  /**
+   * The script the current config would spawn this target from: the subapp's
+   * `start` script normally, or the per-target script of the `kind: "service"`
+   * command that owns the process. `null` means the config no longer defines
+   * one — a dropped target, a command that lost the target, or a deleted command.
+   */
+  const definedScript = (ws: NormalizedWorkspace, id: TargetId, via: string | undefined): string | null => {
+    if (via === undefined) return coreStartScript(ws, id);
+    const command = findCommand(ws, via);
+    if (!command) return null;
+    // `null`/absent in the targets map is a skip, which reads the same here as
+    // "this command no longer defines a process for this target".
+    return commandTargets(ws, command, [id])[0]?.script ?? null;
+  };
+
+  /**
+   * What `stale` compares (SPEC §8). At spawn time `script` is the one actually
+   * handed to the shell; {@link Supervisor.markStale} re-resolves the same
+   * definition against the current config and compares the two.
+   *
+   * The definition is per-process: for a command-started one it is the command's
+   * script, so editing the subapp's own `start` script leaves a `start.debug`
+   * process alone, and editing (or deleting) `start.debug` is what marks it
+   * stale. Anything else would report every command-started target as
+   * permanently stale.
+   */
+  const fingerprintOf = (
+    ws: NormalizedWorkspace,
+    id: TargetId,
+    via: string | undefined,
+    script: string | null,
+  ): string => {
     const subapp = findSubapp(ws, id);
     const env = Object.entries(subapp?.env ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-    return JSON.stringify([coreStartScript(ws, id), subapp?.cwd ?? null, env]);
+    return JSON.stringify([via ?? null, script, subapp?.cwd ?? null, env]);
   };
 
   /**
@@ -279,22 +321,39 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
   /** Assumes the entry lock is held. `auto` marks a restart driven by the backoff timer. */
   const doStart = async (entry: Entry, opts: StartOptions, auto: boolean): Promise<ServiceState> => {
     clearRestart(entry);
+    const ws = workspace.current();
+    // The backoff ladder resurrects the process that crashed, so it inherits the
+    // command that started it. An explicit start naming no command is a plain
+    // `app:start` and returns the target to its own `start` script.
+    const via = auto ? entry.via : opts.via;
+    const script = opts.script ?? definedScript(ws, entry.id, via);
+
     if (entry.handle) {
-      if (opts.force !== true) return { ...entry.state };
+      // One process per target, so a start on behalf of a *different* definition
+      // — `app:start` over a `start.debug` process, or the other way round —
+      // replaces what is running. Re-starting the same definition stays the
+      // no-op it has always been, even when a reload has since edited its
+      // script: SPEC §8 keeps that process untouched and marks it `stale`, and
+      // silently killing it here would make `stale` unobservable. A definition
+      // that no longer resolves never replaces anything either — it would tear
+      // down a healthy process only to fail below.
+      const replaces = script !== null && via !== entry.via;
+      if (opts.force !== true && !replaces) return { ...entry.state };
+      if (replaces) notice(entry, `replacing the running process${via === undefined ? "" : ` via ${via}`}`);
       await doStop(entry, {});
     }
 
-    const ws = workspace.current();
     const subapp = findSubapp(ws, entry.id);
     if (!subapp) {
       throw new U8Error("UNKNOWN_TARGET", `unknown target "${entry.id}"`, { target: entry.id });
     }
-    const script = coreStartScript(ws, entry.id);
     if (script === null) {
       throw new U8Error(
         "PROCESS_FAILED",
-        `target "${entry.id}" has no start script — add "scripts": { "start": ... } to it`,
-        { target: entry.id },
+        via === undefined
+          ? `target "${entry.id}" has no start script — add "scripts": { "start": ... } to it`
+          : `command "${via}" has no script for target "${entry.id}"`,
+        { target: entry.id, via },
       );
     }
 
@@ -305,7 +364,11 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
 
     entry.handle = handle;
     entry.stopRequested = false;
-    entry.fingerprint = fingerprintOf(ws, entry.id);
+    entry.via = via;
+    // The script as spawned, not as the config reads now: a reload landing
+    // between the engine resolving it and this spawn must leave the process
+    // reported as stale, which is exactly what it is.
+    entry.fingerprint = fingerprintOf(ws, entry.id, via, script);
     entry.offOutput = handle.onOutput((stream, text, ts) => appendLog(entry, stream, text, ts));
 
     setState(entry, {
@@ -320,7 +383,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
       // an automatic one must carry the consecutive-failure count forward.
       restartAttempts: auto ? entry.state.restartAttempts : 0,
     });
-    notice(entry, `spawned pid=${handle.pid}`);
+    notice(entry, `spawned pid=${handle.pid}${via === undefined ? "" : ` via ${via}`}`);
 
     entry.graceTimer = setTimeout(() => {
       entry.graceTimer = undefined;
@@ -449,6 +512,12 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
     start,
     stop,
 
+    /**
+     * Explicit restart, so it names no command: the target comes back on its own
+     * `start` script even if a `kind: "service"` command owned the last process.
+     * Only the crash-restart ladder resurrects a command-started process as it
+     * was — a user asking for a restart is asking for the target's default.
+     */
     async restart(id: TargetId): Promise<ServiceState> {
       await stop(id);
       return start(id, { force: true });
@@ -477,7 +546,7 @@ export function createSupervisor(deps: SupervisorDeps): Supervisor {
         const stale =
           entry.handle !== undefined &&
           entry.fingerprint !== undefined &&
-          entry.fingerprint !== fingerprintOf(ws, id);
+          entry.fingerprint !== fingerprintOf(ws, id, entry.via, definedScript(ws, id, entry.via));
         if (entry.state.stale !== stale) setState(entry, { stale });
       }
     },

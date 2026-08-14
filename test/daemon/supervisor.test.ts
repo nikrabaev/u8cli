@@ -655,6 +655,145 @@ describe("logs", () => {
   });
 });
 
+describe("service commands", () => {
+  /** A start script that proves which of the two definitions actually spawned. */
+  const marker = (dir: string, name: string): string =>
+    `printf '%s\\n' '${name}' > '${path.join(dir, "which.marker")}'; printf 'ready\\n'; while true; do sleep 0.05; done`;
+
+  /** `svc` with an ordinary start script plus a `kind: "service"` command. */
+  const withDebugCommand = (script: (dir: string) => string): ConfigBuilder => (dir) => ({
+    apps: { svc: { path: ".", scripts: { start: marker(dir, "start") } } },
+    commands: { "start.debug": { kind: "service", script: script(dir) } },
+    limits: { stopTimeout: 1_000 },
+  });
+
+  it("supervises the script the command named, and says so in the log", async () => {
+    const h = await harness(withDebugCommand((dir) => marker(dir, "debug")));
+
+    const started = await h.sup.start("svc", { script: marker(h.dir, "debug"), via: "start.debug" });
+    await waitFor(() => h.sup.state("svc").status === "running", "running");
+
+    expect(started.pid).toBeGreaterThan(0);
+    expect(readFileSync(path.join(h.dir, "which.marker"), "utf8").trim()).toBe("debug");
+    expect(h.u8Lines("svc").some((l) => /^spawned pid=\d+ via start\.debug$/.test(l))).toBe(true);
+
+    const stopped = await h.sup.stop("svc");
+
+    expect(stopped.status).toBe("stopped");
+    expect(await waitForPidGone(started.pid ?? -1)).toBe(true);
+  });
+
+  it("replaces a running process when a different script is started", async () => {
+    const h = await harness(withDebugCommand((dir) => marker(dir, "debug")));
+    const first = await startAndWaitRunning(h, "svc");
+
+    const replaced = await h.sup.start("svc", { script: marker(h.dir, "debug"), via: "start.debug" });
+    await waitFor(() => h.sup.state("svc").status === "running", "running again");
+
+    expect(replaced.pid).not.toBe(first);
+    expect(await waitForPidGone(first)).toBe(true);
+    expect(readFileSync(path.join(h.dir, "which.marker"), "utf8").trim()).toBe("debug");
+    // Starting the very same definition again stays the no-op it is for app:start.
+    const again = await h.sup.start("svc", { script: marker(h.dir, "debug"), via: "start.debug" });
+    expect(again.pid).toBe(replaced.pid);
+    expect(h.u8Lines("svc").filter((l) => l.startsWith("spawned pid=")).length).toBe(2);
+  });
+
+  it("brings the command's own script back when the crash ladder restarts it", async () => {
+    const count = (dir: string): string => path.join(dir, "count");
+    const h = await harness(
+      (dir) => ({
+        apps: { svc: { path: ".", restart: "on-crash", scripts: { start: marker(dir, "start") } } },
+        commands: {
+          "start.debug": { kind: "service", script: fixture("crash-until.sh", count(dir), "1") },
+        },
+      }),
+      crashTiming({ restartBackoffMs: [20] }),
+    );
+
+    await h.sup.start("svc", { script: fixture("crash-until.sh", count(h.dir), "1"), via: "start.debug" });
+    await waitFor(() => h.sup.state("svc").status === "running", "healthy after one crash");
+
+    // The restart re-ran the command's script, not the target's `start` script.
+    expect(readFileSync(count(h.dir), "utf8").trim()).toBe("2");
+    expect(existsSync(path.join(h.dir, "which.marker"))).toBe(false);
+    expect(h.u8Lines("svc").filter((l) => /via start\.debug$/.test(l))).toHaveLength(2);
+  });
+
+  it("hands the target back to its own start script when a plain start takes over", async () => {
+    const h = await harness(withDebugCommand((dir) => marker(dir, "debug")));
+    const debug = await h.sup.start("svc", { script: marker(h.dir, "debug"), via: "start.debug" });
+    await waitFor(() => h.sup.state("svc").status === "running", "the debug process");
+    const debugPid = debug.pid ?? -1;
+
+    const plain = await h.sup.start("svc");
+    await waitFor(() => h.sup.state("svc").status === "running", "the start-script process");
+
+    expect(plain.pid).not.toBe(debugPid);
+    expect(await waitForPidGone(debugPid)).toBe(true);
+    await waitFor(
+      () => readFileSync(path.join(h.dir, "which.marker"), "utf8").trim() === "start",
+      "the start script to take the slot",
+    );
+    // The process now belongs to the target's own definition again, so that is
+    // what staleness measures it against.
+    h.sup.markStale(["svc"]);
+    expect(h.sup.state("svc").stale).toBe(false);
+  });
+
+  /**
+   * The counterpart to replacement: same definition, different text. SPEC §8
+   * keeps the process running and marks it `stale`, so a plain start must not
+   * quietly kill it — that would make `stale` unobservable, and would restart
+   * every edited service the next time anything starts the profile.
+   */
+  it("does not replace a process a reload only made stale", async () => {
+    const plain = (arg: string): ConfigBuilder => () => ({
+      apps: { svc: { path: ".", scripts: { start: fixture("service.sh", arg) } } },
+      limits: { stopTimeout: 1_000 },
+    });
+    const h = await harness(plain("first"));
+    const pid = await startAndWaitRunning(h, "svc");
+
+    await h.reload(plain("edited"));
+    h.sup.markStale(["svc"]);
+    expect(h.sup.state("svc").stale).toBe(true);
+
+    const again = await h.sup.start("svc");
+
+    expect(again.pid).toBe(pid);
+    expect(pidAlive(pid)).toBe(true);
+    expect(h.sup.state("svc").stale).toBe(true);
+    expect(h.u8Lines("svc").filter((l) => l.startsWith("spawned pid=")).length).toBe(1);
+
+    // The same holds for a command-started process whose command was edited.
+    const debugged = await harness(() => ({
+      apps: { svc: { path: ".", scripts: { start: fixture("service.sh", "plain") } } },
+      commands: { "start.debug": { kind: "service", script: fixture("service.sh", "debug") } },
+      limits: { stopTimeout: 1_000 },
+    }));
+    const first = await debugged.sup.start("svc", {
+      script: fixture("service.sh", "debug"),
+      via: "start.debug",
+    });
+    await waitFor(() => debugged.sup.state("svc").status === "running", "the debug process");
+
+    await debugged.reload(() => ({
+      apps: { svc: { path: ".", scripts: { start: fixture("service.sh", "plain") } } },
+      commands: { "start.debug": { kind: "service", script: fixture("service.sh", "edited-debug") } },
+      limits: { stopTimeout: 1_000 },
+    }));
+    const rerun = await debugged.sup.start("svc", {
+      script: fixture("service.sh", "edited-debug"),
+      via: "start.debug",
+    });
+
+    expect(rerun.pid).toBe(first.pid);
+    debugged.sup.markStale(["svc"]);
+    expect(debugged.sup.state("svc").stale).toBe(true);
+  });
+});
+
 describe("staleness", () => {
   it("flips only when the spawn-time definition actually changed", async () => {
     const h = await harness(oneService);
@@ -681,6 +820,61 @@ describe("staleness", () => {
     expect(h.sup.state("svc").stale).toBe(false);
     h.sup.markStale(["svc"]);
     expect(h.sup.state("svc").stale).toBe(false);
+  });
+
+  /**
+   * The engine resolves a service command's script from the workspace snapshot
+   * its run started with, so a reload landing in between hands the supervisor a
+   * script the config no longer contains. What is *running* is the stale thing —
+   * re-reading the definition at spawn time would call it current and hide it.
+   */
+  it("measures the script it actually spawned, not the one the config reads now", async () => {
+    const build = (debugArg: string): ConfigBuilder => () => ({
+      apps: { svc: { path: ".", scripts: { start: fixture("service.sh", "plain") } } },
+      commands: { "start.debug": { kind: "service", script: fixture("service.sh", debugArg) } },
+      limits: { stopTimeout: 1_000 },
+    });
+    const h = await harness(build("current"));
+
+    await h.sup.start("svc", { script: fixture("service.sh", "already-gone"), via: "start.debug" });
+    await waitFor(() => h.sup.state("svc").status === "running", "running");
+
+    h.sup.markStale(["svc"]);
+    expect(h.sup.state("svc").stale).toBe(true);
+  });
+
+  it("measures a command-started process against that command, not the start script", async () => {
+    const debug = (arg: string): string => fixture("service.sh", arg);
+    const build = (start: string, debugArg: string): ConfigBuilder => () => ({
+      apps: { svc: { path: ".", scripts: { start: fixture("service.sh", start) } } },
+      commands: { "start.debug": { kind: "service", script: debug(debugArg) } },
+      limits: { stopTimeout: 1_000 },
+    });
+    const h = await harness(build("plain", "debug"));
+
+    await h.sup.start("svc", { script: debug("debug"), via: "start.debug" });
+    await waitFor(() => h.sup.state("svc").status === "running", "running");
+
+    // Started from the command's definition, which has not changed.
+    h.sup.markStale(["svc"]);
+    expect(h.sup.state("svc").stale).toBe(false);
+
+    // The target's own start script is irrelevant to this process.
+    await h.reload(build("edited", "debug"));
+    h.sup.markStale(["svc"]);
+    expect(h.sup.state("svc").stale).toBe(false);
+
+    // Editing the command it was started from is what makes it stale.
+    await h.reload(build("edited", "edited-debug"));
+    h.sup.markStale(["svc"]);
+    expect(h.sup.state("svc").stale).toBe(true);
+
+    // So is losing the command altogether.
+    await h.reload(() => ({
+      apps: { svc: { path: ".", scripts: { start: debug("debug") } } },
+    }));
+    h.sup.markStale(["svc"]);
+    expect(h.sup.state("svc").stale).toBe(true);
   });
 
   it("never marks a target that is not running", async () => {

@@ -13,7 +13,9 @@
 
   "templates": {
     "app": "{app@name:pad(20)} {app@dirname:dim} {git@branch:color(yellow):max(18)} {git@dirty:color(red)}",
-    "subapp": "  {app@status} {app@name:pad(18)} {health@status} {app@uptime:dim} {x@port:dim}"
+    // Status and health are padded because without colour they render as words
+    // ("running"/"starting") rather than a fixed-width glyph.
+    "subapp": "  {app@status:pad(8)} {app@name:max(16):pad(16)} {health@status:pad(9)} {app@uptime:dim:pad(5)} {x@port:dim}"
   },
 
   // {x@port} — a config-defined indicator: shell command polled per target.

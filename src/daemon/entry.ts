@@ -19,7 +19,10 @@
  *    of the daemon that won the socket.
  *  - **A signal is a clean shutdown, not an exit.** SIGTERM/SIGINT run the same
  *    sequence as `u8 daemon stop`, so services are stopped and the socket
- *    removed before the process goes away.
+ *    removed before the process goes away. The handlers go on *before* startup:
+ *    a client spawns this process and then waits on the socket, and a signal in
+ *    that half second would otherwise kill it with the default disposition and
+ *    leave the socket and pid file behind for the next launch to reclaim.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -132,6 +135,69 @@ export async function runDaemonEntry(argv: readonly string[]): Promise<number> {
   // `process.stdout.write`, which `redirectOutput` replaces underneath it.
   const logger: Logger = createLogger("daemon");
   let daemon: Daemon | undefined;
+  /** True once there is a listening daemon that `shutdown` can take down. */
+  let ready = false;
+  /** A stop asked for before that; honoured the moment startup finishes. */
+  let pending: string | undefined;
+  let exitCode = 0;
+
+  /**
+   * The one way this process is asked to stop. Before the daemon is up there is
+   * nothing to shut down gracefully — no socket, no children — so the request is
+   * remembered and replayed as soon as startup settles, one way or the other.
+   */
+  const requestStop = (reason: string): void => {
+    const active = daemon;
+    if (!ready || !active) {
+      if (pending !== undefined) {
+        // Insisting, while startup is stuck somewhere JS cannot interrupt (a
+        // config file on a hung mount). Leaving is better than ignoring them;
+        // a socket or pid file left behind is reclaimed by the next launch.
+        logger.warn(`${reason} again during startup — exiting immediately`);
+        process.exit(1);
+      }
+      pending = reason;
+      logger.info(`${reason} during startup — stopping as soon as it finishes`);
+      return;
+    }
+    void active.shutdown(reason).catch((err: unknown) => {
+      logger.error(`shutdown failed: ${errorMessage(err)}`);
+    });
+  };
+
+  const onSigterm = (): void => requestStop("SIGTERM");
+  const onSigint = (): void => requestStop("SIGINT");
+  // A stray rejection is a bug worth shouting about, but it is not a reason to
+  // kill services the user asked to keep running.
+  const onRejection = (reason: unknown): void => {
+    logger.error(`unhandled rejection: ${errorMessage(reason)}`);
+  };
+  // An uncaught exception is different: the daemon's state is now unknown, and
+  // supervising processes from an unknown state is worse than stopping them.
+  const onException = (err: Error): void => {
+    logger.error(`uncaught exception: ${errorMessage(err)}`, { stack: err.stack });
+    exitCode = 1;
+    requestStop("uncaught exception");
+  };
+
+  process.on("SIGTERM", onSigterm);
+  process.on("SIGINT", onSigint);
+  process.on("unhandledRejection", onRejection);
+  process.on("uncaughtException", onException);
+
+  /**
+   * Taken off again on the way out. In the daemon process this changes nothing —
+   * it exits right after — but this function is exported and also runs in
+   * *someone else's* process (a client checking a workspace, a test): leaving
+   * the handlers behind would make that process ignore SIGTERM/SIGINT for good
+   * and swallow uncaught exceptions into a log nobody is reading.
+   */
+  const removeHandlers = (): void => {
+    process.off("SIGTERM", onSigterm);
+    process.off("SIGINT", onSigint);
+    process.off("unhandledRejection", onRejection);
+    process.off("uncaughtException", onException);
+  };
 
   try {
     const args = parseEntryArgs(argv);
@@ -156,42 +222,31 @@ export async function runDaemonEntry(argv: readonly string[]): Promise<number> {
     await daemon.start();
     // Only now: the socket is ours, so this file describes a daemon that exists.
     fs.writeFileSync(paths.pidFile, `${process.pid}\n`, { encoding: "utf8", mode: 0o600 });
+    // Before `process.title`, which is slow enough on macOS to be a window of
+    // its own: from here a signal has a daemon to shut down.
+    ready = true;
     process.title = `u8 daemon ${paths.id}`;
   } catch (err) {
     const message = describe(err);
     logger.error(`daemon failed to start: ${message}`);
     // Release whatever `start()` managed to bring up before it threw.
     if (daemon) await daemon.shutdown("startup failed").catch(() => undefined);
+    removeHandlers();
     return 1;
   }
 
-  const active = daemon;
-  let exitCode = 0;
+  try {
+    const active = daemon;
+    // A signal that arrived while the daemon was coming up: it is up now, so the
+    // request it made turns into the ordinary graceful shutdown.
+    if (pending !== undefined) requestStop(pending);
 
-  const stop = (reason: string): void => {
-    void active.shutdown(reason).catch((err: unknown) => {
-      logger.error(`shutdown failed: ${errorMessage(err)}`);
-    });
-  };
-  process.on("SIGTERM", () => stop("SIGTERM"));
-  process.on("SIGINT", () => stop("SIGINT"));
-
-  // A stray rejection is a bug worth shouting about, but it is not a reason to
-  // kill services the user asked to keep running.
-  process.on("unhandledRejection", (reason) => {
-    logger.error(`unhandled rejection: ${errorMessage(reason)}`);
-  });
-  // An uncaught exception is different: the daemon's state is now unknown, and
-  // supervising processes from an unknown state is worse than stopping them.
-  process.on("uncaughtException", (err) => {
-    logger.error(`uncaught exception: ${errorMessage(err)}`, { stack: err.stack });
-    exitCode = 1;
-    stop("uncaught exception");
-  });
-
-  const reason = await active.stopped;
-  logger.info(`daemon exiting (${reason})`);
-  return exitCode;
+    const reason = await active.stopped;
+    logger.info(`daemon exiting (${reason})`);
+    return exitCode;
+  } finally {
+    removeHandlers();
+  }
 }
 
 /**

@@ -42,6 +42,14 @@ export interface WorkspaceHolder {
 export interface StartOptions {
   /** Bypasses the "already running" short-circuit (used by restart). */
   force?: boolean;
+  /**
+   * Supervises this script instead of the target's `start` script — how a
+   * `kind: "service"` command (e.g. `start:debug`) takes over a target. A target
+   * still owns exactly one process, so starting one replaces the other.
+   */
+  script?: string;
+  /** Command that initiated the start; surfaces in log lines and fingerprints. */
+  via?: string;
 }
 
 export interface StopOptions {

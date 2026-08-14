@@ -53,6 +53,10 @@ export interface SupervisorEvent {
   id: TargetId;
   kind: "start" | "stop";
   at: number;
+  /** Start only: the script the engine asked to supervise, if it named one. */
+  script?: string;
+  /** Start only: the command the start was made on behalf of. */
+  via?: string;
 }
 
 export class FakeSupervisor implements Supervisor {
@@ -91,8 +95,8 @@ export class FakeSupervisor implements Supervisor {
     return this.states().filter((s) => s.status === "running").length;
   }
 
-  async start(id: TargetId, _opts?: StartOptions): Promise<ServiceState> {
-    this.events.push({ id, kind: "start", at: Date.now() });
+  async start(id: TargetId, opts?: StartOptions): Promise<ServiceState> {
+    this.events.push({ id, kind: "start", at: Date.now(), script: opts?.script, via: opts?.via });
     if (this.startDelayMs > 0) await delay(this.startDelayMs);
     if (this.failStart.has(id)) throw new Error(`fake supervisor cannot start ${id}`);
     const crashed = this.crashOnStart.has(id);
@@ -203,7 +207,8 @@ export interface HarnessOptions {
 
 export interface Harness {
   dir: string;
-  ws: NormalizedWorkspace;
+  /** The workspace the engine currently sees — swapped by {@link Harness.reload}. */
+  readonly ws: NormalizedWorkspace;
   paths: StatePaths;
   supervisor: FakeSupervisor;
   plugins: FakePluginHost;
@@ -212,6 +217,8 @@ export interface Harness {
   finished: TaskResult[];
   logs: LogLine[];
   setProfile(name: string): void;
+  /** Rewrites `u8.jsonc` and swaps what the holder hands out — a hot reload. */
+  reload(config: object): NormalizedWorkspace;
   /** Every state pushed for one target, in order. */
   statesOf(targetId: TargetId): TaskTargetState[];
   file(rel: string): string;
@@ -229,7 +236,7 @@ export function createHarness(opts: HarnessOptions): Harness {
   }
   fs.writeFileSync(path.join(dir, "u8.jsonc"), JSON.stringify(opts.config, null, 2), "utf8");
 
-  const ws = loadWorkspace(dir);
+  let ws = loadWorkspace(dir);
   const stateDir = path.join(dir, ".state");
   const paths: StatePaths = {
     id: ws.id,
@@ -249,6 +256,8 @@ export function createHarness(opts: HarnessOptions): Harness {
   const logs: LogLine[] = [];
   let profile = opts.profile ?? ws.defaultProfile;
 
+  // A function, not a captured value: `reload` swaps the workspace underneath a
+  // live engine exactly as the daemon's config reload does.
   const engine = createEngine({
     workspace: { current: () => ws },
     paths,
@@ -265,7 +274,9 @@ export function createHarness(opts: HarnessOptions): Harness {
 
   return {
     dir,
-    ws,
+    get ws() {
+      return ws;
+    },
     paths,
     supervisor,
     plugins,
@@ -275,6 +286,11 @@ export function createHarness(opts: HarnessOptions): Harness {
     logs,
     setProfile(name: string) {
       profile = name;
+    },
+    reload(config: object) {
+      fs.writeFileSync(path.join(dir, "u8.jsonc"), JSON.stringify(config, null, 2), "utf8");
+      ws = loadWorkspace(dir);
+      return ws;
     },
     statesOf(targetId: TargetId) {
       return progress.filter((p) => p.targetId === targetId).map((p) => p.state);

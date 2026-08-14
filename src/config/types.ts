@@ -161,7 +161,7 @@ export const DEFAULT_LIMITS: Limits = {
  */
 export const DEFAULT_TEMPLATES: Templates = {
   app: "{app@name:max(24):pad(24)} {app@dirname:dim} {git@branch:color(yellow):max(20)} {git@dirty:color(red)}",
-  subapp: "  {app@status} {app@name:max(22):pad(22)} {health@status}",
+  subapp: "  {app@status:pad(8)} {app@name:max(22):pad(22)} {health@status:pad(9)}",
 };
 
 export const DEFAULT_HEALTH = {

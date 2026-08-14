@@ -28,17 +28,17 @@ import { createEngine } from "../engine/index.js";
 import { createIndicatorRegistry } from "../indicators/index.js";
 import { createRpcServer, type RpcConnection, type RpcServer } from "../ipc/index.js";
 import { PROTOCOL_VERSION, type DaemonStatus, type LogLine, type Snapshot } from "../ipc/protocol.js";
+import { createPluginHost, type LoadablePluginHost } from "../plugins/index.js";
 import { ConfigError, errorMessage } from "../util/errors.js";
 import { createLogger, type Logger } from "../util/logger.js";
 import { statePaths, type StatePaths } from "../util/paths.js";
 import { VERSION } from "../version.js";
-import {
-  emptyPluginHost,
-  type DaemonContext,
-  type PluginHost,
-  type RunHandle,
-  type Unsubscribe,
-  type WorkspaceHolder,
+import type {
+  DaemonContext,
+  PluginHost,
+  RunHandle,
+  Unsubscribe,
+  WorkspaceHolder,
 } from "./contracts.js";
 import { buildSnapshot, createHandlers, type HandlerDeps, type ReloadOutcome } from "./handlers.js";
 import { createStateStore } from "./state.js";
@@ -63,10 +63,12 @@ export interface DaemonOptions {
   /** Overrides `limits.daemonIdle` and `U8_IDLE_MS`. `0` disables idle exit. */
   idleMs?: number;
   /**
-   * Phase 8 seam: the loaded plugin host. Until plugins land, the daemon runs
-   * against {@link emptyPluginHost}, which contributes nothing to any registry.
+   * Replaces the host built from `ws.plugins` and the built-ins. A test passes
+   * a fake (`emptyPluginHost` in `contracts.ts`) to keep a workspace's real
+   * plugins out of the way; a host that has `load`/`dispose` is driven through
+   * its lifecycle exactly like the real one.
    */
-  plugins?: PluginHost;
+  plugins?: PluginHost | LoadablePluginHost;
 }
 
 export interface Daemon {
@@ -92,7 +94,20 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   const configPath = ws.configPath;
   const paths = statePaths(configPath);
   const workspace: WorkspaceHolder = { current: () => ws };
-  const plugins = opts.plugins ?? emptyPluginHost;
+  /**
+   * Plugin failures are pushed as they happen so a connected client can banner
+   * them; the cold-start ones land before anyone can be listening, which is why
+   * `Snapshot.plugins` carries the same information for whoever attaches next.
+   */
+  const plugins =
+    opts.plugins ??
+    createPluginHost({
+      workspace,
+      logger,
+      onError: (plugin, error) => {
+        server?.broadcast("plugin.error", { plugin, error });
+      },
+    });
 
   const store = createStateStore({ file: paths.stateFile, logger });
   let activeProfile = pickProfile(ws, store.current().activeProfile);
@@ -337,9 +352,20 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       supervisor.stopAll().catch((err: unknown) => {
         logger.error(`stopping services failed: ${errorMessage(err)}`);
       }),
-      indicators.stop().catch((err: unknown) => {
-        logger.error(`stopping indicators failed: ${errorMessage(err)}`);
-      }),
+      // Providers first, then the plugins that own them: a teardown releasing
+      // what a poll still in flight is reading would be the one race worth
+      // avoiding here.
+      indicators
+        .stop()
+        .catch((err: unknown) => {
+          logger.error(`stopping indicators failed: ${errorMessage(err)}`);
+        })
+        .then(async () => {
+          if (!isLoadable(plugins)) return;
+          await plugins.dispose().catch((err: unknown) => {
+            logger.error(`disposing plugins failed: ${errorMessage(err)}`);
+          });
+        }),
     ]);
 
     for (const dispose of disposers.splice(0)) {
@@ -363,6 +389,10 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     if (listening) return;
     await mkdir(paths.dir, { recursive: true });
 
+    // Before the registry starts: plugin providers have to be in place for the
+    // first activation pass, or every plugin cell would sit empty until the
+    // next rebind. `load()` swallows a plugin's failure by contract.
+    if (isLoadable(plugins)) await plugins.load();
     for (const registration of plugins.indicators()) indicators.register(registration);
     // Core `app@` providers are registered by the registry itself, and `x@` ones
     // are derived from the workspace on every start/rebind — only plugin
@@ -431,6 +461,20 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       };
     },
   };
+}
+
+/**
+ * True for a host the daemon owns the lifecycle of. A test may inject a plain
+ * {@link PluginHost} (nothing to load, nothing to dispose), so the two are told
+ * apart here rather than forced into one shape.
+ *
+ * Both halves are checked: a host with only one of them would otherwise pass
+ * here and throw a `TypeError` from inside `Promise.all` during shutdown, which
+ * is the one place a throw leaves `stopped` unresolved forever.
+ */
+function isLoadable(host: PluginHost | LoadablePluginHost): host is LoadablePluginHost {
+  const candidate = host as LoadablePluginHost;
+  return typeof candidate.load === "function" && typeof candidate.dispose === "function";
 }
 
 /**

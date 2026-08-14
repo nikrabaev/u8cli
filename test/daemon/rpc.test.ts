@@ -65,9 +65,11 @@ describe("snapshot", () => {
     expect(snapshot.profiles.find((p) => p.name === "all")?.subappIds).toEqual(["api", "web"]);
     expect(snapshot.services.map((s) => s.targetId)).toEqual(["api", "web", "docs"]);
     expect(snapshot.services.every((s) => s.status === "stopped")).toBe(true);
-    expect(snapshot.plugins).toEqual([]);
+    // The git and health built-ins are enabled unless config disables them.
+    expect(snapshot.plugins.map((p) => p.name).sort()).toEqual(["git", "health"]);
+    expect(snapshot.plugins.every((p) => p.ok)).toBe(true);
     expect(snapshot.configError).toBeUndefined();
-    expect(snapshot.templates.subapp).toContain("{app@status}");
+    expect(snapshot.templates.subapp).toContain("{app@status");
 
     const commands = new Map(snapshot.commands.map((c) => [c.name, c]));
     // `docs` has no start script, so starting does not apply to it — but the
@@ -318,12 +320,16 @@ describe("reload", () => {
     expect(owners.has("web")).toBe(true);
     expect(owners.has("api")).toBe(false);
 
-    // Documented limitation: target resolution runs against the *current*
-    // config, so the orphan cannot be addressed by `service.stop` — only a
-    // daemon shutdown reaps it. Asserted so a future fix has to update it.
-    const rejected = await failure(client.request("service.stop", { targets: ["api"] }));
-    expect(isU8Error(rejected) && rejected.code).toBe("UNKNOWN_TARGET");
-    expect((await client.request("daemon.status", {})).runningServices).toBe(1);
+    // Stop resolution unions the configured targets with whatever the
+    // supervisor still owns, so the orphan stays addressable by id rather than
+    // surviving until daemon shutdown.
+    const runId = (await client.request("service.stop", { targets: ["api"] })).runId;
+    expect((await client.request("run.await", { runId })).ok).toBe(true);
+    await waitFor(
+      () => changes.filter((c) => c.state.targetId === "api").at(-1)?.state.status === "stopped",
+      "the orphaned api to stop",
+    );
+    expect((await client.request("daemon.status", {})).runningServices).toBe(0);
   });
 
   it("falls back to the default profile when the active one is deleted", async () => {

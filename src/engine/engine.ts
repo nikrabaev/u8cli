@@ -28,6 +28,7 @@ import {
   commandTargets,
   coreStartScript,
   coreStopScript,
+  expandTarget,
   findApp,
   findCommand,
   findSubapp,
@@ -131,6 +132,23 @@ type Gate =
   | { kind: "ready" }
   | { kind: "aborted" }
   | { kind: "timeout"; dep: TargetId; timeoutMs: number };
+
+/**
+ * What a start pass hands the supervisor per target.
+ *
+ * `app:start` supervises each target's own `start` script; a `kind: "service"`
+ * config command supervises its resolved per-target script instead (SPEC §2.5).
+ * Everything else about the pass — ordering, readiness gating, hooks — is the
+ * same, so the difference is captured here rather than in a second pass.
+ */
+interface StartPlan {
+  /** The script to supervise, or `null` when this target is skipped. */
+  script(id: TargetId): string | null;
+  /** The command claiming the process; absent for `app:start`. */
+  via?: string;
+  /** Why a `null` script skipped the target, and how its dependents read it. */
+  skip: { error(id: TargetId): string; blocked: string };
+}
 
 export function createEngine(deps: EngineDeps): Engine {
   const { workspace, paths, supervisor, plugins } = deps;
@@ -469,6 +487,30 @@ export function createEngine(deps: EngineDeps): Engine {
     return sink.written ? sink.path : undefined;
   }
 
+  /**
+   * Stand-in definition for a target the config dropped while its process kept
+   * running. It carries only what the stop pipeline needs — an id, a cwd for
+   * hooks, the workspace stop timeout — and deliberately no scripts, env or
+   * dependencies: those are exactly the things nothing remembers, and inventing
+   * them would let a stop resurrect what it is tearing down.
+   */
+  function orphanSubapp(ws: NormalizedWorkspace, id: TargetId): NormalizedSubapp {
+    const dot = id.indexOf(".");
+    return {
+      id,
+      appName: dot === -1 ? id : id.slice(0, dot),
+      name: dot === -1 ? id : id.slice(dot + 1),
+      implicit: dot === -1,
+      cwd: ws.rootDir,
+      scripts: {},
+      env: {},
+      dependsOn: [],
+      restart: "no",
+      readyTimeoutMs: ws.limits.readyTimeoutMs,
+      stopTimeoutMs: ws.limits.stopTimeoutMs,
+    };
+  }
+
   function pipelineTarget(ws: NormalizedWorkspace, subapp: NormalizedSubapp, cwd?: string): PipelineTarget {
     const app = findApp(ws, subapp.appName) ?? { name: subapp.appName, path: subapp.cwd, subapps: [subapp] };
     return { id: subapp.id, subapp, app, cwd: cwd ?? subapp.cwd };
@@ -492,6 +534,63 @@ export function createEngine(deps: EngineDeps): Engine {
   function selectedIds(ws: NormalizedWorkspace, targets: readonly string[] | undefined): TargetId[] {
     if (!targets || targets.length === 0) return profileTargets(ws, deps.activeProfile());
     return resolveTargetStrings(ws, targets);
+  }
+
+  /** Targets the supervisor still owns a process for that the config has dropped. */
+  function orphanIds(ws: NormalizedWorkspace): TargetId[] {
+    return supervisor
+      .states()
+      .filter((s) => s.status !== "stopped" && findSubapp(ws, s.targetId) === undefined)
+      .map((s) => s.targetId);
+  }
+
+  /**
+   * Target resolution for stop, widened by whatever the supervisor is still
+   * running.
+   *
+   * A reload leaves running processes untouched (SPEC §8), so deleting an app
+   * from `u8.jsonc` while it runs produces a target the config cannot name.
+   * Resolving stop against the config alone would answer `UNKNOWN_TARGET` for it
+   * and leave it out of an unqualified "stop everything" — an orphan surviving
+   * until the daemon exits. Start and run stay strict on purpose: nothing in the
+   * config says what they would run.
+   */
+  function selectedStopIds(ws: NormalizedWorkspace, targets: readonly string[] | undefined): TargetId[] {
+    const orphans = orphanIds(ws);
+    if (targets === undefined || targets.length === 0) {
+      const selected = profileTargets(ws, deps.activeProfile());
+      for (const id of orphans) if (!selected.includes(id)) selected.push(id);
+      return selected;
+    }
+
+    const out: TargetId[] = [];
+    for (const spec of targets) {
+      // An app name keeps covering the subapps it used to have, including when
+      // the app itself survived the reload and only one of its subapps did not.
+      const ids = [
+        ...(expandTarget(ws, spec) ?? []),
+        ...orphans.filter((id) => id === spec || id.startsWith(`${spec}.`)),
+      ];
+      if (ids.length === 0) {
+        throw new U8Error("UNKNOWN_TARGET", `unknown target "${spec}" — expected an app name or "app.subapp"`, {
+          spec,
+        });
+      }
+      for (const id of ids) if (!out.includes(id)) out.push(id);
+    }
+    return out;
+  }
+
+  /**
+   * Reverse-dependency stop waves, with the targets the config no longer knows
+   * going down first: nothing left in the config says what depends on them, and
+   * a wave they cannot appear in is the only alternative.
+   */
+  function stopWaves(ws: NormalizedWorkspace, ids: readonly TargetId[]): TargetId[][] {
+    const known = ids.filter((id) => findSubapp(ws, id) !== undefined);
+    const orphans = ids.filter((id) => findSubapp(ws, id) === undefined);
+    const waves = [...topoWaves(ws, known)].reverse();
+    return orphans.length > 0 ? [orphans, ...waves] : waves;
   }
 
   function concurrencyFor(
@@ -661,8 +760,40 @@ export function createEngine(deps: EngineDeps): Engine {
     return { kind: "ready" };
   }
 
+  /** `app:start`: every target runs its own `start` script. */
+  function coreStartPlan(ws: NormalizedWorkspace): StartPlan {
+    return {
+      script: (id) => coreStartScript(ws, id),
+      skip: { error: (id) => `no "start" script for "${id}"`, blocked: "has no start script" },
+    };
+  }
+
   /**
-   * Dependency-ordered start (SPEC §5.4).
+   * A `kind: "service"` config command: the command's per-target script becomes
+   * the supervised process. Resolution stays {@link commandTargets}, so a `null`
+   * entry and a target with no script at all are skips here too — a service
+   * command must never fall back to the target's own `start` script.
+   */
+  function serviceCommandPlan(
+    ws: NormalizedWorkspace,
+    cmd: NormalizedCommand,
+    ids: readonly TargetId[],
+  ): StartPlan {
+    const scripts = new Map(commandTargets(ws, cmd, ids).map((t) => [t.targetId, t.script]));
+    return {
+      script: (id) => scripts.get(id) ?? null,
+      via: cmd.name,
+      skip: {
+        error: (id) => `no script for "${id}" in command "${cmd.name}"`,
+        blocked: `has no script in command "${cmd.name}"`,
+      },
+    };
+  }
+
+  /**
+   * Dependency-ordered start (SPEC §5.4), shared by `app:start`, the start half
+   * of `app:restart`, and every `kind: "service"` config command — the
+   * {@link StartPlan} is the only thing that differs between them.
    *
    * `blocked` carries the reason a target must not be attempted; a target whose
    * dependency lands in it is reported as `skipped` and blocks its own
@@ -683,6 +814,7 @@ export function createEngine(deps: EngineDeps): Engine {
     ids: readonly TargetId[],
     concurrency: number,
     blocked: Map<TargetId, string>,
+    plan: StartPlan,
   ): Promise<void> {
     const ws = workspace.current();
     const hooks = hooksOf(ws, rec.command);
@@ -728,15 +860,21 @@ export function createEngine(deps: EngineDeps): Engine {
           return;
         }
 
-        if (coreStartScript(ws, id) === null) {
-          finish(rec, id, "skipped", { error: `no "start" script for "${id}"` });
-          blocked.set(id, "has no start script");
+        const script = plan.script(id);
+        if (script === null) {
+          finish(rec, id, "skipped", { error: plan.skip.error(id) });
+          blocked.set(id, plan.skip.blocked);
           return;
         }
 
         const state = await runPipeline(rec, pipelineTarget(ws, subapp), hooks, async (sink) => {
           try {
-            const service = await supervisor.start(id);
+            // `app:start` lets the supervisor resolve the script itself, so its
+            // spawn-time fingerprint stays the one a reload compares against.
+            const service = await supervisor.start(
+              id,
+              plan.via === undefined ? undefined : { script, via: plan.via },
+            );
             if (service.status === "crashed") {
               const message = service.lastError ?? "service crashed during start";
               sink.note(message);
@@ -756,18 +894,20 @@ export function createEngine(deps: EngineDeps): Engine {
     }
   }
 
-  /** Reverse-dependency-ordered stop: dependents go down before what they need. */
+  /**
+   * Reverse-dependency-ordered stop: dependents go down before what they need.
+   *
+   * Unlike the start passes this one accepts targets the config no longer
+   * declares — see {@link selectedStopIds} — so a dropped target still travels
+   * the whole pipeline, standing on {@link orphanSubapp}.
+   */
   async function stopPass(rec: RunRecord, ids: readonly TargetId[], concurrency: number): Promise<void> {
     const ws = workspace.current();
     const hooks = hooksOf(ws, rec.command);
 
-    for (const wave of [...topoWaves(ws, ids)].reverse()) {
+    for (const wave of stopWaves(ws, ids)) {
       const tasks = wave.map((id) => async () => {
-        const subapp = findSubapp(ws, id);
-        if (!subapp) {
-          finish(rec, id, "failed", { error: `unknown target "${id}"` });
-          return;
-        }
+        const subapp = findSubapp(ws, id) ?? orphanSubapp(ws, id);
         log.debug(`stopping ${id}`, { customStopScript: coreStopScript(ws, id) !== null });
         await runPipeline(rec, pipelineTarget(ws, subapp), hooks, async (sink) => {
           try {
@@ -834,12 +974,26 @@ export function createEngine(deps: EngineDeps): Engine {
     const ids = selectedIds(ws, targets);
     const rec = createRun("app:start", ids);
     const concurrency = concurrencyFor(ws, findCommand(ws, "app:start"), opts);
-    return launch(rec, () => startPass(rec, ids, concurrency, new Map()));
+    return launch(rec, () => startPass(rec, ids, concurrency, new Map(), coreStartPlan(ws)));
+  }
+
+  /**
+   * A `kind: "service"` config command (SPEC §2.5). It takes the `app:start`
+   * path in full — dependency ordering, readiness gating, its own hooks — and
+   * differs only in the script each target is supervised from, which is why the
+   * supervisor is told the command name: the process it owns is that command's.
+   */
+  function runServiceCommand(cmd: NormalizedCommand, ids: TargetId[], opts: RunOptions): RunHandle {
+    const ws = workspace.current();
+    const rec = createRun(cmd.name, ids);
+    const concurrency = concurrencyFor(ws, cmd, opts);
+    const plan = serviceCommandPlan(ws, cmd, ids);
+    return launch(rec, () => startPass(rec, ids, concurrency, new Map(), plan));
   }
 
   function stopRun(targets: string[] | undefined, opts: RunOptions): RunHandle {
     const ws = workspace.current();
-    const ids = selectedIds(ws, targets);
+    const ids = selectedStopIds(ws, targets);
     const rec = createRun("app:stop", ids);
     const concurrency = concurrencyFor(ws, findCommand(ws, "app:stop"), opts);
     return launch(rec, () => stopPass(rec, ids, concurrency));
@@ -853,7 +1007,7 @@ export function createEngine(deps: EngineDeps): Engine {
     return launch(rec, async () => {
       const blocked = new Map<TargetId, string>();
       await restartStopPass(rec, ids, concurrency, blocked);
-      await startPass(rec, ids, concurrency, blocked);
+      await startPass(rec, ids, concurrency, blocked, coreStartPlan(ws));
     });
   }
 
@@ -881,9 +1035,10 @@ export function createEngine(deps: EngineDeps): Engine {
       if (!cmd) {
         throw new U8Error("UNKNOWN_COMMAND", `unknown command "${opts.command}"`, { command: opts.command });
       }
-      // `kind: "service"` on a config command is accepted but runs as a task:
-      // the supervisor registers one process per subapp from its `start` script,
-      // and has no seam for an arbitrary script to claim that slot.
+      // SPEC §2.5: "service" means the spawned process is registered with the
+      // supervisor, so the command claims the target's one process instead of
+      // running to completion.
+      if (cmd.kind === "service") return runServiceCommand(cmd, ids, runOpts);
       return runConfigCommand(cmd, ids, runOpts);
     },
 
