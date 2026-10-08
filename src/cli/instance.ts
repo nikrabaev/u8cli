@@ -21,11 +21,12 @@ import {
   instanceNameProblem,
   loadWorkspaceFrom,
   resolveTargetStrings,
+  splitQualified,
   type NormalizedApp,
   type NormalizedWorkspace,
 } from "../config/index.js";
 import type { AttachedClient } from "../daemon/index.js";
-import type { InstanceCreateParams, Snapshot, TaskResult } from "../ipc/protocol.js";
+import type { InstanceAddParams, InstanceCreateParams, Snapshot, TaskResult } from "../ipc/protocol.js";
 import { U8Error } from "../util/errors.js";
 import { requireRegistered, scopeOf, withAttached, type CliContext, type Scope } from "./context.js";
 import { EXIT_FAILURE } from "./errors.js";
@@ -89,6 +90,9 @@ export async function instanceListCommand(ctx: CliContext, opts: { json?: boolea
       return 0;
     }
     const { instances } = buildInstanceListJson(snapshot);
+    // A checkout `instance remove` left in place is still the instance's, and
+    // is removed with it — so it is listed, and marked, since nothing runs from it.
+    const inUse = new Set(snapshot.repos.filter((r) => r.apps.length > 0).map((r) => r.name));
     const rows = instances.map((instance) => [
       instance.name === scope.instance ? ctx.style.green("*") : " ",
       instance.name,
@@ -97,8 +101,8 @@ export async function instanceListCommand(ctx: CliContext, opts: { json?: boolea
       ctx.style.dim(
         instance.isBase
           ? "the config's own checkouts"
-          : Object.values(instance.checkouts)
-              .map((c) => `${c.path}${c.owned ? "" : " (adopted)"}`)
+          : Object.entries(instance.checkouts)
+              .map(([repo, c]) => `${c.path}${c.owned ? "" : " (adopted)"}${inUse.has(repo) ? "" : " (no apps)"}`)
               .join(", "),
       ),
     ]);
@@ -197,6 +201,204 @@ export async function instanceDestroyCommand(
     if (code === 0) writeLine(ctx.io.stdout, `instance ${ctx.style.bold(target)} destroyed`);
     return code;
   });
+}
+
+// ---------------------------------------------------------------------------
+// instance add / remove
+// ---------------------------------------------------------------------------
+
+/**
+ * The instance a membership change is about: the one `-i` names, else the one
+ * this directory belongs to. There is no falling back to base here — base's
+ * apps are the config's, so "no instance" can only be a mistake.
+ */
+function editedInstance(scope: Scope, action: string): string {
+  if (scope.instance !== BASE_INSTANCE || scope.source !== "default") return scope.instance;
+  throw new U8Error(
+    "UNKNOWN_INSTANCE",
+    scope.unregistered === undefined
+      ? `${action} needs an instance — this directory is not inside one, so name it with -i <name>`
+      : `${action} needs an instance, and this worktree has none yet — \`u8 up\` gives it one, or name another with -i <name>`,
+  );
+}
+
+/** `api platform.shell`, the way they would be typed: ids as the config spells them. */
+function typed(snapshot: Snapshot, ids: readonly string[]): string {
+  const apps = new Map(snapshot.repos.flatMap((r) => r.apps).map((a) => [a.id, a.baseId]));
+  return ids.map((id) => apps.get(id) ?? splitQualified(id).name).join(" ");
+}
+
+/**
+ * Names the running apps a membership change left on their old wiring.
+ *
+ * What an app points at — a dependency, another app's port in its `env` — is
+ * decided by who else is in the instance, so adding or removing one rewires
+ * the rest. Running processes are never touched; they go `stale`, and this is
+ * the line that says a restart is what makes the change real for them.
+ */
+function printRewired(ctx: CliContext, before: Snapshot, after: Snapshot, instanceName: string): void {
+  const own = new Set(after.instances.find((i) => i.name === instanceName)?.appIds ?? []);
+  const already = new Set(before.services.filter((s) => s.stale).map((s) => s.targetId));
+  const stale = after.services
+    .filter((s) => s.stale && own.has(s.targetId) && !already.has(s.targetId))
+    .map((s) => s.targetId);
+  if (stale.length === 0) return;
+  const one = stale.length === 1;
+  writeLine(
+    ctx.io.stderr,
+    ctx.style.yellow(
+      `${stale.join(", ")} ${one ? "is" : "are"} now stale: ${one ? "it is" : "they are"} still running with what ` +
+        `${one ? "it" : "they"} pointed at before this change — restart to pick it up: ` +
+        `u8 -i ${instanceName} restart ${typed(after, stale)}`,
+    ),
+  );
+}
+
+export interface InstanceAddOptions {
+  /** Branch for a worktree that has to be created; defaults to the instance's own. */
+  branch?: string;
+  from?: string;
+  /** Existing git worktrees to use instead of creating new ones. */
+  adopt?: string[];
+  /** `repo=dir` pairs: an existing directory for one repo. */
+  path?: string[];
+}
+
+export async function instanceAddCommand(
+  ctx: CliContext,
+  targets: readonly string[],
+  opts: InstanceAddOptions,
+): Promise<number> {
+  const name = editedInstance(scopeOf(ctx), "u8 instance add");
+  const params: InstanceAddParams = {
+    name,
+    targets: [...targets],
+    branch: opts.branch,
+    from: opts.from,
+    adopt: (opts.adopt ?? []).map((dir) => path.resolve(ctx.cwd, dir)),
+    paths: Object.fromEntries(
+      pairs(opts.path ?? [], "--path", "repo=dir").map(([repo, dir]) => [repo, path.resolve(ctx.cwd, dir)]),
+    ),
+  };
+
+  return withAttached(ctx, { requestTimeoutMs: 0 }, async (attached) => {
+    const before = attached.snapshot();
+    let added: string[] = [];
+    const { result, code } = await followRun(ctx, attached, async () => {
+      const answer = await attached.client.request("instance.add", params);
+      added = answer.added;
+      return answer;
+    });
+    // Interrupted: the run carries on, and what it leaves is not known yet.
+    if (result === undefined) return code;
+    if (!result.ok) await printFailureTails(ctx, attached, result);
+
+    const after = await attached.client.request("workspace.snapshot", {});
+    // The apps are in the instance from the moment the request is accepted,
+    // whatever became of their init steps — so their neighbours are rewired
+    // either way, and that is said either way.
+    printRewired(ctx, before, after, name);
+    if (code !== 0) {
+      writeLine(
+        ctx.io.stderr,
+        ctx.style.dim(
+          `${typed(after, added)} joined instance "${name}" without finishing init — fix the step, then: u8 -i ${name} instance init`,
+        ),
+      );
+      return code;
+    }
+    printAddresses(ctx, after, name, added);
+    writeLine(ctx.io.stderr, ctx.style.dim(`start with: u8 -i ${name} start ${typed(after, added)}`));
+    return 0;
+  });
+}
+
+export interface InstanceRemoveOptions {
+  /** Remove the apps even if one of their teardown steps fails. */
+  force?: boolean;
+  /** Also give up the checkout of a repo left with no apps. */
+  prune?: boolean;
+  /** With `prune`: remove a worktree that has uncommitted changes. */
+  discard?: boolean;
+}
+
+export async function instanceRemoveCommand(
+  ctx: CliContext,
+  targets: readonly string[],
+  opts: InstanceRemoveOptions,
+): Promise<number> {
+  const name = editedInstance(scopeOf(ctx), "u8 instance remove");
+
+  return withAttached(ctx, { requestTimeoutMs: 0 }, async (attached) => {
+    const before = await attached.client.request("workspace.snapshot", {});
+    let removed: string[] = [];
+    const { result, code } = await followRun(ctx, attached, async () => {
+      const answer = await attached.client.request("instance.remove", {
+        name,
+        targets: [...targets],
+        force: opts.force,
+        prune: opts.prune,
+        discard: opts.discard,
+      });
+      removed = answer.removed;
+      return answer;
+    });
+    if (result === undefined) return code;
+    if (!result.ok) await printFailureTails(ctx, attached, result);
+
+    // Read back rather than inferred from the exit code: a forced removal
+    // reports its failed teardown and still removes, and a refused one fails
+    // having changed nothing.
+    const after = await attached.client.request("workspace.snapshot", {});
+    const left = new Set(after.instances.find((i) => i.name === name)?.appIds ?? []);
+    const gone = removed.filter((id) => !left.has(id));
+    if (gone.length > 0) {
+      writeLine(ctx.io.stdout, `removed ${typed(before, gone)} from instance ${ctx.style.bold(name)}`);
+    }
+    printCheckouts(ctx, before, after, name, opts.prune === true);
+    printRewired(ctx, before, after, name);
+    if (gone.length > 0) await warnAboutBase(ctx, attached, name);
+    return code;
+  });
+}
+
+/**
+ * What became of the checkouts a removal left without apps. Kept is the
+ * default and easy to miss — the directory is still there, still the
+ * instance's — so it is said, with the two ways on from it.
+ */
+function printCheckouts(ctx: CliContext, before: Snapshot, after: Snapshot, instanceName: string, pruning: boolean): void {
+  const was = before.instances.find((i) => i.name === instanceName);
+  const now = after.instances.find((i) => i.name === instanceName);
+  if (!was || !now) return;
+  const inUse = (snapshot: Snapshot, repo: string): boolean => snapshot.repos.some((r) => r.name === repo && r.apps.length > 0);
+  const stillHeld = new Set(Object.values(now.checkouts).map((c) => c.worktree));
+
+  // One worktree can be several repos' checkout, and is reported once.
+  const said = new Set<string>();
+  const say = (stream: OutputStream, line: string): void => {
+    if (said.has(line)) return;
+    said.add(line);
+    writeLine(stream, line);
+  };
+  for (const [repo, checkout] of Object.entries(was.checkouts)) {
+    const repoName = splitQualified(repo).name;
+    if (now.checkouts[repo] !== undefined) {
+      if (!inUse(before, repo) || inUse(after, repo)) continue;
+      // Asked to go and still here: the run's own failure says why.
+      const next = pruning
+        ? ""
+        : ` — bring it back with: u8 -i ${instanceName} instance add ${repoName}; ` +
+          `give it up with: u8 -i ${instanceName} instance remove ${repoName} --prune`;
+      say(ctx.io.stderr, ctx.style.dim(`kept the checkout of ${repoName} at ${checkout.path}${next}`));
+    } else if (!checkout.owned) {
+      say(ctx.io.stdout, `forgot the checkout at ${checkout.path} ${ctx.style.dim("(adopted — the directory was not touched)")}`);
+    } else if (checkout.worktree !== undefined && stillHeld.has(checkout.worktree)) {
+      say(ctx.io.stderr, ctx.style.dim(`the worktree at ${checkout.worktree} stays: the instance's other apps still run from it`));
+    } else {
+      say(ctx.io.stdout, `removed the worktree at ${checkout.worktree ?? checkout.path}`);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -343,10 +545,11 @@ function urlsOf(ports: Record<string, number>): Record<string, string> {
   );
 }
 
-function printAddresses(ctx: CliContext, snapshot: Snapshot, instanceName: string): void {
+/** The addresses of an instance's apps — all of them, or just the ones in `only`. */
+function printAddresses(ctx: CliContext, snapshot: Snapshot, instanceName: string, only?: readonly string[]): void {
   const instance = snapshot.instances.find((i) => i.name === instanceName);
   if (!instance) return;
-  const own = new Set(instance.appIds);
+  const own = new Set(only === undefined ? instance.appIds : instance.appIds.filter((id) => only.includes(id)));
   const rows = snapshot.repos
     .flatMap((r) => r.apps)
     .filter((a) => own.has(a.id))

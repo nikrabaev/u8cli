@@ -245,6 +245,22 @@ export interface RpcMethods {
   "instance.destroy": { params: { name: string; force?: boolean }; result: { runId: string } };
   /** Re-runs the init steps of an existing instance. */
   "instance.init": { params: { name: string }; result: { runId: string } };
+  /**
+   * Grows an existing instance by apps it does not run yet: a checkout for any
+   * repo it has none of, ports for each app, and the record that makes them
+   * exist. `added` are their qualified ids and `runId` is their init run — the
+   * steps of what was added only, never the whole instance's again.
+   */
+  "instance.add": {
+    params: InstanceAddParams;
+    result: { instance: SnapshotInstance; added: TargetId[]; runId: string };
+  };
+  /**
+   * Takes apps out of an instance: `runId` stops them, runs their teardown,
+   * frees their ports and drops them from the record. Refused for the last app
+   * an instance has — that is `instance.destroy`.
+   */
+  "instance.remove": { params: InstanceRemoveParams; result: { removed: TargetId[]; runId: string } };
   /** Resolves when the run finishes; safe to call after completion (results are retained). */
   "run.await": { params: { runId: string }; result: TaskResult };
 
@@ -273,6 +289,47 @@ export interface InstanceCreateParams {
   from?: string;
   /** Overrides for `${vars.<name>}`. */
   vars?: Record<string, string>;
+}
+
+export interface InstanceAddParams {
+  /** The instance to grow. Never base: what base runs is what the config declares. */
+  name: string;
+  /**
+   * Repos and/or apps, as written in the config — never an instance's own
+   * `name@instance`. A repo means every app of it the instance does not run yet.
+   */
+  targets: string[];
+  /** As for create, for the repos the instance has no checkout of yet. */
+  adopt?: string[];
+  /** As for create, for the repos the instance has no checkout of yet. */
+  paths?: Record<string, string>;
+  /**
+   * Branch for a worktree that has to be created. Defaults to the branch the
+   * instance's own worktrees are on, and to its name when they do not agree.
+   */
+  branch?: string;
+  /** Start point for a branch that does not exist yet; defaults to the base checkout's HEAD. */
+  from?: string;
+}
+
+export interface InstanceRemoveParams {
+  name: string;
+  /**
+   * Repos and/or apps, as written in the config. A repo means every app of it
+   * the instance runs — or, with `prune`, a checkout it kept after they left.
+   */
+  targets: string[];
+  /** Drop the apps even if one of their teardown steps fails. */
+  force?: boolean;
+  /**
+   * Also give up the checkout of a repo that is left with no apps. Without it
+   * the checkout stays the instance's: reused if an app comes back, removed
+   * when the instance is destroyed. A worktree u8 created is removed only when
+   * git reports it clean; an adopted one is forgotten and never touched.
+   */
+  prune?: boolean;
+  /** With `prune`: remove a worktree even though it has uncommitted changes. */
+  discard?: boolean;
 }
 
 export type RpcMethod = keyof RpcMethods;

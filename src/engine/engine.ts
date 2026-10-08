@@ -1227,29 +1227,61 @@ export function createEngine(deps: EngineDeps): Engine {
    * every app's own step stands on — then each app's. Teardown is the mirror
    * image. The repo's steps are reported on its first app: a run's rows are
    * targets, and a repo is not one.
+   *
+   * `opts.only` is the same run for part of the instance: the named apps are
+   * its targets, and a repo's own steps run only where the caller says the
+   * repo itself is arriving or leaving.
    */
   function runLifecycle(phase: LifecyclePhase, instanceName: string, opts: LifecycleOptions = {}): RunHandle {
     const ws = workspace.current();
+    const only = opts.only;
     // An instance the workspace no longer knows — its record names nothing the
     // config still has — runs no steps, but must still be destroyable: what is
     // left of it is whatever the supervisor is running and what `finalize` does.
-    const ids = findInstance(ws, instanceName) ? instanceTargets(ws, instanceName) : [];
+    const all = findInstance(ws, instanceName) ? instanceTargets(ws, instanceName) : [];
+    for (const id of only?.apps ?? []) {
+      // Checked rather than filtered out: a step silently not run for an app
+      // that was asked for is how a half-initialised copy gets started.
+      if (!all.includes(id)) {
+        throw new U8Error("UNKNOWN_TARGET", `"${id}" is not an app of instance "${instanceName}"`, {
+          target: id,
+          instance: instanceName,
+        });
+      }
+    }
+    const ids = only === undefined ? all : all.filter((id) => only.apps.includes(id));
     const command = `instance:${phase}`;
     const rec = createRun(command, ids);
     const hooks = hooksOf(ws, command);
-    const repos = ws.repos.filter((r) => r.instance === instanceName);
 
-    const initRepo = async (repo: NormalizedRepo): Promise<void> => {
-      const [first, ...rest] = repo.apps;
+    /** One repo's share of the run: the apps taking part, and whether its own steps do. */
+    interface RepoPart {
+      repo: NormalizedRepo;
+      apps: NormalizedApp[];
+      repoSteps: boolean;
+    }
+    const parts: RepoPart[] = ws.repos
+      .filter((r) => r.instance === instanceName)
+      .map((repo) => ({
+        repo,
+        apps: repo.apps.filter((a) => ids.includes(a.id)),
+        repoSteps: only === undefined || only.repos.includes(repo.name),
+      }))
+      .filter((part) => part.apps.length > 0);
+
+    const initRepo = async ({ repo, apps, repoSteps }: RepoPart): Promise<void> => {
+      const [first, ...rest] = apps;
       if (!first) return;
-      let repoReady = false;
+      let repoReady = !repoSteps;
       await runPipeline(rec, pipelineTarget(ws, first), hooks, async (sink) => {
-        const copied = await copyFromBase(repo, sink);
-        if (copied.state !== "ok") return copied;
-        const where = { cwd: repo.path, env: lifecycleEnv(ws, repo), stopTimeoutMs: first.stopTimeoutMs };
-        const repoSteps = await runSteps(rec, sink, repo.lifecycle.init, where, false);
-        if (repoSteps.state !== "ok") return repoSteps;
-        repoReady = true;
+        if (repoSteps) {
+          const copied = await copyFromBase(repo, sink);
+          if (copied.state !== "ok") return copied;
+          const where = { cwd: repo.path, env: lifecycleEnv(ws, repo), stopTimeoutMs: first.stopTimeoutMs };
+          const ran = await runSteps(rec, sink, repo.lifecycle.init, where, false);
+          if (ran.state !== "ok") return ran;
+          repoReady = true;
+        }
         return runSteps(
           rec,
           sink,
@@ -1275,8 +1307,8 @@ export function createEngine(deps: EngineDeps): Engine {
       }
     };
 
-    const teardownRepo = async (repo: NormalizedRepo): Promise<void> => {
-      const [first, ...rest] = repo.apps;
+    const teardownRepo = async ({ repo, apps, repoSteps }: RepoPart): Promise<void> => {
+      const [first, ...rest] = apps;
       if (!first) return;
       const appSteps = (app: NormalizedApp, sink: TargetSink): Promise<WorkOutcome> =>
         runSteps(
@@ -1295,7 +1327,8 @@ export function createEngine(deps: EngineDeps): Engine {
       }
       await runPipeline(rec, pipelineTarget(ws, first), hooks, async (sink) => {
         const own = await appSteps(first, sink);
-        const repoSteps = await runSteps(
+        if (!repoSteps) return own;
+        const ran = await runSteps(
           rec,
           sink,
           repo.lifecycle.teardown,
@@ -1306,20 +1339,24 @@ export function createEngine(deps: EngineDeps): Engine {
           },
           true,
         );
-        return own.state !== "ok" ? own : repoSteps;
+        return own.state !== "ok" ? own : ran;
       });
     };
 
     return launch(rec, async () => {
       if (opts.stopFirst === true) {
         const running = [...ids];
-        for (const id of orphanIds(ws, instanceName)) if (!running.includes(id)) running.push(id);
+        // What the config dropped is the whole instance's to clean up, not
+        // something an app leaving it should take down on the way out.
+        if (only === undefined) {
+          for (const id of orphanIds(ws, instanceName)) if (!running.includes(id)) running.push(id);
+        }
         await stopForTeardown(ws, running);
       }
 
       const each = phase === "init" ? initRepo : teardownRepo;
       await runPool(
-        repos.map((repo) => () => each(repo)),
+        parts.map((part) => () => each(part)),
         concurrencyFor(ws, undefined, {}),
       );
 

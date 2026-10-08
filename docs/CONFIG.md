@@ -765,9 +765,10 @@ ports, its own processes. The workspace as `u8.jsonc` describes it is the **base
 number of others can run beside it, which is what makes it possible to work on several branches —
 or have several tools work on several branches — at once.
 
-Instances are created from the command line (`u8 instance create`, `u8 up`), not declared in the
-config: which worktrees exist on a machine is local state, like the active profile, and lives in the
-state dir. The config only says how they are made:
+Instances are created from the command line (`u8 instance create`, `u8 up`) and changed from it
+(`u8 instance add`, `u8 instance remove`), not declared in the config: which worktrees exist on a
+machine is local state, like the active profile, and lives in the state dir. The config only says how
+they are made:
 
 ```jsonc
 "instances": {
@@ -790,7 +791,7 @@ ordinary targets with the instance in their id:
 | --- | --- | --- |
 | Target id | `api`, `platform.shell` | `api@feat-x`, `platform.shell@feat-x` |
 | Working directory | the repo's `path` | the instance's checkout of that repo |
-| Ports | as declared | allocated once, kept until the instance is destroyed |
+| Ports | as declared | allocated once, kept until the app leaves the instance or the instance is destroyed |
 | `env` | as written | the same document, with references resolved for the instance |
 
 Everything else — scripts, health checks, restart policy, command entries, hooks — is the same
@@ -836,6 +837,10 @@ repo says what to do about that, and what to undo when the instance goes away:
 Order within a repo: `copy`, the repo's `init` steps in the checkout root, then each app's `init` in
 the app's directory. Teardown is the mirror image. Repos run side by side.
 
+`u8 instance add` and `u8 instance remove` run the same steps for the apps they are about and
+nobody else's — see [Adding and removing apps](#adding-and-removing-apps) for which of a repo's own
+steps come with them.
+
 Steps run as the commands `instance:init` and `instance:teardown`, through the same pipeline as any
 run: per-target logs (`u8 logs <target> --run <id>`), the summary table, and plugin hooks bound to
 those names. An app's steps get the app's resolved `env`; a repo's steps get the daemon's — plus the
@@ -864,6 +869,62 @@ outside the checkout anyway.
   `instance create`) uses that directory as it is. u8 never removes an adopted checkout — and once
   every checkout of an adopted instance has disappeared, the daemon stops its services, runs its
   teardown and frees its ports on its own.
+
+### Adding and removing apps
+
+What an instance runs is not fixed when it is created. Both commands act on the instance the current
+directory belongs to (`-i <name>` for another) and take targets named the way the config names them —
+`api`, `platform.shell`, or a repo for all of its apps. Base cannot be changed this way: what it runs
+is what `u8.jsonc` declares.
+
+```bash
+u8 instance add api                  # this instance gets its own api
+u8 instance remove platform.shell    # and stops running its own shell
+```
+
+**`u8 instance add <targets…>`** allocates ports for each new app, then runs the init steps of what
+was added — never the whole instance's again. What that covers depends on what the instance already
+has of the app's repo:
+
+| The instance… | Checkout | Steps that run |
+| --- | --- | --- |
+| already runs another app of the repo | the one it has | the new app's `init` |
+| has no checkout of the repo | a new worktree — or the directory given with `--adopt <dir>` / `--path <repo=dir>` | the repo's `copy` and `init`, then the app's `init` |
+| kept the repo's checkout after its last app left | the one it kept | the repo's `copy` and `init`, then the app's `init` |
+
+A new worktree goes on the branch the instance's other worktrees are on — its name, unless it was
+created with `--branch` — and `--branch` / `--from` choose otherwise. A repo that lives in the same
+git repository as one the instance already has a worktree of is put into that worktree. If anything
+fails before the steps start, the worktrees it made are removed again and the instance is exactly as
+it was. If an init step fails, the app is in the instance but the instance reads *not initialised*
+until `u8 instance init` has been through.
+
+**`u8 instance remove <targets…>`** stops the apps, runs their `teardown` steps, frees their ports
+and drops them from the instance. A repo's own `teardown` runs when the last of its apps leaves, since
+that is what undoes the repo's `init`. A failing step keeps the apps unless `--force`. The last app of
+an instance cannot be removed: that is `u8 instance destroy`.
+
+What happens to the checkout of a repo left with no apps:
+
+| | Worktree u8 created | Adopted checkout |
+| --- | --- | --- |
+| `remove` | Kept: still the instance's, reused by a later `add`, removed by `destroy` | Kept in the instance |
+| `remove --prune` | Removed if git reports no modified or untracked files; otherwise the command refuses before anything is stopped | Forgotten; the directory is never touched |
+| `remove --prune --discard` | Removed with whatever is uncommitted in it | Forgotten; the directory is never touched |
+
+A worktree shared with a repo whose apps still run stays where it is. A branch u8 created goes with
+its worktree only if nothing was committed to it, as on `destroy`. `u8 instance remove <repo> --prune`
+also works later, on a checkout an earlier `remove` kept.
+
+**Membership changes rewire the neighbours.** References and `dependsOn` point at the instance's own
+copy when it has one and at base's otherwise, so an instance that gains an api has its web pointed
+at that api, and one that loses it has its web pointed back at base's. Running processes are never
+touched: they keep what they were started with, show as `stale`, and both commands name them and the
+restart that picks the change up.
+
+One `add` or `remove` runs per instance at a time, and none while the instance's own init is running:
+a second is refused until the first run's steps have finished. While an `add` is running its steps the
+instance reads *not initialised*, as a new one does.
 
 ---
 

@@ -124,14 +124,23 @@ started from them. Added after v1; the rest of this document describes it where 
   lets one daemon run them all.
 - **Partial by default.** An instance holds the apps it was created for. A reference from one of its
   apps to an app it has no copy of — in `dependsOn`, or in `${target.ports.x}` — resolves to base's.
+- **Membership can change.** `add` and `remove` grow and shrink an existing instance without
+  recreating it. Because of the rule above, that rewires its other apps: they point at the new copy,
+  or back at base's. Running processes are left alone and reported `stale` (§8). An instance always
+  has at least one app — removing the last is `destroy` — and base is never edited this way.
 - **Never base by accident.** A target string is read from inside an instance: a bare name is that
   instance's copy, and a name it has no copy of is an error, not a fallback. `name@base` reaches
   across. An untargeted command covers the instance; in base that still means the active profile.
 - **Checkouts are created or adopted.** u8 creates git worktrees (one per git repository, shared by
   every repo that lives in it) and removes only those. A worktree another tool made is adopted as it
   is, and an instance made only of adopted checkouts is destroyed by the daemon once they are gone.
+- **A checkout outlives its apps.** `destroy` removes an instance's worktrees with whatever is in
+  them; `remove` does not. A repo left with no apps keeps its checkout — still the instance's, reused
+  if an app returns — until it is given up explicitly, and then a worktree with uncommitted changes
+  is removed only when discarding them was asked for too.
 - **Ports** are declared by name on an app. Base uses the declared number; every other instance is
-  allocated one from `instances.ports` — by the daemon, once, kept until the instance is destroyed.
+  allocated one from `instances.ports` — by the daemon, once, kept until the app leaves the instance
+  or the instance is destroyed.
 
 Values that differ per instance reach a process through one channel, `env`, by `${…}` references
 resolved at load: `${ports.http}`, `${api.ports.http}`, `${vars.x}`, `${instance.name}`. References
@@ -141,6 +150,11 @@ Lifecycle: `create` (checkouts → ports → record → reload) → `instance:in
 from base, the repo's steps, each app's steps) → start/stop any number of times → `destroy` (stop →
 `instance:teardown` → remove owned worktrees → drop the record). Init and teardown are engine runs
 like any command: per-target logs, progress, hooks.
+
+`add` (missing checkouts → ports → record → reload → `instance:init`) and `remove` (stop →
+`instance:teardown` → free ports → record → reload) are the same two runs narrowed to the apps
+involved. A repo's own steps follow its membership, not its checkout: they run when the instance
+gains its first app of the repo and when it loses its last.
 
 ---
 
@@ -304,7 +318,7 @@ u8 init                     # scaffold u8.jsonc
 u8                          # open TUI
 u8 start|stop|restart [target|--all] [--wait]
 u8 up [targets]             # this directory's instance: create, init, start, wait until ready
-u8 instance list|create|init|destroy
+u8 instance list|create|init|add|remove|destroy
 u8 ports|env|exec           # where this instance's apps are; run a command in their environment
 u8 run <command> [target] [--serial] [--concurrency n]
 u8 status [--json]          # rendered from the same indicator cache

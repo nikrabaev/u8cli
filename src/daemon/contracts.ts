@@ -171,13 +171,32 @@ export interface RunCommandOptions extends StartScope {
 
 export type LifecyclePhase = "init" | "teardown";
 
+/**
+ * Part of an instance, for a lifecycle run that is about an app joining or
+ * leaving it rather than about the instance as a whole.
+ */
+export interface LifecycleSubset {
+  /** Qualified ids of the apps whose own steps run; they are the run's targets. */
+  apps: readonly TargetId[];
+  /**
+   * Qualified names of the repos whose repo-level steps run as well — `copy`
+   * and `init` for a repo the instance is gaining, `teardown` for one it is
+   * losing. Any other repo's were run when it joined, and re-running an
+   * install for every app that follows it would be the cost of the whole
+   * instance each time.
+   */
+  repos: readonly string[];
+}
+
 export interface LifecycleOptions {
   /**
    * Stop the instance's services before any step runs. Teardown undoes what
    * the apps are still using — a database, a compose project — so it must never
-   * run underneath them.
+   * run underneath them. With {@link only}, just those apps are stopped.
    */
   stopFirst?: boolean;
+  /** Narrows the run to these apps; absent means the whole instance. */
+  only?: LifecycleSubset;
   /**
    * Runs inside the run once every step has, and is told whether they all
    * succeeded. What it does is part of the run: a client awaiting the run id
@@ -198,6 +217,7 @@ export interface Engine {
    * Runs an instance's `init` or `teardown` steps as the command
    * `instance:<phase>`: a repo's own steps once in its checkout root, each
    * app's in its directory, with the same logs, progress and hooks as any run.
+   * `opts.only` runs them for part of the instance.
    */
   runLifecycle(phase: LifecyclePhase, instance: string, opts?: LifecycleOptions): RunHandle;
 

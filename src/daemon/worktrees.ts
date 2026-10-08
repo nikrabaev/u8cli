@@ -149,22 +149,58 @@ export async function deleteBranchIfUnused(repoTop: string, branch: string): Pro
 }
 
 /**
- * Removes a worktree u8 created. `--force` because the instance is going away
- * with whatever is uncommitted in it — the caller has already decided that —
- * and a directory git no longer recognises is removed by hand, so a worktree
- * someone half-deleted does not make an instance impossible to destroy.
+ * Paths in the worktree at `dir` that exist nowhere else: modified, staged and
+ * untracked files, one `git status --porcelain` line each. Ignored files are
+ * left out on purpose — they are what an install or a build put there, and
+ * the next init puts them back.
+ *
+ * `undefined` when git cannot say (the directory is gone, or is not a
+ * checkout), which a caller must not read as "clean".
+ */
+export async function uncommittedChanges(dir: string): Promise<string[] | undefined> {
+  try {
+    const out = await git(dir, ["status", "--porcelain"]);
+    return out.split("\n").filter((line) => line.length > 0);
+  } catch {
+    return undefined;
+  }
+}
+
+export interface RemoveWorktreeOptions {
+  /**
+   * `false` leaves the decision to git, which refuses a worktree holding
+   * modified or untracked files — for when only part of an instance is going
+   * and nobody has said its uncommitted work may go with it.
+   */
+  force?: boolean;
+}
+
+/**
+ * Removes a worktree u8 created. `--force` by default because the instance is
+ * going away with whatever is uncommitted in it — the caller has already
+ * decided that — and a directory git no longer recognises is removed by hand,
+ * so a worktree someone half-deleted does not make an instance impossible to
+ * destroy. Without force nothing is ever deleted by hand: git's refusal is the
+ * answer, and it is passed on.
  *
  * The branch is not this function's business: it may hold the only copy of
  * someone's commits (see {@link deleteBranchIfUnused}).
  */
-export async function removeWorktree(repoTop: string, dir: string): Promise<void> {
+export async function removeWorktree(repoTop: string, dir: string, opts: RemoveWorktreeOptions = {}): Promise<void> {
+  const force = opts.force !== false;
   try {
-    await git(repoTop, ["worktree", "remove", "--force", dir]);
+    await git(repoTop, ["worktree", "remove", ...(force ? ["--force"] : []), dir]);
     return;
   } catch (err) {
     if (!fs.existsSync(dir)) {
       await git(repoTop, ["worktree", "prune"]).catch(() => undefined);
       return;
+    }
+    if (!force) {
+      throw new U8Error("WORKTREE_FAILED", `could not remove the worktree at ${dir}: ${gitFailure(err)}`, {
+        repo: repoTop,
+        dir,
+      });
     }
     const location = await locate(dir);
     // Only ever delete by hand what is recognisably a worktree of this

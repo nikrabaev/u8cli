@@ -224,6 +224,36 @@ export function createHandlers(deps: HandlerDeps): RpcHandlerMap {
       return launch(deps.instances.init(requireName(params, "instance.init")));
     },
 
+    "instance.add": async (params) => {
+      // Adding ends in init steps, and may start with a worktree: both are
+      // things a daemon on its way out would leave half done.
+      refuseWhileStopping("instance.add");
+      const name = requireName(params, "instance.add");
+      const { added, run } = await deps.instances.add({
+        name,
+        targets: requireTargets(params, "instance.add"),
+        adopt: readStringList(params, "adopt"),
+        paths: readStringMap(params, "paths"),
+        branch: readString(params, "branch"),
+        from: readString(params, "from"),
+      });
+      const instance = findInstance(ws(), name);
+      if (!instance) throw new U8Error("INTERNAL", `instance "${name}" vanished right after it was added to`);
+      return { instance: toSnapshotInstance(instance), added, ...launch(run) };
+    },
+
+    // Like destroy, not refused during shutdown: it only ever winds things down.
+    "instance.remove": async (params) => {
+      const { removed, run } = await deps.instances.remove({
+        name: requireName(params, "instance.remove"),
+        targets: requireTargets(params, "instance.remove"),
+        force: readBoolean(params, "force") === true,
+        prune: readBoolean(params, "prune") === true,
+        discard: readBoolean(params, "discard") === true,
+      });
+      return { removed, ...launch(run) };
+    },
+
     "instance.destroy": (params) =>
       launch(
         deps.instances.destroy(requireName(params, "instance.destroy"), {
@@ -447,6 +477,15 @@ function readTargets(params: unknown): string[] | undefined {
     throw new U8Error("UNKNOWN_TARGET", '"targets" must be an array of target strings');
   }
   return value.length === 0 ? undefined : (value as string[]);
+}
+
+/** For the methods where "no targets" has no default to fall back on. */
+function requireTargets(params: unknown, method: string): string[] {
+  const targets = readTargets(params);
+  if (targets === undefined) {
+    throw new U8Error("UNKNOWN_TARGET", `${method} requires "targets": the apps or repos it is about`);
+  }
+  return targets;
 }
 
 /**

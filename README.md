@@ -120,6 +120,8 @@ Global options are accepted on either side of the subcommand (`u8 --cwd x status
 | `u8 instance list [--json]` | List instances; `*` marks the current one |
 | `u8 instance create <name> [targets...]` | Create an instance: a worktree per repo, its own ports, then its init steps. `--branch`, `--from`, `--adopt <dir>`, `--path <repo=dir>`, `--set <name=value>` |
 | `u8 instance init [name]` | Re-run an instance's init steps |
+| `u8 instance add <targets...>` | Add apps to an existing instance: a worktree for any repo it has no checkout of, ports for each app, then the init steps of what was added. `--branch`, `--from`, `--adopt <dir>`, `--path <repo=dir>` |
+| `u8 instance remove <targets...> [--force] [--prune] [--discard]` | Take apps out of an instance: stop them, run their teardown, free their ports. Refuses the instance's last app. The checkout of a repo left with no apps is kept unless `--prune`, which removes a worktree u8 created only if it is clean (`--discard` to remove it anyway) |
 | `u8 instance destroy [name] [--force]` | Stop it, run its teardown, remove the worktrees u8 created, free its ports |
 | `u8 run <command> [targets...] [--serial] [--concurrency <n>]` | Run a command (`test`, `git:pull`, …). `--serial` means one target at a time |
 | `u8 status [--json] [--profile <name>]` | Print the profile's rows. `--profile` renders another profile without switching to it |
@@ -152,6 +154,8 @@ processes; one daemon runs them all, so `u8` (the dashboard) shows every instanc
 ```bash
 u8 instance create feat-x api platform    # worktrees + ports + init steps
 u8 -i feat-x up                           # start it and wait until it answers
+u8 -i feat-x instance add db              # later: it gets its own db too
+u8 -i feat-x instance remove platform     # …and goes back to using base's platform
 u8 instance destroy feat-x                # stop, tear down, remove the worktrees
 ```
 
@@ -166,6 +170,14 @@ Three things make this work without editing the config per copy:
 - **Commands are scoped by directory.** Inside an instance's worktree, plain `u8 status`,
   `u8 restart api` and `u8 logs api` mean *that* instance. They never fall back to base: a name the
   instance has no copy of is an error that says to write `api@base`.
+
+An instance can grow and shrink after it is created. `u8 instance add db` gives it its own db — a
+worktree if it has no checkout of that repo, ports, and that app's init steps only — and
+`u8 instance remove db` stops it, runs its teardown and frees its ports. Either one rewires the
+instance's other apps (to the new copy, or back to base's); the ones already running go `stale` and
+the command names them and the restart that picks the change up. `remove` leaves the checkout in
+place, uncommitted work and all: `--prune` gives it up, and removes a worktree u8 created only when
+it is clean.
 
 `docs/CONFIG.md` has the details: [ports](docs/CONFIG.md#ports), [references](docs/CONFIG.md#references),
 and [instances](docs/CONFIG.md#instances) with their `init` / `teardown` steps.
@@ -191,6 +203,7 @@ From then on, in that directory:
 | Where is my copy? | `u8 ports` (or `--json`), `u8 status --json` → `repos[].apps[].urls` |
 | Run tests / a script against it | `u8 exec api -- pnpm test` — runs with the instance's `PORT`, `API_URL`, … |
 | Restart after a change | `u8 restart api --wait` |
+| I need my own copy of another app too | `u8 instance add db`, then `u8 up` |
 | Why did it fail? | `u8 logs api -n 100` |
 | Done | `u8 stop` (or `u8 instance destroy` to free the ports too) |
 

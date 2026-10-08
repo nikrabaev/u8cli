@@ -240,6 +240,106 @@ describe("working inside an instance's worktree", () => {
   });
 });
 
+describe("u8 instance add / remove", () => {
+  it("grows and shrinks the instance this directory belongs to, and says who was rewired", async () => {
+    const { ws, ports } = fixture();
+    expect((await cli(["instance", "create", "fe", "web"], { cwd: ws.dir })).code).toBe(0);
+    const here = ws.file(".u8/worktrees/fe/web");
+    expect((await cli(["start", "--wait"], { cwd: here })).code).toBe(0);
+
+    // No `-i`: the directory says which instance grows.
+    const added = await cli(["instance", "add", "api"], { cwd: here });
+    expect(added.code, added.err).toBe(0);
+    expect(added.out).toContain("instance:init: 1 ok");
+    // Only what was added is reported, with where it will listen.
+    expect(added.out).toMatch(/api@fe\s+http\s+http:\/\/localhost:\d+/);
+    expect(added.out).not.toMatch(/web@fe\s+http\s+http/);
+    expect(fs.readFileSync(ws.file(".u8/worktrees/fe/api/init.marker"), "utf8")).toBe("done");
+    // web was started against base's api and is now wired to its own.
+    expect(added.err).toContain("web@fe is now stale");
+    expect(added.err).toContain("u8 -i fe restart web");
+    expect(added.err).toContain("start with: u8 -i fe start api");
+
+    const grown = await statusJson(here);
+    expect(grown.repos.flatMap((r) => r.apps.map((a) => a.id))).toEqual(["api@fe", "web@fe"]);
+    expect((await cli(["restart", "--wait"], { cwd: here })).code).toBe(0);
+    const mine = await portsJson(here);
+    expect(await ask(mine.apps.find((a) => a.id === "api@fe")?.ports["http"] ?? 0)).toBe("fe");
+    // Base's api was never started on its behalf.
+    await expect(ask(ports.base)).rejects.toThrow();
+
+    const removed = await cli(["instance", "remove", "api"], { cwd: here });
+    expect(removed.code, removed.err).toBe(0);
+    expect(removed.out).toContain("instance:teardown: 1 ok");
+    expect(removed.out).toContain("removed api from instance fe");
+    // The checkout stays, and both ways on from it are spelled out.
+    expect(removed.err).toContain(`kept the checkout of api at ${ws.file(".u8/worktrees/fe/api")}`);
+    expect(removed.err).toContain("u8 -i fe instance add api");
+    expect(removed.err).toContain("u8 -i fe instance remove api --prune");
+    expect(fs.existsSync(ws.file(".u8/worktrees/fe/api/init.marker"))).toBe(true);
+    // web is back on base's api, on paper: stale, and base's is not up.
+    expect(removed.err).toContain("web@fe is now stale");
+    expect(removed.err).toContain('instance "fe" uses api from another instance, and it is not running');
+
+    const shrunk = await statusJson(here);
+    expect(shrunk.repos.flatMap((r) => r.apps.map((a) => [a.id, a.status]))).toEqual([["web@fe", "stale"]]);
+  });
+
+  it("gives a kept checkout up with --prune, and a dirty one only with --discard", async () => {
+    const { ws } = fixture();
+    await cli(["instance", "create", "x", "api", "web"], { cwd: ws.dir });
+    const apiDir = ws.file(".u8/worktrees/x/api");
+
+    // The init step left an untracked marker there.
+    const dirty = await cli(["-i", "x", "instance", "remove", "api", "--prune"], { cwd: ws.dir });
+    expect(dirty.code).not.toBe(0);
+    expect(dirty.err).toContain(`the worktree at ${apiDir} has uncommitted changes (init.marker)`);
+    expect(dirty.err).toContain("--discard");
+    expect(fs.existsSync(apiDir)).toBe(true);
+
+    const kept = await cli(["-i", "x", "instance", "remove", "api"], { cwd: ws.dir });
+    expect(kept.code, kept.err).toBe(0);
+    expect(fs.existsSync(apiDir)).toBe(true);
+    // Still the instance's, and listed as what it is.
+    expect((await cli(["instance", "list"], { cwd: ws.dir })).out).toContain(`${apiDir} (no apps)`);
+
+    // Named again: nothing of it runs any more, only the checkout is left.
+    const pruned = await cli(["-i", "x", "instance", "remove", "api", "--prune", "--discard"], { cwd: ws.dir });
+    expect(pruned.code, pruned.err).toBe(0);
+    expect(pruned.out).toContain(`removed the worktree at ${apiDir}`);
+    expect(fs.existsSync(apiDir)).toBe(false);
+
+    const listed = await cli(["instance", "list", "--json"], { cwd: ws.dir });
+    const { instances } = JSON.parse(listed.out) as InstanceListJson;
+    expect(Object.keys(instances[1]?.checkouts ?? {})).toEqual(["web@x"]);
+  });
+
+  it("needs an instance to act on, and refuses to empty one", async () => {
+    const { ws } = fixture();
+    await cli(["instance", "create", "fe", "web"], { cwd: ws.dir });
+
+    // From the workspace root there is no "this instance", and base is not one to edit.
+    const vague = await cli(["instance", "add", "api"], { cwd: ws.dir });
+    expect(vague.code).not.toBe(0);
+    expect(vague.err).toContain("u8 instance add needs an instance — this directory is not inside one");
+    const base = await cli(["-i", "base", "instance", "remove", "api"], { cwd: ws.dir });
+    expect(base.code).not.toBe(0);
+    expect(base.err).toContain('"base" is the workspace itself');
+    const none = await cli(["-i", "fe", "instance", "add"], { cwd: ws.dir });
+    expect(none.code).not.toBe(0);
+
+    const last = await cli(["instance", "remove", "web"], { cwd: ws.file(".u8/worktrees/fe/web") });
+    expect(last.code).not.toBe(0);
+    expect(last.err).toContain('would leave instance "fe" with no apps');
+    expect(last.err).toContain("u8 instance destroy fe");
+    const twice = await cli(["-i", "fe", "instance", "add", "web"], { cwd: ws.dir });
+    expect(twice.code).not.toBe(0);
+    expect(twice.err).toContain('"web" is already part of instance "fe"');
+
+    expect((await statusJson(ws.dir, "-i", "fe")).repos.flatMap((r) => r.apps.map((a) => a.id))).toEqual(["web@fe"]);
+  });
+});
+
 describe("u8 up", () => {
   it("turns a worktree another tool made into a running instance, in one step", async () => {
     const { ws, ports } = fixture();

@@ -25,10 +25,12 @@ import { initCommand } from "./init.js";
 import {
   envCommand,
   execCommand,
+  instanceAddCommand,
   instanceCreateCommand,
   instanceDestroyCommand,
   instanceInitCommand,
   instanceListCommand,
+  instanceRemoveCommand,
   portsCommand,
   upCommand,
 } from "./instance.js";
@@ -137,7 +139,7 @@ export function buildProgram(io: CliIo, state: ProgramState): Command {
     state.code = await execCommand(context(cmd), target, command);
   });
 
-  const instance = sub(program, "instance").description("create, list and remove parallel copies of the workspace");
+  const instance = sub(program, "instance").description("create, list, change and remove parallel copies of the workspace");
   withGlobals(sub(instance, "list").description("list the workspace's instances").option("--json", "machine-readable output")).action(
     async (opts: { json?: boolean }, cmd: Command) => {
       state.code = await instanceListCommand(context(cmd), { json: opts.json });
@@ -168,6 +170,35 @@ export function buildProgram(io: CliIo, state: ProgramState): Command {
   ).action(async (name: string | undefined, _opts: unknown, cmd: Command) => {
     state.code = await instanceInitCommand(context(cmd), name);
   });
+  withGlobals(
+    sub(instance, "add")
+      .description("add apps to an instance: a worktree for any repo it has none of, their own ports, then their init steps")
+      .argument("<targets...>", "repos or apps to add, named as the config names them")
+      .option("--branch <name>", "branch for a worktree it has to create (default: the branch the instance is on)")
+      .option("--from <ref>", "where a new branch starts (default: the base checkout's HEAD)")
+      .option("--adopt <dir>", "use an existing git worktree instead of creating one (repeatable)", collect, [])
+      .option("--path <repo=dir>", "use an existing directory for one repo (repeatable)", collect, []),
+  ).action(
+    async (
+      targets: string[],
+      opts: { branch?: string; from?: string; adopt: string[]; path: string[] },
+      cmd: Command,
+    ) => {
+      state.code = await instanceAddCommand(context(cmd), targets, opts);
+    },
+  );
+  withGlobals(
+    sub(instance, "remove")
+      .description("take apps out of an instance: stop them, run their teardown and free their ports")
+      .argument("<targets...>", "repos or apps to remove, named as the config names them")
+      .option("--force", "remove them even if a teardown step fails")
+      .option("--prune", "also give up the checkout of a repo left with no apps; a worktree u8 created must be clean")
+      .option("--discard", "with --prune: remove the worktree even if it has uncommitted changes"),
+  ).action(
+    async (targets: string[], opts: { force?: boolean; prune?: boolean; discard?: boolean }, cmd: Command) => {
+      state.code = await instanceRemoveCommand(context(cmd), targets, opts);
+    },
+  );
   withGlobals(
     sub(instance, "destroy")
       .description("stop an instance, run its teardown, remove the worktrees u8 created and free its ports")

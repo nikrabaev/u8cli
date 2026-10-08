@@ -73,6 +73,7 @@ consumer and update the tests that pin the behaviour.
 - 🚫 **Never:** let a plugin failure take down the daemon; a bad plugin is disabled and reported.
 - 🚫 **Never:** resolve a target typed inside an instance to base as a fallback — pass the instance to `expandTarget` / `resolveTargetStrings` in `src/config/resolve.ts`; reaching base takes an explicit `name@base`. One task must not be able to restart another's service by typing a bare name.
 - 🚫 **Never:** remove or modify a checkout whose record is not `owned` — an adopted worktree belongs to the tool that made it.
+- 🚫 **Never:** let `instance remove` cost uncommitted work — it keeps a checkout unless `prune` is set, and a pruned worktree goes through `removeWorktree` without `force` unless `discard` is set too. Only `instance destroy` removes worktrees unasked.
 - 🚫 **Never:** interpolate `${…}` into anything a shell runs (scripts, `health.cmd`, hooks, indicator commands) — references resolve in `env` values and `health.http` only; a script reads its values from the environment.
 - 🚫 **Never:** allocate an instance port outside the daemon's instance manager — one owner is what stops two instances getting the same number.
 - 🚫 **Never:** reference line numbers in docs, or duplicate `package.json` / config bodies.
