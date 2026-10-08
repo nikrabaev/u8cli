@@ -340,23 +340,11 @@ two checkouts of the same project never share one.
 
 ```mermaid
 flowchart LR
-    cli["u8 start · status · logs"]
-    tui["u8 dashboard"]
-    sock(["unix socket"])
-    subgraph daemon["daemon — one per workspace"]
-        direction TB
-        engine["engine<br/>commands · hooks · dependsOn"]
-        sup["supervisor<br/>process groups · logs"]
-        ind["indicator cache"]
-        plug["plugins<br/>git · health · yours"]
-        engine --> sup
-        plug --> ind
-    end
-    cli --> sock
-    tui --> sock
-    sock --> daemon
-    sup --> base["db · api · platform"]
-    sup --> inst["api@feat-x · platform@feat-x"]
+    cli["u8 start · status · logs"] --> sock(["unix socket"])
+    tui["u8 dashboard"] --> sock
+    sock --> daemon["daemon<br/>supervisor · engine<br/>indicator cache · plugins"]
+    daemon --> base["db · api · platform"]
+    daemon --> inst["api@feat-x · platform@feat-x"]
 ```
 
 - **Auto-spawn.** Any `u8` command connects to the workspace's unix socket and, if nobody answers,
