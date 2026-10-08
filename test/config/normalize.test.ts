@@ -763,6 +763,28 @@ describe("template warnings", () => {
     ]);
   });
 
+  it("lets a template write every indicator name the config accepts", () => {
+    const { ws } = loadFixture({
+      repos: { db: { path: "." } },
+      indicators: { "db.version": { cmd: "echo 1" }, "2fa": { cmd: "echo 1" } },
+      templates: { app: "{db.version:dim} {2fa} {db.versoin}" },
+    });
+    // The typo is still caught, and as a name that was not declared — not as a
+    // token the grammar could not read.
+    expect(ws.warnings).toEqual([
+      'templates.app: {db.versoin} names no indicator declared under "indicators"',
+    ]);
+  });
+
+  it("lets a template write the namespace of a plugin whose name starts with a digit", () => {
+    const { ws } = loadFixture({
+      repos: { db: { path: "." } },
+      plugins: ["./plugins/2fa.ts"],
+      templates: { app: "{2fa@otp.left}" },
+    });
+    expect(ws.warnings).toEqual([]);
+  });
+
   it("does not take a bare token for a core or plugin one that lost its namespace", () => {
     // `{status}` is a config indicator called "status", never a shorthand for
     // `{app@status}` — so with none declared it is a typo like any other.

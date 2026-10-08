@@ -437,19 +437,23 @@ is the header row instead — it never leaks into child rows.
 {name}                    {name:mod}               {name:mod(arg):mod}
 ```
 
-A name — and a namespace, when there is one — must start with a letter and continue with letters,
-digits, `_` or `-`. A token with no `@` is an indicator declared in this config; one from core or a
-plugin always carries its namespace, so `{status}` is never short for `{app@status}`. `{{` and `}}`
-escape a literal brace.
+A token spells a name exactly as it was declared. An indicator is named like a command — letters,
+digits, `.`, `_` and `-`, starting with a letter or digit — so `{db.version}` and `{protos@chart.js}`
+are tokens; a namespace is a plugin's name, which has no dots. A token with no `@` is an indicator
+declared in this config; one from core or a plugin always carries its namespace, so `{status}` is
+never short for `{app@status}`. `{{` and `}}` escape a literal brace, and that includes braces around
+a number: `{0}` is a token like any other.
 
 Parsing never throws, so a template typo degrades rather than breaking the dashboard — but the two
 kinds of typo look different:
 
-- A **malformed head** (`{app@nam e}`) is rendered as the literal text you typed. In this build
-  nothing else reports it, so a row echoing its own template *is* the error message.
+- A **malformed head** (`{app@nam e}`) is rendered as the literal text you typed.
 - A **malformed modifier** (`{app@name:pad(x)}`) is dropped and the token renders unmodified.
 - A **well-formed** token naming an indicator that does not exist (`{git@brunch}`, or a bare
   `{versoin}` with no such key under `indicators`) renders as `{git@brunch!}` / `{versoin!}` in red.
+
+Each of them is also a warning in the daemon log (`u8 daemon logs`), written when the daemon starts
+and again on every config reload.
 
 ```console
 $ u8 status          # templates.app = "  {app@nam e} | {app@name:pad(x)} | {git@brunch} | {{lit}} | {app@name}"

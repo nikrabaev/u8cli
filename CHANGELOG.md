@@ -39,6 +39,7 @@ Notable changes to u8cli. Format follows [Keep a Changelog](https://keepachangel
 
 ### Fixed
 
+- **Every indicator that can be declared can be written in a template.** An indicator name may contain a dot or start with a digit — under `indicators`, in a plugin, and in the alias `protos` derives from a package such as `chart.js` — and a plugin's name may start with a digit, but the template grammar accepted neither. `{db.version}`, `{protos@chart.js}` and `{2fa@left}` were "malformed" and rendered as their own source text, so those indicators could be declared and never shown. The grammar is now built from the same name rules the validators use, which keeps the two from drifting apart again. One consequence: an unescaped `{0}` or `{1.5}` in a template is now a token, rendered as a red `{0!}`, where it used to pass through as literal text with a warning — write `{{0}}`.
 - **Plugin packages resolve only from the workspace's `node_modules`.** The resolver also honoured `NODE_PATH`, which a package manager's bin shim points at the launched tool's own dependency tree — so with u8 started through pnpm, a plugin the workspace had not installed could load a copy from inside u8cli's dependencies instead of being reported as missing.
 
 ## [0.1.0-rc.1] — 2026-08-14

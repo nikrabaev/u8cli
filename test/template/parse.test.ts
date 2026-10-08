@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { BARE_NAME_PATTERN, NAME_PATTERN } from "../../src/config/index.js";
 import { DEFAULT_TEMPLATES } from "../../src/config/types.js";
 import {
   parseTemplate,
@@ -56,6 +57,16 @@ describe("grammar", () => {
     expect(tokens("{build_status-2}")).toMatchObject([{ ns: "", name: "build_status-2" }]);
   });
 
+  it("accepts a dot in an indicator name, as a config key and a plugin may have one", () => {
+    expect(tokens("{db.version:dim}")).toMatchObject([{ ns: "", name: "db.version", modifiers: [{ kind: "dim" }] }]);
+    expect(tokens("{protos@chart.js}")).toMatchObject([{ ns: "protos", name: "chart.js" }]);
+  });
+
+  it("accepts a leading digit in a name and in a namespace", () => {
+    expect(tokens("{3d}")).toMatchObject([{ ns: "", name: "3d" }]);
+    expect(tokens("{2fa@otp_left}")).toMatchObject([{ ns: "2fa", name: "otp_left" }]);
+  });
+
   it("chains modifiers on a bare token like on any other", () => {
     const [token] = tokens("{version:max(8):dim}");
     expect(token).toMatchObject({ ns: "", name: "version" });
@@ -109,9 +120,12 @@ describe("malformed input", () => {
     "{app@na me}",
     "{}",
     "{ver sion}",
-    "{9lives}",
+    "{.hidden}",
+    "{-dash}",
     "{pad(8)}",
     "{a@b@c}",
+    // A namespace is a plugin's name, and those have no dots.
+    "{my.plugin@name}",
   ])("warns and renders %s literally", (source) => {
     const parsed = parseTemplate(source);
     expect(parsed.warnings).toHaveLength(1);
@@ -181,6 +195,49 @@ describe("templateTokens", () => {
   });
 });
 
+/**
+ * A name has two readers: the validator that accepts it where it is declared
+ * and the grammar that has to spell it. Whenever they disagreed, an indicator
+ * could be declared that no template was able to show.
+ */
+describe("declared names", () => {
+  const candidates = [
+    "version",
+    "A_b-c",
+    "db.version",
+    "chart.js",
+    "v1.",
+    "a..b",
+    "2fa",
+    "3d.kit",
+    "0",
+    ".hidden",
+    "-dash",
+    "_under",
+    "a b",
+    "a:b",
+    "a@b",
+    "a/b",
+    "a(b)",
+    "a{b",
+    "a}b",
+    "é",
+    "",
+  ];
+
+  it.each(candidates)("an indicator may be called %j exactly when a template can write it", (name) => {
+    const parsed = tokens(`{${name}}`);
+    const writable = parsed.length === 1 && parsed[0]?.ns === "" && parsed[0]?.name === name;
+    expect(writable).toBe(BARE_NAME_PATTERN.test(name));
+  });
+
+  it.each(candidates)("a plugin may be called %j exactly when its tokens can be written", (ns) => {
+    const parsed = tokens(`{${ns}@value}`);
+    const writable = parsed.length === 1 && parsed[0]?.ns === ns && parsed[0]?.name === "value";
+    expect(writable).toBe(NAME_PATTERN.test(ns));
+  });
+});
+
 describe("tokenLabel", () => {
   it("spells a token the way a template does", () => {
     expect(tokenLabel("git", "branch")).toBe("git@branch");
@@ -188,7 +245,7 @@ describe("tokenLabel", () => {
   });
 
   it("round-trips through the parser", () => {
-    for (const head of ["app@status", "my-plugin@build_status2", "version"]) {
+    for (const head of ["app@status", "my-plugin@build_status2", "version", "db.version", "2fa@otp.left"]) {
       const [token] = tokens(`{${head}:dim}`);
       expect(tokenLabel(token?.ns ?? "?", token?.name ?? "?")).toBe(head);
     }

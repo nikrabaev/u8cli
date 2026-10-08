@@ -17,8 +17,9 @@
  */
 import path from "node:path";
 // The grammar, not the renderer: `parse.ts` imports nothing outside its own
-// module, so reading it here checks templates against the one true grammar
-// without coupling config to anything above it.
+// module but the name rules in `util/names.ts`, so reading it here checks
+// templates against the one true grammar without coupling config to anything
+// above it.
 import { NO_NAMESPACE, parseTemplate, templateTokens, tokenLabel } from "../template/parse.js";
 import { describeDirectory } from "../util/dirs.js";
 import { ConfigError, type ConfigIssue } from "../util/errors.js";

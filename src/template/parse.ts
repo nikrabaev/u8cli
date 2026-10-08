@@ -7,6 +7,7 @@
  * typed and records a warning, because a typo in a template must not take down a
  * dashboard that is otherwise fine — the warning surfaces at config load.
  */
+import { BARE_NAME_SOURCE, NAME_SOURCE } from "../util/names.js";
 import { parseModifier, type Modifier } from "./modifiers.js";
 
 export interface TemplateWarning {
@@ -54,8 +55,14 @@ export interface TokenRef {
  */
 export const NO_NAMESPACE = "";
 
-/** `indicator` or `ns@indicator`; both halves are identifier-ish, so neither spelling can pass for the other. */
-const TOKEN_HEAD = /^(?:([A-Za-z][A-Za-z0-9_-]*)@)?([A-Za-z][A-Za-z0-9_-]*)$/;
+/**
+ * `indicator` or `ns@indicator`. A namespace is a plugin's name and an
+ * indicator is named like a command, so both halves are the very patterns
+ * those are validated with: whatever can be declared can be written here.
+ * Neither admits `@`, `:` or a brace, which is all the grammar needs to tell
+ * the two spellings, the modifiers and the token's end apart.
+ */
+const TOKEN_HEAD = new RegExp(`^(?:(${NAME_SOURCE})@)?(${BARE_NAME_SOURCE})$`);
 
 /**
  * A token's head as a template spells it: `git@branch`, or `version` for one

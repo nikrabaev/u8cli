@@ -164,7 +164,7 @@ Row templates are strings of literal text + tokens with optional colon-chained m
 {app@status} {app@name:pad(24)} {git@branch:color(yellow):max(15)} {health@status}
 ```
 
-- Grammar: `{(ns@)?indicator(:modifier(args))*}`. The namespace is omitted only for a config-defined indicator.
+- Grammar: `{(ns@)?indicator(:modifier(args))*}`. The namespace is omitted only for a config-defined indicator. Both halves accept exactly what may be declared — a namespace is a plugin name, an indicator is named like a command (dots allowed) — so no declarable indicator is unwritable.
 - Modifiers (v1): `pad(n)` (right-pad/align to width), `max(n)` (truncate with `…`), `color(name)`, `dim`, `bold`. Indicators may carry a semantic default rendering (e.g. `app@status` renders `●` colored by state); modifiers override it.
 - **No conditionals or expressions.** Anything conditional belongs in a custom indicator.
 - Configuration: workspace-level `templates.repo` (repo header row) and `templates.app` (child row); any repo or app may override with its own `template`. Single-app repos render as **one merged row** using the app template.

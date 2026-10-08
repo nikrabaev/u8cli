@@ -10,16 +10,11 @@
  * the build output purely to emit `schema.json` for editor `$schema` support.
  */
 import { z } from "zod";
+import { BARE_NAME_PATTERN, NAME_PATTERN } from "../util/names.js";
 
-/**
- * Repo and app names become segments of a target id (`repo.app`), so a name
- * containing `.` would make `"a.b"` ambiguous. `:` and `@` are namespace
- * separators for commands and indicators.
- */
-export const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-
-/** Command and config indicator names: bare, but dots are allowed (`db.migrate`). */
-export const BARE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+// The rules themselves live in `util/names.ts`, where the template grammar can
+// reach them too: a name this file accepts has to be one a row can spell.
+export { BARE_NAME_PATTERN, NAME_PATTERN };
 
 /**
  * An npm package name: `name` or `@scope/name`. Deliberately looser than the

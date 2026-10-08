@@ -88,6 +88,21 @@ describe("unknown indicators", () => {
     expect(renderTemplate("{version}", emptyLookup, colored)).toBe("\x1b[31m{version!}\x1b[0m");
     expect(renderTemplate("{version:pad(20)}", emptyLookup, plain)).toBe("{version!}");
   });
+
+  it("marks an unknown dotted or digit-led token instead of echoing its source", () => {
+    expect(renderTemplate("{db.version} {2fa@otp.left:dim}", emptyLookup, plain)).toBe(
+      "{db.version!} {2fa@otp.left!}",
+    );
+  });
+});
+
+describe("names with dots and leading digits", () => {
+  it("resolve like any other", () => {
+    const lookup = lookupOf({ "db.version": "16.2", "protos@chart.js": "4.4.1", "2fa@left": "3" });
+    expect(renderTemplate("{db.version:pad(6)}|{protos@chart.js}|{2fa@left}", lookup, plain)).toBe(
+      "16.2  |4.4.1|3",
+    );
+  });
 });
 
 describe("bare tokens", () => {

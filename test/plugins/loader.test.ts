@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { NormalizedWorkspace } from "../../src/config/types.js";
 import type { SnapshotPlugin } from "../../src/ipc/protocol.js";
 import { builtinAvailable, BUILTIN_SPEC_PREFIX, pluginSources } from "../../src/plugins/index.js";
+import { templateTokens } from "../../src/template/index.js";
 import { cleanupPlugins, createFixture, installPackage, PLUGIN_SDK, type Fixture } from "./helpers.js";
 
 afterEach(async () => {
@@ -534,6 +535,31 @@ describe("namespace collisions", () => {
     expect(record(host.list(), "./plugins/app.js").error).toContain("reserved by u8cli");
     // `repo@` is the header row's namespace, exactly as `app@` is the app row's.
     expect(record(host.list(), "./plugins/repo.js").error).toContain("reserved by u8cli");
+  });
+
+  it("accepts no plugin or indicator name that a template could not then write", async () => {
+    const fixture = createFixture({
+      config: { plugins: ["./plugins/2fa.js"] },
+      files: {
+        "plugins/2fa.js": `export default {
+          name: "2fa",
+          indicators: { "otp.left": { value: () => "3" }, "3d": { value: () => "on" } },
+        };`,
+      },
+    });
+
+    const host = fixture.host();
+    await host.load();
+
+    expect(record(host.list(), "./plugins/2fa.js")).toMatchObject({ name: "2fa", ok: true });
+    const registered = host.indicators().map((i) => ({ ns: i.ns, name: i.name }));
+    expect(registered).toEqual([
+      { ns: "2fa", name: "otp.left" },
+      { ns: "2fa", name: "3d" },
+    ]);
+    for (const cell of registered) {
+      expect(templateTokens(`{${cell.ns}@${cell.name}}`)).toEqual([cell]);
+    }
   });
 
   it("reserves nothing for config indicators, which are written without a namespace", async () => {

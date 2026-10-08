@@ -16,6 +16,7 @@ import protosFactory, {
   LINKED_INDICATOR,
   YALC,
 } from "../../../src/plugins/builtin/protos.js";
+import { templateTokens } from "../../../src/template/index.js";
 import { nullLogger } from "../../../src/util/logger.js";
 import {
   cleanupHarnesses,
@@ -271,6 +272,18 @@ describe("protos registration", () => {
     ]);
     expect(Object.keys(def.commands ?? {})).toContain("link:myorg-protos");
     expect(Object.keys(def.commands ?? {})).toContain("unlink:other-protos");
+  });
+
+  it("gives a package named with a dot or a leading digit a cell a template can write", () => {
+    // npm allows both (`chart.js`, `socket.io`), and the alias is the name a
+    // human knows the package by — so it is the grammar that has to keep up.
+    const def = plugin({ packages: ["chart.js", "@acme/socket.io", "3d-kit"] });
+
+    const cells = Object.keys(def.indicators ?? {}).filter((name) => name !== LINKED_INDICATOR);
+    expect(cells.sort()).toEqual(["3d-kit", "chart.js", "socket.io"]);
+    for (const name of cells) {
+      expect(templateTokens(`{protos@${name}}`)).toEqual([{ ns: "protos", name }]);
+    }
   });
 
   it("keeps the rollup cell for itself when a package would shadow it", () => {

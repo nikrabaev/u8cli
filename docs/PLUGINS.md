@@ -222,7 +222,10 @@ hooks: {
 
 ## Indicators
 
-An indicator is a named value rendered in row templates as `{<plugin>@<name>}`.
+An indicator is a named value rendered in row templates as `{<plugin>@<name>}`. Its key is a bare
+name — letters, digits, `.`, `_` and `-`, starting with a letter or digit — and a template writes it
+exactly as declared, dots included (`{db@pool.size}`). A `:` is not allowed: inside a token it
+separates modifiers.
 
 ```ts
 indicators: {
