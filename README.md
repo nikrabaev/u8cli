@@ -338,13 +338,10 @@ and `SHELL` (the shell every script is run with, falling back to `/bin/sh`).
 One daemon per workspace, identified by a hash of the *real* (symlink-resolved) path of `u8.jsonc` —
 two checkouts of the same project never share one.
 
-```mermaid
-flowchart LR
-    cli["u8 CLI"] --> sock(["unix socket"])
-    tui["u8 dashboard"] --> sock
-    sock --> daemon["daemon"]
-    daemon --> base["base<br/>db · api · platform"]
-    daemon --> inst["feat-x<br/>api · platform"]
+```text
+u8 CLI ────────┐                           ┌── base      db · api · platform
+               ├── unix socket ── daemon ──┤
+u8 dashboard ──┘                           └── feat-x    api · platform
 ```
 
 - **Auto-spawn.** Any `u8` command connects to the workspace's unix socket and, if nobody answers,
