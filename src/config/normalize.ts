@@ -2,14 +2,14 @@
  * Raw `u8.jsonc` → {@link NormalizedWorkspace}.
  *
  * This is where the two invariants the rest of the codebase relies on are
- * established: every runnable thing is a subapp (an app without `subapps` grows
+ * established: every runnable thing is an app (a repo without `apps` grows
  * an implicit one), and every path/env/timeout is already resolved. It is also
  * the last place that understands the *document* — so every cross-field rule
  * (target references, dependency cycles, reserved names, profile defaults)
  * lives here, reported as `ConfigError` issues addressed by dotted path.
  *
- * Almost pure: the only filesystem access is one `stat` per resolved app and
- * subapp directory ({@link directoryWarnings}). This is the single layer that
+ * Almost pure: the only filesystem access is one `stat` per resolved repo and
+ * app directory ({@link directoryWarnings}). This is the single layer that
  * holds both halves of that diagnostic — the dotted config path and the
  * absolute directory it resolved to — so checking anywhere else would mean
  * duplicating the resolution. Everything else is path arithmetic, which keeps
@@ -45,10 +45,11 @@ import {
   type NormalizedApp,
   type NormalizedCommand,
   type NormalizedProfile,
-  type NormalizedSubapp,
+  type NormalizedRepo,
   type NormalizedWorkspace,
   type PluginRef,
   type ProtosOptions,
+  REPO_NAMESPACE,
   type TargetId,
   type Templates,
 } from "./types.js";
@@ -72,73 +73,73 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
   const limits = mergeLimits(raw.limits);
   const workspaceEnv = raw.env ?? {};
 
-  // --- apps & subapps -------------------------------------------------------
+  // --- repos & apps -------------------------------------------------------
+  const repos: NormalizedRepo[] = [];
   const apps: NormalizedApp[] = [];
-  const subapps: NormalizedSubapp[] = [];
-  const pendingDeps: Array<{ subapp: NormalizedSubapp; specs: string[]; configPath: string }> = [];
+  const pendingDeps: Array<{ app: NormalizedApp; specs: string[]; configPath: string }> = [];
   const dirChecks: DirectoryCheck[] = [];
 
-  for (const [appName, entry] of Object.entries(raw.apps)) {
-    const appPath = resolvePath(entry.path, rootDir);
-    const app: NormalizedApp = { name: appName, path: appPath, template: entry.template, subapps: [] };
-    const subappEntries = Object.entries(entry.subapps ?? {});
-    dirChecks.push({ at: `apps.${appName}.path`, dir: appPath });
+  for (const [repoName, entry] of Object.entries(raw.repos)) {
+    const repoPath = resolvePath(entry.path, rootDir);
+    const repo: NormalizedRepo = { name: repoName, path: repoPath, template: entry.template, apps: [] };
+    const appEntries = Object.entries(entry.apps ?? {});
+    dirChecks.push({ at: `repos.${repoName}.path`, dir: repoPath });
 
-    if (subappEntries.length === 0) {
-      // Implicit subapp: the app entry *is* the subapp definition.
-      const subapp = buildSubapp({
-        id: appName,
-        appName,
-        name: appName,
+    if (appEntries.length === 0) {
+      // Implicit app: the repo entry *is* the app definition.
+      const app = buildApp({
+        id: repoName,
+        repoName,
+        name: repoName,
         implicit: true,
-        cwd: appPath,
+        cwd: repoPath,
         baseEnv: workspaceEnv,
         entry,
         limits,
       });
-      app.subapps.push(subapp);
-      pendingDeps.push({ subapp, specs: entry.dependsOn ?? [], configPath: `apps.${appName}.dependsOn` });
+      repo.apps.push(app);
+      pendingDeps.push({ app, specs: entry.dependsOn ?? [], configPath: `repos.${repoName}.dependsOn` });
     } else {
-      for (const [subName, subEntry] of subappEntries) {
-        const subCwd = resolvePath(subEntry.path ?? ".", appPath);
-        // A subapp that inherits the app directory is already covered by the
-        // app's own check; only a `path` of its own is a second place to be wrong.
-        if (subCwd !== appPath) {
-          dirChecks.push({ at: `apps.${appName}.subapps.${subName}.path`, dir: subCwd, under: appPath });
+      for (const [appName, appEntry] of appEntries) {
+        const appCwd = resolvePath(appEntry.path ?? ".", repoPath);
+        // An app that inherits the repo directory is already covered by the
+        // repo's own check; only a `path` of its own is a second place to be wrong.
+        if (appCwd !== repoPath) {
+          dirChecks.push({ at: `repos.${repoName}.apps.${appName}.path`, dir: appCwd, under: repoPath });
         }
-        const subapp = buildSubapp({
-          id: `${appName}.${subName}`,
-          appName,
-          name: subName,
+        const app = buildApp({
+          id: `${repoName}.${appName}`,
+          repoName,
+          name: appName,
           implicit: false,
-          cwd: subCwd,
+          cwd: appCwd,
           baseEnv: workspaceEnv,
           defaults: entry,
-          entry: subEntry,
+          entry: appEntry,
           limits,
         });
-        app.subapps.push(subapp);
+        repo.apps.push(app);
         pendingDeps.push({
-          subapp,
-          specs: subEntry.dependsOn ?? entry.dependsOn ?? [],
-          configPath: subEntry.dependsOn
-            ? `apps.${appName}.subapps.${subName}.dependsOn`
-            : `apps.${appName}.dependsOn`,
+          app,
+          specs: appEntry.dependsOn ?? entry.dependsOn ?? [],
+          configPath: appEntry.dependsOn
+            ? `repos.${repoName}.apps.${appName}.dependsOn`
+            : `repos.${repoName}.dependsOn`,
         });
       }
     }
 
-    apps.push(app);
-    subapps.push(...app.subapps);
+    repos.push(repo);
+    apps.push(...repo.apps);
   }
 
   // --- target index ---------------------------------------------------------
-  const knownIds = new Set<TargetId>(subapps.map((s) => s.id));
-  const idsByApp = new Map<string, TargetId[]>(apps.map((a) => [a.name, a.subapps.map((s) => s.id)]));
+  const knownIds = new Set<TargetId>(apps.map((a) => a.id));
+  const idsByRepo = new Map<string, TargetId[]>(repos.map((r) => [r.name, r.apps.map((a) => a.id)]));
 
-  /** An app name expands to all of its subapps; an id matches exactly. */
+  /** A repo name expands to all of its apps; an id matches exactly. */
   const expand = (spec: string): TargetId[] | undefined =>
-    knownIds.has(spec) ? [spec] : idsByApp.get(spec);
+    knownIds.has(spec) ? [spec] : idsByRepo.get(spec);
 
   const resolveRefs = (specs: readonly string[], pathOf: (index: number) => string): TargetId[] => {
     const out: TargetId[] = [];
@@ -153,20 +154,20 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
     return out;
   };
 
-  // One app-level `dependsOn` feeds every subapp of that app: resolve it once so
-  // a bad reference is reported at the place it was authored, not once per subapp.
+  // One repo-level `dependsOn` feeds every app of that repo: resolve it once so
+  // a bad reference is reported at the place it was authored, not once per app.
   const resolvedDeps = new Map<string, TargetId[]>();
-  for (const { subapp, specs, configPath: depPath } of pendingDeps) {
+  for (const { app, specs, configPath: depPath } of pendingDeps) {
     let ids = resolvedDeps.get(depPath);
     if (!ids) {
       ids = resolveRefs(specs, (i) => `${depPath}[${i}]`);
       resolvedDeps.set(depPath, ids);
     }
-    subapp.dependsOn = [...ids];
+    app.dependsOn = [...ids];
   }
 
   // --- profiles -------------------------------------------------------------
-  const profiles = normalizeProfiles(raw, subapps, apps, resolveRefs, issues);
+  const profiles = normalizeProfiles(raw, apps, repos, resolveRefs, issues);
   const defaultProfile = profiles.find((p) => p.isDefault)?.name ?? profiles[0]?.name ?? IMPLICIT_PROFILE_NAME;
 
   // --- commands -------------------------------------------------------------
@@ -174,7 +175,7 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
   for (const [name, entry] of Object.entries(raw.commands ?? {})) {
     const at = `commands.${name}`;
     checkBareName(name, "command", at, issues);
-    // App-wide entries are applied first so an explicit `app.subapp` entry always
+    // Repo-wide entries are applied first so an explicit `repo.app` entry always
     // wins, whatever order the two were written in.
     const entries = Object.entries(entry.targets ?? {});
     const targetScripts: Record<TargetId, string | null> = {};
@@ -200,7 +201,7 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
       hooks: { pre: toArray(entry.hooks?.pre), post: toArray(entry.hooks?.post) },
     });
   }
-  commands.push(...coreCommands(subapps));
+  commands.push(...coreCommands(apps));
 
   // --- indicators -----------------------------------------------------------
   const indicators: CustomIndicatorDef[] = [];
@@ -210,7 +211,7 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
       name,
       cmd: entry.cmd,
       intervalMs: entry.interval ?? DEFAULT_INDICATOR_INTERVAL_MS,
-      scope: entry.scope ?? "subapp",
+      scope: entry.scope ?? "app",
     });
   }
 
@@ -220,11 +221,11 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
 
   if (issues.length > 0) throw new ConfigError("invalid workspace config", issues, configPath);
 
-  const cycle = findCycle(subapps);
+  const cycle = findCycle(apps);
   if (cycle) {
     throw new ConfigError(
       "invalid workspace config",
-      [{ path: "apps", message: `dependency cycle: ${cycle.join(" → ")}` }],
+      [{ path: "repos", message: `dependency cycle: ${cycle.join(" → ")}` }],
       configPath,
     );
   }
@@ -235,8 +236,8 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
     name: raw.name ?? path.basename(rootDir),
     id: workspaceId(configPath),
     templates: mergeTemplates(raw.templates),
+    repos,
     apps,
-    subapps,
     profiles,
     defaultProfile,
     commands,
@@ -246,7 +247,7 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
     builtinOptions,
     limits,
     // Directories first: a `path` that points at nothing explains every other
-    // odd thing about that app, including a template token that never resolves.
+    // odd thing about that repo, including a template token that never resolves.
     warnings: [
       ...directoryWarnings(dirChecks),
       ...templateWarnings(raw, { plugins, builtins }, new Set(indicators.map((i) => i.name))),
@@ -263,7 +264,7 @@ interface DirectoryCheck {
   at: string;
   /** The resolved, absolute directory. */
   dir: string;
-  /** The app directory a subapp's `path` was resolved against, when there is one. */
+  /** The repo directory an app's `path` was resolved against, when there is one. */
   under?: string;
 }
 
@@ -278,7 +279,7 @@ interface DirectoryCheck {
  *    document. The same config is right before and after `git clone`, so making
  *    the load fail would make `u8` refuse to run for a reason its author cannot
  *    fix in the config — a workspace with one repo not cloned yet (or one
- *    volume not mounted) would lose the other nine apps too.
+ *    volume not mounted) would lose the other nine repos too.
  *  - The codebase already refuses to do that for the analogous case: a plugin
  *    that fails to load is disabled and reported, never fatal.
  *  - The blast radius is where it belongs. `spawn.ts` now fails that one target
@@ -296,7 +297,7 @@ function directoryWarnings(checks: readonly DirectoryCheck[]): string[] {
   const broken = new Set<string>();
 
   for (const { at, dir, under } of checks) {
-    // Nothing can exist under a directory that does not: reporting the subapp
+    // Nothing can exist under a directory that does not: reporting the app
     // too would bury the single line its author has to act on.
     if (under !== undefined && broken.has(under) && isInside(dir, under)) continue;
     const problem = describeDirectory(dir);
@@ -312,32 +313,32 @@ function isInside(dir: string, parent: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Subapps
+// Apps
 // ---------------------------------------------------------------------------
 
-interface BuildSubappArgs {
+interface BuildAppArgs {
   id: TargetId;
-  appName: string;
+  repoName: string;
   name: string;
   implicit: boolean;
   cwd: string;
   /** Workspace-level env; the bottom of the merge order. */
   baseEnv: Record<string, string>;
-  /** The app entry, when it acts as a defaults layer for an explicit subapp. */
+  /** The repo entry, when it acts as a defaults layer for an explicit app. */
   defaults?: RawRunnable;
   entry: RawRunnable;
   limits: Limits;
 }
 
 /**
- * `dependsOn` is left empty here and filled once every subapp is known, since a
- * dependency may name an app declared later in the document.
+ * `dependsOn` is left empty here and filled once every app is known, since a
+ * dependency may name a repo declared later in the document.
  */
-function buildSubapp(args: BuildSubappArgs): NormalizedSubapp {
+function buildApp(args: BuildAppArgs): NormalizedApp {
   const { defaults, entry, limits } = args;
   return {
     id: args.id,
-    appName: args.appName,
+    repoName: args.repoName,
     name: args.name,
     implicit: args.implicit,
     cwd: args.cwd,
@@ -370,8 +371,8 @@ function normalizeHealth(health: RawHealth | undefined): HealthCheckDef | undefi
 
 function normalizeProfiles(
   raw: RawWorkspaceConfig,
-  subapps: readonly NormalizedSubapp[],
   apps: readonly NormalizedApp[],
+  repos: readonly NormalizedRepo[],
   resolveRefs: (specs: readonly string[], pathOf: (index: number) => string) => TargetId[],
   issues: ConfigIssue[],
 ): NormalizedProfile[] {
@@ -381,8 +382,8 @@ function normalizeProfiles(
       {
         name: IMPLICIT_PROFILE_NAME,
         isDefault: true,
-        targets: apps.map((a) => a.name),
-        subappIds: subapps.map((s) => s.id),
+        targets: repos.map((r) => r.name),
+        appIds: apps.map((a) => a.id),
       },
     ];
   }
@@ -399,7 +400,7 @@ function normalizeProfiles(
     name,
     isDefault: entry.default === true,
     targets: [...entry.targets],
-    subappIds: resolveRefs(entry.targets, (i) => `profiles.${name}.targets[${i}]`),
+    appIds: resolveRefs(entry.targets, (i) => `profiles.${name}.targets[${i}]`),
   }));
 
   // No explicit default: the first declared profile wins.
@@ -413,9 +414,9 @@ function normalizeProfiles(
  * script for this target" — the supervisor reads that as "signal the process
  * group" for stop, and as "nothing to start" for start.
  */
-function coreCommands(subapps: readonly NormalizedSubapp[]): NormalizedCommand[] {
+function coreCommands(apps: readonly NormalizedApp[]): NormalizedCommand[] {
   const scripts = (key: "start" | "stop" | null): Record<TargetId, string | null> =>
-    Object.fromEntries(subapps.map((s) => [s.id, key === null ? null : (s.scripts[key] ?? null)]));
+    Object.fromEntries(apps.map((a) => [a.id, key === null ? null : (a.scripts[key] ?? null)]));
 
   const make = (name: string, description: string, key: "start" | "stop" | null): NormalizedCommand => ({
     name,
@@ -456,13 +457,17 @@ function templateWarnings(
   const out: string[] = [];
   const namespaces = knownNamespaces(loaded);
 
-  const check = (template: string | undefined, at: string): void => {
+  const check = (template: string | undefined, at: string, row: "repo" | "app"): void => {
     if (template === undefined) return;
     const parsed = parseTemplate(template);
     for (const warning of parsed.warnings) out.push(`${at}: ${warning.message}`);
     for (const { ns, name } of templateTokens(parsed)) {
       const token = `{${ns}@${name}}`;
-      if (ns === CUSTOM_INDICATOR_NAMESPACE) {
+      if (row === "repo" && ns === CORE_COMMAND_NAMESPACE) {
+        // The fallback runs one way: an app row may read its repo's cells, but a
+        // header row stands for several apps and has no single one to read.
+        out.push(`${at}: ${token} is an app-row token — a repo header row reads ${REPO_ROW_TOKENS}`);
+      } else if (ns === CUSTOM_INDICATOR_NAMESPACE) {
         // The only namespace whose *names* this layer knows in full.
         if (!declaredIndicators.has(name)) {
           out.push(`${at}: ${token} names no indicator declared under "indicators"`);
@@ -476,16 +481,26 @@ function templateWarnings(
     }
   };
 
-  check(raw.templates?.app, "templates.app");
-  check(raw.templates?.subapp, "templates.subapp");
-  for (const [appName, app] of Object.entries(raw.apps)) {
-    check(app.template, `apps.${appName}.template`);
-    for (const [subName, subapp] of Object.entries(app.subapps ?? {})) {
-      check(subapp.template, `apps.${appName}.subapps.${subName}.template`);
+  check(raw.templates?.repo, "templates.repo", "repo");
+  check(raw.templates?.app, "templates.app", "app");
+  for (const [repoName, repo] of Object.entries(raw.repos)) {
+    const apps = Object.entries(repo.apps ?? {});
+    // A repo's own template is a header row only above several apps; with one
+    // (or none) it renders the merged row, which is an app row.
+    check(repo.template, `repos.${repoName}.template`, apps.length > 1 ? "repo" : "app");
+    for (const [appName, app] of apps) {
+      check(app.template, `repos.${repoName}.apps.${appName}.template`, "app");
     }
   }
   return out;
 }
+
+/**
+ * What `repo@` offers, spelled out because the author reached for `app@`
+ * instead. A copy of the list in `src/indicators/core.ts`: config sits below
+ * the indicator layer and cannot ask it.
+ */
+const REPO_ROW_TOKENS = "{repo@name}, {repo@dirname}, {repo@path} or {repo@status}";
 
 /** Core, the enabled built-ins, and whatever the declared plugins are likely called. */
 function knownNamespaces({
@@ -495,7 +510,7 @@ function knownNamespaces({
   plugins: readonly PluginRef[];
   builtins: BuiltinFlags;
 }): Set<string> {
-  const out = new Set<string>([CORE_COMMAND_NAMESPACE]);
+  const out = new Set<string>([CORE_COMMAND_NAMESPACE, REPO_NAMESPACE]);
   for (const [name, enabled] of Object.entries(builtins)) if (enabled) out.add(name);
   for (const { spec } of plugins) for (const guess of pluginNamespaces(spec)) out.add(guess);
   return out;
@@ -543,8 +558,8 @@ function mergeLimits(raw: RawLimits | undefined): Limits {
 
 function mergeTemplates(raw: RawWorkspaceConfig["templates"]): Templates {
   return {
+    repo: raw?.repo ?? DEFAULT_TEMPLATES.repo,
     app: raw?.app ?? DEFAULT_TEMPLATES.app,
-    subapp: raw?.subapp ?? DEFAULT_TEMPLATES.subapp,
   };
 }
 
@@ -617,7 +632,7 @@ function toArray(v: string | string[] | undefined): string[] {
 }
 
 function unknownTarget(spec: string): string {
-  return `unknown target "${spec}" — expected an app name or "app.subapp"`;
+  return `unknown target "${spec}" — expected a repo name or "repo.app"`;
 }
 
 function checkBareName(name: string, what: string, at: string, issues: ConfigIssue[]): void {
@@ -641,8 +656,8 @@ function checkBareName(name: string, what: string, at: string, issues: ConfigIss
 }
 
 /** Returns the offending path (`a → b → a`) or `undefined` when the DAG is clean. */
-function findCycle(subapps: readonly NormalizedSubapp[]): TargetId[] | undefined {
-  const deps = new Map<TargetId, TargetId[]>(subapps.map((s) => [s.id, s.dependsOn]));
+function findCycle(apps: readonly NormalizedApp[]): TargetId[] | undefined {
+  const deps = new Map<TargetId, TargetId[]>(apps.map((a) => [a.id, a.dependsOn]));
   const state = new Map<TargetId, "open" | "done">();
   const stack: TargetId[] = [];
 
@@ -661,7 +676,7 @@ function findCycle(subapps: readonly NormalizedSubapp[]): TargetId[] | undefined
     return undefined;
   };
 
-  for (const { id } of subapps) {
+  for (const { id } of apps) {
     const cycle = visit(id);
     if (cycle) return cycle;
   }

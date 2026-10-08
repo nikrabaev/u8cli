@@ -21,7 +21,7 @@ import {
   type RecordingLogger,
 } from "./helpers.js";
 
-const SUBAPPS = ["gateway", "platform.shell", "platform.auth"];
+const APPS = ["gateway", "platform.shell", "platform.auth"];
 
 let root: string;
 let holder: MutableHolder;
@@ -56,7 +56,7 @@ describe("update modes", () => {
       ns: "t",
       name: "stat",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: { mode: "static" },
         value: (ctx) => {
           calls.push(ctx.target?.id ?? "?");
@@ -66,11 +66,11 @@ describe("update modes", () => {
     });
 
     await registry.start();
-    expect([...calls].sort()).toEqual([...SUBAPPS].sort());
+    expect([...calls].sort()).toEqual([...APPS].sort());
 
     registry.refresh();
     await delay(80);
-    expect(calls).toHaveLength(SUBAPPS.length);
+    expect(calls).toHaveLength(APPS.length);
     expect(registry.get("t", "stat", "gateway")?.value).toBe("constant");
   });
 
@@ -83,7 +83,7 @@ describe("update modes", () => {
       ns: "t",
       name: "slow",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: { mode: "poll", intervalMs: 40 },
         value: async (ctx) => {
           const id = ctx.target?.id ?? "?";
@@ -116,7 +116,7 @@ describe("update modes", () => {
       ns: "t",
       name: "spread",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: { mode: "poll", intervalMs: 500 },
         value: (ctx) => {
           const id = ctx.target?.id ?? "?";
@@ -127,7 +127,7 @@ describe("update modes", () => {
     });
 
     await registry.start();
-    await waitFor(() => firstAt.size === SUBAPPS.length, "every owner to poll once");
+    await waitFor(() => firstAt.size === APPS.length, "every owner to poll once");
 
     const offsets = [...firstAt.values()];
     expect(Math.max(...offsets) - Math.min(...offsets)).toBeGreaterThanOrEqual(30);
@@ -142,7 +142,7 @@ describe("update modes", () => {
       ns: "t",
       name: "push",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: { mode: "event" },
         subscribe: (ctx, emit) => {
           const id = ctx.target?.id ?? "?";
@@ -156,14 +156,14 @@ describe("update modes", () => {
     });
 
     await registry.start();
-    expect([...subscribed].sort()).toEqual([...SUBAPPS].sort());
+    expect([...subscribed].sort()).toEqual([...APPS].sort());
 
     emitters.get("gateway")?.({ value: "up", tone: "ok" });
     await delay(40);
     expect(registry.get("t", "push", "gateway")).toMatchObject({ value: "up", tone: "ok" });
 
     await registry.stop();
-    expect([...disposed].sort()).toEqual([...SUBAPPS].sort());
+    expect([...disposed].sort()).toEqual([...APPS].sort());
 
     // An emit that races the disposer must not resurrect a dead cell.
     emitters.get("gateway")?.("late");
@@ -179,7 +179,7 @@ describe("update modes", () => {
       name: "mixed",
       def: {
         // Contradictory: nothing to poll, since the def has no value().
-        scope: "subapp",
+        scope: "app",
         update: { mode: "poll", intervalMs: 100 },
         subscribe: (ctx, emit) => {
           const id = ctx.target?.id ?? "?";
@@ -195,12 +195,12 @@ describe("update modes", () => {
     await registry.start();
 
     // Honoured rather than silently inert — and the contradiction is reported.
-    expect([...subscribed].sort()).toEqual([...SUBAPPS].sort());
+    expect([...subscribed].sort()).toEqual([...APPS].sort());
     expect(registry.get("t", "mixed", "gateway")?.value).toBe("pushed");
     expect(logger.warnings.some((w) => w.includes("t@mixed") && w.includes("subscribing anyway"))).toBe(true);
 
     await registry.stop();
-    expect([...disposed].sort()).toEqual([...SUBAPPS].sort());
+    expect([...disposed].sort()).toEqual([...APPS].sort());
   });
 });
 
@@ -219,7 +219,7 @@ describe("update spellings", () => {
       ns: "t",
       name: "specpoll",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: spelled({ poll: 40 }),
         value: (ctx) => {
           const id = ctx.target?.id ?? "?";
@@ -234,7 +234,7 @@ describe("update spellings", () => {
     await delay(220);
 
     // ~5 ticks of 40 ms per owner; a provider stuck on its first value shows 1.
-    for (const id of SUBAPPS) expect(calls.get(id) ?? 0).toBeGreaterThanOrEqual(3);
+    for (const id of APPS) expect(calls.get(id) ?? 0).toBeGreaterThanOrEqual(3);
     expect(logger.warnings.filter((w) => w.includes("t@specpoll"))).toEqual([]);
   });
 
@@ -245,7 +245,7 @@ describe("update spellings", () => {
       ns: "t",
       name: "specevent",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: spelled({ event: true }),
         value: (ctx) => {
           pulled.push(ctx.target?.id ?? "?");
@@ -260,7 +260,7 @@ describe("update spellings", () => {
 
     await registry.start();
 
-    expect([...subscribed].sort()).toEqual([...SUBAPPS].sort());
+    expect([...subscribed].sort()).toEqual([...APPS].sort());
     expect(pulled).toEqual([]);
     expect(registry.get("t", "specevent", "gateway")?.value).toBe("pushed");
     expect(logger.warnings.filter((w) => w.includes("t@specevent"))).toEqual([]);
@@ -272,7 +272,7 @@ describe("update spellings", () => {
       ns: "t",
       name: "specstatic",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: spelled({ static: true }),
         value: (ctx) => {
           calls.push(ctx.target?.id ?? "?");
@@ -282,11 +282,11 @@ describe("update spellings", () => {
     });
 
     await registry.start();
-    expect([...calls].sort()).toEqual([...SUBAPPS].sort());
+    expect([...calls].sort()).toEqual([...APPS].sort());
 
     registry.refresh();
     await delay(80);
-    expect(calls).toHaveLength(SUBAPPS.length);
+    expect(calls).toHaveLength(APPS.length);
     expect(logger.warnings.filter((w) => w.includes("t@specstatic"))).toEqual([]);
   });
 
@@ -294,7 +294,7 @@ describe("update spellings", () => {
     registry.register({
       ns: "t",
       name: "weird",
-      def: { scope: "subapp", update: spelled({ tick: 40 }), value: () => "v" },
+      def: { scope: "app", update: spelled({ tick: 40 }), value: () => "v" },
     });
 
     await registry.start();
@@ -311,7 +311,7 @@ describe("update spellings", () => {
     registry.register({
       ns: "t",
       name: "nointerval",
-      def: { scope: "subapp", update: spelled({ mode: "poll" }), value: () => "v" },
+      def: { scope: "app", update: spelled({ mode: "poll" }), value: () => "v" },
     });
 
     await registry.start();
@@ -325,12 +325,12 @@ describe("update spellings", () => {
 
 describe("change emission", () => {
   it("coalesces simultaneous changes into one payload and says nothing when values hold", async () => {
-    const answers = new Map<string, string>(SUBAPPS.map((id) => [id, "a"]));
+    const answers = new Map<string, string>(APPS.map((id) => [id, "a"]));
     registry.register({
       ns: "t",
       name: "cell",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: { mode: "event" },
         value: (ctx) => answers.get(ctx.target?.id ?? "") ?? "",
       },
@@ -343,13 +343,13 @@ describe("change emission", () => {
     await delay(120);
     recorder.clear();
 
-    for (const id of SUBAPPS) answers.set(id, "b");
+    for (const id of APPS) answers.set(id, "b");
     registry.refresh();
     await delay(80);
 
     expect(recorder.batches).toHaveLength(1);
-    expect(recorder.batches[0]).toHaveLength(SUBAPPS.length);
-    expect(recorder.cells().sort()).toEqual(SUBAPPS.map((id) => `t@cell/${id}=b`).sort());
+    expect(recorder.batches[0]).toHaveLength(APPS.length);
+    expect(recorder.cells().sort()).toEqual(APPS.map((id) => `t@cell/${id}=b`).sort());
 
     recorder.clear();
     registry.refresh();
@@ -358,12 +358,12 @@ describe("change emission", () => {
   });
 
   it("emits only the cells that changed", async () => {
-    const answers = new Map<string, string>(SUBAPPS.map((id) => [id, "a"]));
+    const answers = new Map<string, string>(APPS.map((id) => [id, "a"]));
     registry.register({
       ns: "t",
       name: "cell",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: { mode: "event" },
         value: (ctx) => answers.get(ctx.target?.id ?? "") ?? "",
       },
@@ -388,7 +388,7 @@ describe("sanitization", () => {
       ns: "t",
       name: "dirty",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: { mode: "static" },
         value: () => ({
           value: `first\nsecond\tthird\x00 \x1b[31mred\x1b[0m  spaced ${"x".repeat(300)}`,
@@ -415,7 +415,7 @@ describe("failure isolation", () => {
       ns: "t",
       name: "flaky",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: { mode: "event" },
         value: () => {
           if (explode) throw new Error("boom");
@@ -426,7 +426,7 @@ describe("failure isolation", () => {
     registry.register({
       ns: "t",
       name: "steady",
-      def: { scope: "subapp", update: { mode: "event" }, value: () => "fine" },
+      def: { scope: "app", update: { mode: "event" }, value: () => "fine" },
     });
 
     await registry.start();
@@ -449,7 +449,7 @@ describe("failure isolation", () => {
       ns: "t",
       name: "stuck",
       def: {
-        scope: "subapp",
+        scope: "app",
         // 250 ms interval → a 225 ms deadline, comfortably inside the next tick.
         update: { mode: "poll", intervalMs: 250 },
         value: () => (hang ? new Promise<string>(() => {}) : "warm"),
@@ -467,29 +467,29 @@ describe("failure isolation", () => {
 });
 
 describe("scopes", () => {
-  it("keeps app- and subapp-scoped providers of the same name apart", async () => {
+  it("keeps repo- and app-scoped providers of the same name apart", async () => {
     registry.register({
       ns: "t",
       name: "who",
-      def: { scope: "subapp", update: { mode: "static" }, value: () => "sub" },
+      def: { scope: "app", update: { mode: "static" }, value: () => "sub" },
     });
     registry.register({
       ns: "t",
       name: "who",
-      def: { scope: "app", update: { mode: "static" }, value: () => "app" },
+      def: { scope: "repo", update: { mode: "static" }, value: () => "repo" },
     });
 
     await registry.start();
 
-    // "gateway" is both an app and its implicit subapp; the subapp value wins.
+    // "gateway" is both a repo and its implicit app; the app value wins.
     expect(registry.get("t", "who", "gateway")?.value).toBe("sub");
-    expect(registry.get("t", "who", "platform")?.value).toBe("app");
+    expect(registry.get("t", "who", "platform")?.value).toBe("repo");
     const owners = registry
       .values()
       .filter((v) => v.ns === "t")
       .map((v) => `${v.scope}/${v.owner}`);
     expect(owners.sort()).toEqual(
-      ["app/gateway", "app/platform", "subapp/gateway", "subapp/platform.auth", "subapp/platform.shell"].sort(),
+      ["repo/gateway", "repo/platform", "app/gateway", "app/platform.auth", "app/platform.shell"].sort(),
     );
   });
 });
@@ -500,7 +500,7 @@ describe("rebind", () => {
       ns: "t",
       name: "own",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: { mode: "static" },
         value: (ctx) => ctx.target?.id ?? "",
       },
@@ -514,9 +514,9 @@ describe("rebind", () => {
 
     const reloaded: RawWorkspaceConfig = {
       name: "fixture",
-      apps: {
+      repos: {
         gateway: { path: "gateway", scripts: { start: "node server.js" } },
-        platform: { path: "platform", subapps: { shell: { path: "apps/shell" } } },
+        platform: { path: "platform", apps: { shell: { path: "apps/shell" } } },
         db: { path: "db" },
       },
     };
@@ -534,12 +534,12 @@ describe("rebind", () => {
   });
 
   it("never announces a change for an owner the rebind removed", async () => {
-    const answers = new Map(SUBAPPS.map((id) => [id, "a"]));
+    const answers = new Map(APPS.map((id) => [id, "a"]));
     registry.register({
       ns: "t",
       name: "own",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: { mode: "event" },
         value: (ctx) => answers.get(ctx.target?.id ?? "") ?? "",
       },
@@ -558,9 +558,9 @@ describe("rebind", () => {
     holder.set(
       makeWorkspace(root, {
         name: "fixture",
-        apps: {
+        repos: {
           gateway: { path: "gateway", scripts: { start: "node server.js" } },
-          platform: { path: "platform", subapps: { shell: { path: "apps/shell" } } },
+          platform: { path: "platform", apps: { shell: { path: "apps/shell" } } },
         },
       }),
     );
@@ -579,12 +579,12 @@ describe("registration lifecycle", () => {
     registry.register({
       ns: "plug",
       name: "tick",
-      def: { scope: "subapp", update: { mode: "poll", intervalMs: 30 }, value: () => String(ticks++) },
+      def: { scope: "app", update: { mode: "poll", intervalMs: 30 }, value: () => String(ticks++) },
     });
     registry.register({
       ns: "other",
       name: "keep",
-      def: { scope: "subapp", update: { mode: "static" }, value: () => "kept" },
+      def: { scope: "app", update: { mode: "static" }, value: () => "kept" },
     });
 
     await registry.start();
@@ -601,12 +601,12 @@ describe("registration lifecycle", () => {
   });
 
   it("refresh re-pulls the given targets only, and never a static provider", async () => {
-    const counts = { static: 0, event: 0, app: 0 };
+    const counts = { static: 0, event: 0, repo: 0 };
     registry.register({
       ns: "t",
       name: "fixed",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: { mode: "static" },
         value: () => String(++counts.static),
       },
@@ -615,7 +615,7 @@ describe("registration lifecycle", () => {
       ns: "t",
       name: "live",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: { mode: "event" },
         value: () => String(++counts.event),
       },
@@ -623,20 +623,20 @@ describe("registration lifecycle", () => {
     registry.register({
       ns: "t",
       name: "rollup",
-      def: { scope: "app", update: { mode: "event" }, value: () => String(++counts.app) },
+      def: { scope: "repo", update: { mode: "event" }, value: () => String(++counts.repo) },
     });
 
     await registry.start();
-    expect(counts).toEqual({ static: 3, event: 3, app: 2 });
+    expect(counts).toEqual({ static: 3, event: 3, repo: 2 });
 
     registry.refresh(["platform.shell"]);
     await delay(80);
-    // The subapp itself, plus the app row it rolls up into — nothing else.
-    expect(counts).toEqual({ static: 3, event: 4, app: 3 });
+    // The app itself, plus the repo row it rolls up into — nothing else.
+    expect(counts).toEqual({ static: 3, event: 4, repo: 3 });
 
     registry.refresh();
     await delay(80);
-    expect(counts).toEqual({ static: 3, event: 7, app: 5 });
+    expect(counts).toEqual({ static: 3, event: 7, repo: 5 });
   });
 
   it("re-evaluates a cell whose refresh landed while a run was in flight", async () => {
@@ -645,7 +645,7 @@ describe("registration lifecycle", () => {
       ns: "t",
       name: "slow",
       def: {
-        scope: "subapp",
+        scope: "app",
         update: { mode: "event" },
         value: async () => {
           // Reads the world *now*; whatever happens during the wait is not in it.
@@ -678,13 +678,13 @@ describe("registration lifecycle", () => {
       isolated.register({
         ns: "t",
         name: "tick",
-        def: { scope: "subapp", update: { mode: "poll", intervalMs: 30 }, value: () => String(polls++) },
+        def: { scope: "app", update: { mode: "poll", intervalMs: 30 }, value: () => String(polls++) },
       });
       isolated.register({
         ns: "t",
         name: "push",
         def: {
-          scope: "subapp",
+          scope: "app",
           update: { mode: "event" },
           subscribe: (ctx) => () => {
             disposed.push(ctx.target?.id ?? "?");
@@ -699,7 +699,7 @@ describe("registration lifecycle", () => {
       await isolated.stop();
 
       expect(tracker.live()).toBe(0);
-      expect([...disposed].sort()).toEqual([...SUBAPPS].sort());
+      expect([...disposed].sort()).toEqual([...APPS].sort());
 
       const frozen = polls;
       await delay(120);
@@ -718,7 +718,7 @@ describe("registration lifecycle", () => {
         ns: "t",
         name: "hung",
         def: {
-          scope: "subapp",
+          scope: "app",
           update: { mode: "poll", intervalMs: 5_000 },
           value: () => {
             entered += 1;
@@ -728,7 +728,7 @@ describe("registration lifecycle", () => {
       });
 
       await isolated.start();
-      await waitFor(() => entered === SUBAPPS.length, "every owner to be mid-flight");
+      await waitFor(() => entered === APPS.length, "every owner to be mid-flight");
       await isolated.stop();
 
       // The deadline that would have fired minutes later is fired now, so neither

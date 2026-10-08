@@ -1,5 +1,5 @@
 /**
- * The main list: app header rows with their subapp rows beneath, windowed to
+ * The main list: repo header rows with their app rows beneath, windowed to
  * whatever the terminal has room for.
  *
  * The row text arrives pre-rendered from the template engine (ANSI and all), so

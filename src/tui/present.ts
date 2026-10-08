@@ -127,7 +127,7 @@ export function logViewport(terminalRows: number, state: DashboardState): number
 
 /**
  * What a row shows while a run touches it: `… running` for a single target, a
- * tally (`2 ok, 1 running`) for an app header row covering several.
+ * tally (`2 ok, 1 running`) for a repo header row covering several.
  */
 export function progressLabel(
   targets: readonly TargetId[],

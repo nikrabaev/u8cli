@@ -194,7 +194,7 @@ export function createController(opts: ControllerOptions): DashboardController {
     snapshot.profiles.find((p) => p.name === snapshot.activeProfile) ?? {
       name: snapshot.activeProfile,
       isDefault: false,
-      subappIds: [],
+      appIds: [],
     };
 
   const currentRow = (): DashboardRow | undefined => rows[cursor];
@@ -225,7 +225,7 @@ export function createController(opts: ControllerOptions): DashboardController {
   const rebuildRows = (): void => {
     const profile = activeProfile();
     rows = buildRows({
-      apps: snapshot.apps,
+      repos: snapshot.repos,
       templates: snapshot.templates,
       profile,
       indicators: [...indicators.values()],
@@ -239,7 +239,7 @@ export function createController(opts: ControllerOptions): DashboardController {
 
   const buildState = (): DashboardState => {
     const profile = activeProfile();
-    const selected = new Set(profile.subappIds);
+    const selected = new Set(profile.appIds);
     let running = 0;
     for (const service of services.values()) {
       if (selected.has(service.targetId) && service.status === "running") running += 1;
@@ -254,7 +254,7 @@ export function createController(opts: ControllerOptions): DashboardController {
       name: p.name,
       isDefault: p.isDefault,
       active: p.name === snapshot.activeProfile,
-      targets: p.subappIds.length,
+      targets: p.appIds.length,
     }));
 
     return {
@@ -271,7 +271,7 @@ export function createController(opts: ControllerOptions): DashboardController {
       viewport,
       logViewport,
       running,
-      total: profile.subappIds.length,
+      total: profile.appIds.length,
       configError,
       pluginErrors: [...pluginErrors].map(([plugin, error]) => ({ plugin, error })),
       notice,
@@ -506,7 +506,7 @@ export function createController(opts: ControllerOptions): DashboardController {
     const open = palette;
     if (open === undefined) return;
     const inScope = new Set<TargetId>(
-      open.scope === "profile" ? activeProfile().subappIds : selectionTargets(),
+      open.scope === "profile" ? activeProfile().appIds : selectionTargets(),
     );
     const query = open.query.trim().toLowerCase();
     // Name matches rank above description matches: one letter of a query would

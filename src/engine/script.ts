@@ -63,7 +63,7 @@ export async function runScript(run: ScriptRun): Promise<ScriptOutcome> {
 
 /**
  * The environment a target's script sees: the daemon's own environment with the
- * subapp's merged `env` layered on top. `spawnManaged` takes `env` verbatim, so
+ * app's merged `env` layered on top. `spawnManaged` takes `env` verbatim, so
  * the merge has to happen here — and unset variables must be dropped rather
  * than passed through as `undefined`.
  */

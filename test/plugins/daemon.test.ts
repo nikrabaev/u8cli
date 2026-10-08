@@ -73,7 +73,7 @@ function pluginWorkspace(): Workspace {
     {
       builtins: { git: false, health: false },
       plugins: ["./plugins/demo.js", "./plugins/broken.js"],
-      apps: { api: { path: "api", scripts: { start: "sleep 30" } } },
+      repos: { api: { path: "api", scripts: { start: "sleep 30" } } },
       commands: { hello: { script: "printf 'hello\\n'" } },
     },
     ["api", "plugins"],
@@ -124,7 +124,7 @@ describe("plugins in a live daemon", () => {
       const cell = indicator(fresh.indicators, "demo", "answer");
       return cell?.value === "api:api" ? cell : undefined;
     }, "the demo@answer indicator to reach a client snapshot");
-    expect(value).toMatchObject({ ns: "demo", name: "answer", scope: "subapp", owner: "api" });
+    expect(value).toMatchObject({ ns: "demo", name: "answer", scope: "app", owner: "api" });
   });
 
   it("runs a plugin command and fires plugin hooks around a config command", async () => {
@@ -162,7 +162,7 @@ describe("plugins in a live daemon", () => {
         plugins: [
           { spec: "./plugins/shared.js", options: { packages: ["@myorg/protos", "@myorg/react-query"] } },
         ],
-        apps: { api: { path: "api", scripts: { start: "sleep 30" } } },
+        repos: { api: { path: "api", scripts: { start: "sleep 30" } } },
       },
       ["api", "plugins"],
     );
@@ -219,7 +219,7 @@ describe("a configured built-in in a live daemon", () => {
     const ws = createWorkspace(
       {
         builtins: { git: false, health: true },
-        apps: {
+        repos: {
           api: {
             path: "api",
             scripts: { start: SERVICE_SCRIPT },
@@ -245,7 +245,7 @@ describe("a configured built-in in a live daemon", () => {
       const value = indicator(fresh.indicators, "health", "status");
       return value?.value === "healthy" ? value : undefined;
     }, "the health@status cell to reach a client snapshot");
-    expect(cell).toMatchObject({ ns: "health", name: "status", scope: "subapp", owner: "api" });
+    expect(cell).toMatchObject({ ns: "health", name: "status", scope: "app", owner: "api" });
   });
 });
 
@@ -260,7 +260,7 @@ describe("the health built-in inside a daemon", () => {
     const ws = createWorkspace(
       (dir) => ({
         builtins: { git: false },
-        apps: {
+        repos: {
           api: {
             path: "api",
             // Long enough to survive the start grace, then it dies on its own.

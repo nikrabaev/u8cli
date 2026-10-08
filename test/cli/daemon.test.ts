@@ -29,7 +29,7 @@ function workspace(): Workspace {
   return createWorkspace(
     {
       name: "daemon-fixture",
-      apps: { api: { path: "api", scripts: { start: service("api-ready") } } },
+      repos: { api: { path: "api", scripts: { start: service("api-ready") } } },
     },
     ["api"],
   );
@@ -85,7 +85,7 @@ describe("daemon stop", () => {
     expect((await cli(["start", "api"], { cwd: ws.dir })).code).toBe(0);
 
     const json = JSON.parse((await cli(["status", "--json"], { cwd: ws.dir })).out) as StatusJson;
-    const pid = json.apps.flatMap((a) => a.subapps)[0]?.pid ?? 0;
+    const pid = json.repos.flatMap((r) => r.apps)[0]?.pid ?? 0;
     expect(pidAlive(pid)).toBe(true);
 
     const stopped = await cli(["daemon", "stop"], { cwd: ws.dir });
@@ -130,7 +130,7 @@ describe("a workspace whose config is gone", () => {
     expect((await cli(["start", "api"], { cwd: ws.dir })).code).toBe(0);
 
     const json = JSON.parse((await cli(["status", "--json"], { cwd: ws.dir })).out) as StatusJson;
-    const pid = json.apps.flatMap((a) => a.subapps)[0]?.pid ?? 0;
+    const pid = json.repos.flatMap((r) => r.apps)[0]?.pid ?? 0;
     expect(pidAlive(pid)).toBe(true);
 
     fs.rmSync(ws.configPath);
@@ -153,13 +153,13 @@ describe("a workspace whose config is gone", () => {
     const outer = workspace();
     const inner = createNestedWorkspace(outer, "inner", {
       name: "inner-fixture",
-      apps: { web: { path: ".", scripts: { start: service("web-ready") } } },
+      repos: { web: { path: ".", scripts: { start: service("web-ready") } } },
     });
 
     expect((await cli(["start", "web"], { cwd: inner.dir })).code).toBe(0);
     expect((await cli(["status"], { cwd: outer.dir })).code).toBe(0);
     const json = JSON.parse((await cli(["status", "--json"], { cwd: inner.dir })).out) as StatusJson;
-    const pid = json.apps.flatMap((a) => a.subapps)[0]?.pid ?? 0;
+    const pid = json.repos.flatMap((r) => r.apps)[0]?.pid ?? 0;
     expect(pidAlive(pid)).toBe(true);
 
     fs.rmSync(inner.configPath);

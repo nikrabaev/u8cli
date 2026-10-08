@@ -19,14 +19,14 @@ afterEach(() => {
   cleanupHarnesses();
 });
 
-/** gateway (implicit subapp), platform.shell, platform.auth, db. */
+/** gateway (implicit app), platform.shell, platform.auth, db. */
 function fourTargets(commands: Record<string, unknown>, extra: Record<string, unknown> = {}): Harness {
   return createHarness({
     dirs: ["gateway", "platform/shell", "platform/auth", "db"],
     config: {
-      apps: {
+      repos: {
         gateway: { path: "gateway" },
-        platform: { path: "platform", subapps: { shell: { path: "shell" }, auth: { path: "auth" } } },
+        platform: { path: "platform", apps: { shell: { path: "shell" }, auth: { path: "auth" } } },
         db: { path: "db" },
       },
       profiles: { full: { default: true, targets: ["gateway", "platform", "db"] } },
@@ -42,9 +42,9 @@ describe("config commands", () => {
       dirs: ["gateway", "platform/shell"],
       config: {
         env: { GREETING: "workspace" },
-        apps: {
-          gateway: { path: "gateway", env: { GREETING: "app" } },
-          platform: { path: "platform", subapps: { shell: { path: "shell" } } },
+        repos: {
+          gateway: { path: "gateway", env: { GREETING: "repo" } },
+          platform: { path: "platform", apps: { shell: { path: "shell" } } },
         },
         commands: { probe: { script: 'pwd > out.txt; printf "%s %s\\n" "$GREETING" "${HOME:+has-home}" >> out.txt' } },
       },
@@ -55,7 +55,7 @@ describe("config commands", () => {
     expect(result.ok).toBe(true);
     expect(statesByTarget(result)).toEqual({ gateway: "ok", "platform.shell": "ok" });
     // Each script saw its own cwd, its own env layer, and the daemon's env.
-    expect(h.read("gateway/out.txt")).toBe(`${h.file("gateway")}\napp has-home\n`);
+    expect(h.read("gateway/out.txt")).toBe(`${h.file("gateway")}\nrepo has-home\n`);
     expect(h.read("platform/shell/out.txt")).toBe(`${h.file("platform/shell")}\nworkspace has-home\n`);
   });
 
@@ -146,12 +146,12 @@ describe("config commands", () => {
 
 describe("concurrency", () => {
   function farm(command: Record<string, unknown>): Harness {
-    const subapps = Object.fromEntries(
+    const apps = Object.fromEntries(
       Array.from({ length: 6 }, (_, i) => [`w${i + 1}`, { path: `w${i + 1}` }]),
     );
     return createHarness({
       dirs: Array.from({ length: 6 }, (_, i) => `farm/w${i + 1}`),
-      config: { apps: { farm: { path: "farm", subapps } }, commands: { load: command } },
+      config: { repos: { farm: { path: "farm", apps } }, commands: { load: command } },
     });
   }
 

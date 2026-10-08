@@ -58,15 +58,15 @@ type Reload = RpcNotificationPayload<"config.reloaded">;
 /**
  * Two idle services and one command.
  *
- * The built-ins are off throughout: `git` fs-watches every app's `.git`, and a
+ * The built-ins are off throughout: `git` fs-watches every repo's `.git`, and a
  * test that counts watchers or reasons about the plugin list wants exactly the
  * plugins it put there.
  */
 function baseConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     builtins: { git: false, health: false },
-    templates: { subapp: "{app@status} {app@name}" },
-    apps: {
+    templates: { app: "{app@status} {app@name}" },
+    repos: {
       api: { path: "api", scripts: { start: SERVICE_SCRIPT } },
       web: { path: "web", scripts: { start: SERVICE_SCRIPT } },
     },
@@ -79,7 +79,7 @@ function baseConfig(overrides: Record<string, unknown> = {}): Record<string, unk
 /** {@link baseConfig} with api's start script rewritten — what makes it stale. */
 function editedApiConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return baseConfig({
-    apps: {
+    repos: {
       api: { path: "api", scripts: { start: `printf 'v2\\n'; ${SERVICE_SCRIPT}` } },
       web: { path: "web", scripts: { start: SERVICE_SCRIPT } },
     },
@@ -188,15 +188,15 @@ describe("watched saves", () => {
     const seen = changes.length;
 
     const template = "{app@name} — {app@status}";
-    const reloaded = await save(ws, reloads, baseConfig({ templates: { subapp: template } }), "the template reload");
+    const reloaded = await save(ws, reloads, baseConfig({ templates: { app: template } }), "the template reload");
 
     expect(reloaded.ok).toBe(true);
     // The snapshot rides along, so a client re-renders from the notification.
-    expect(reloaded.snapshot?.templates.subapp).toBe(template);
+    expect(reloaded.snapshot?.templates.app).toBe(template);
     expect(reloaded.stale).toEqual([]);
 
     const snapshot = await client.request("workspace.snapshot", {});
-    expect(snapshot.templates.subapp).toBe(template);
+    expect(snapshot.templates.app).toBe(template);
     // SPEC §8: a reload never restarts anything. Same pid, same spawn instant.
     expect(snapshot.services.find((s) => s.targetId === "api")).toMatchObject({
       status: "running",
@@ -286,7 +286,7 @@ describe("watched saves", () => {
     );
 
     expect(reloaded.snapshot?.profiles.map((p) => p.name)).toEqual(["all", "web-only"]);
-    expect(reloaded.snapshot?.profiles.find((p) => p.name === "web-only")?.subappIds).toEqual(["web"]);
+    expect(reloaded.snapshot?.profiles.find((p) => p.name === "web-only")?.appIds).toEqual(["web"]);
     // `null` is a skip, so the new command resolves work for api alone.
     expect(reloaded.snapshot?.commands.find((c) => c.name === "bye")?.appliesTo).toEqual(["api"]);
 
@@ -371,7 +371,7 @@ describe("invalid saves", () => {
 
     const failed = await saveWith(
       reloads,
-      () => ws.rewrite({ apps: { api: {} } }), // `path` is required
+      () => ws.rewrite({ repos: { api: {} } }), // `path` is required
       "the reload of a broken config",
     );
     expect(failed.ok).toBe(false);
@@ -379,7 +379,7 @@ describe("invalid saves", () => {
 
     const broken = await client.request("workspace.snapshot", {});
     expect(broken.configError).toContain("path");
-    expect(broken.apps.map((a) => a.name)).toEqual(["api", "web"]);
+    expect(broken.repos.map((r) => r.name)).toEqual(["api", "web"]);
     expect(broken.services.find((s) => s.targetId === "api")).toMatchObject({
       status: "running",
       pid: running.pid,
@@ -410,7 +410,7 @@ describe("invalid saves", () => {
     const gone = await saveWith(reloads, () => fs.rmSync(ws.configPath), "the reload that finds no config");
     expect(gone.ok).toBe(false);
     expect(gone.error).toMatch(/not found/i);
-    expect((await client.request("workspace.snapshot", {})).apps.map((a) => a.name)).toEqual(["api", "web"]);
+    expect((await client.request("workspace.snapshot", {})).repos.map((r) => r.name)).toEqual(["api", "web"]);
 
     const restored = await save(
       ws,
@@ -760,7 +760,7 @@ describe("watchConfig", () => {
  */
 describe("config warnings", () => {
   it("says a template typo out loud at load, and again after a reload", async () => {
-    const ws = hotWorkspace({ templates: { subapp: "{gti@branch} {app@name}" } });
+    const ws = hotWorkspace({ templates: { app: "{gti@branch} {app@name}" } });
     track(ws);
     const logger = recordingLogger("daemon");
     const daemon = createDaemon({ configPath: ws.configPath, logger, idleMs: 0 });
@@ -771,7 +771,7 @@ describe("config warnings", () => {
 
       const client = createRpcClient({ socketPath: ws.paths.socket, timeoutMs: 5_000 });
       await client.connect();
-      ws.rewrite(baseConfig({ templates: { subapp: "{helth@status} {app@name}" } }));
+      ws.rewrite(baseConfig({ templates: { app: "{helth@status} {app@name}" } }));
       expect(await client.request("workspace.reload", {})).toEqual({ ok: true });
       await client.close();
 

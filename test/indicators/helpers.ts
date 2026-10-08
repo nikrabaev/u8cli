@@ -27,17 +27,17 @@ export function makeWorkspace(root: string, raw: RawWorkspaceConfig): Normalized
   return normalizeWorkspace(raw, path.join(root, "u8.jsonc"));
 }
 
-/** The two-app fixture: one implicit subapp plus a two-subapp monorepo. */
+/** The two-repo fixture: one implicit app plus a two-app monorepo. */
 export const FIXTURE_DIRS = ["gateway", "platform/apps/shell", "platform/apps/auth"];
 
 export function fixtureConfig(extra: Partial<RawWorkspaceConfig> = {}): RawWorkspaceConfig {
   return {
     name: "fixture",
-    apps: {
+    repos: {
       gateway: { path: "gateway", scripts: { start: "node server.js" } },
       platform: {
         path: "platform",
-        subapps: { shell: { path: "apps/shell" }, auth: { path: "apps/auth" } },
+        apps: { shell: { path: "apps/shell" }, auth: { path: "apps/auth" } },
       },
     },
     ...extra,

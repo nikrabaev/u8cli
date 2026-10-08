@@ -8,7 +8,7 @@ afterEach(cleanupWorkspaces);
 
 describe("discovery", () => {
   it("walks up from a nested directory", () => {
-    const dir = writeConfig({ apps: { db: { path: "." } } }, { "a/b/c/.keep": "" });
+    const dir = writeConfig({ repos: { db: { path: "." } } }, { "a/b/c/.keep": "" });
     const nested = path.join(dir, "a/b/c");
 
     expect(discoverConfig(nested)).toBe(path.join(dir, "u8.jsonc"));
@@ -16,16 +16,16 @@ describe("discovery", () => {
   });
 
   it("stops at the nearest config", () => {
-    const outer = writeConfig({ name: "outer", apps: { db: { path: "." } } }, { "inner/.keep": "" });
+    const outer = writeConfig({ name: "outer", repos: { db: { path: "." } } }, { "inner/.keep": "" });
     fs.writeFileSync(
       path.join(outer, "inner/u8.jsonc"),
-      JSON.stringify({ name: "inner", apps: { db: { path: "." } } }),
+      JSON.stringify({ name: "inner", repos: { db: { path: "." } } }),
     );
     expect(loadWorkspace(path.join(outer, "inner")).name).toBe("inner");
   });
 
   it("resolves symlinked routes to the same real path", () => {
-    const dir = writeConfig({ apps: { db: { path: "." } } });
+    const dir = writeConfig({ repos: { db: { path: "." } } });
     const link = path.join(path.dirname(dir), `${path.basename(dir)}-link`);
     fs.symlinkSync(dir, link);
     try {
@@ -37,7 +37,7 @@ describe("discovery", () => {
   });
 
   it("ignores a config in a sibling directory", () => {
-    const dir = tmpWorkspace({ "with/u8.jsonc": '{ "apps": {} }', "without/.keep": "" });
+    const dir = tmpWorkspace({ "with/u8.jsonc": '{ "repos": {} }', "without/.keep": "" });
     expect(findConfigPath(path.join(dir, "without"))).toBeUndefined();
   });
 

@@ -85,7 +85,7 @@ function matching(marker: string): number[] {
 function soloWorkspace(marker: string, script?: string): Workspace {
   return createWorkspace(
     {
-      apps: {
+      repos: {
         api: {
           path: "api",
           scripts: { start: script ?? `echo ${marker}; while true; do sleep 0.05; done` },

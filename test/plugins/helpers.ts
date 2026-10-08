@@ -35,11 +35,11 @@ export const PLUGIN_SDK = path.resolve(
 );
 
 export interface FixtureOptions {
-  /** Merged over the default one-app workspace. */
+  /** Merged over the default one-repo workspace. */
   config?: Record<string, unknown>;
   /** Written verbatim, relative to the workspace root. */
   files?: Record<string, string>;
-  /** Extra directories to create (app cwds are created for you). */
+  /** Extra directories to create (repo cwds are created for you). */
   dirs?: string[];
 }
 
@@ -55,7 +55,7 @@ export interface Fixture {
 }
 
 /**
- * A workspace with one app and the built-ins off.
+ * A workspace with one repo and the built-ins off.
  *
  * Built-ins ship inside u8cli and would otherwise appear in every `list()`;
  * tests that care about them turn them back on explicitly.
@@ -66,7 +66,7 @@ export function createFixture(opts: FixtureOptions = {}): Fixture {
 
   const config = {
     builtins: { git: false, health: false },
-    apps: { api: { path: "api", scripts: { start: "sleep 30" } } },
+    repos: { api: { path: "api", scripts: { start: "sleep 30" } } },
     ...opts.config,
   };
   for (const rel of ["api", ...(opts.dirs ?? [])]) fs.mkdirSync(path.join(dir, rel), { recursive: true });
@@ -129,27 +129,27 @@ export async function cleanupPlugins(): Promise<void> {
  * of its own, so a test can prove the host swaps in the plugin's.
  */
 export function indicatorContext(fixture: Fixture, overrides: Partial<IndicatorContext> = {}): IndicatorContext {
+  const repo = fixture.ws.repos[0];
   const app = fixture.ws.apps[0];
-  const subapp = fixture.ws.subapps[0];
-  if (!app || !subapp) throw new Error("fixture workspace has no app");
+  if (!repo || !app) throw new Error("fixture workspace has no repo");
   return {
     workspace: info(fixture.ws),
     logger: nullLogger,
     exec: async () => execStub(),
     store: new Map<string, unknown>(),
-    scope: "subapp",
-    app: { name: app.name, path: app.path },
+    scope: "app",
+    repo: { name: repo.name, path: repo.path },
     target: targetInfo(fixture),
-    cwd: subapp.cwd,
-    service: serviceState(subapp.id),
+    cwd: app.cwd,
+    service: serviceState(app.id),
     ...overrides,
   };
 }
 
 export function commandContext(fixture: Fixture, overrides: Partial<CommandContext> = {}): CommandContext {
+  const repo = fixture.ws.repos[0];
   const app = fixture.ws.apps[0];
-  const subapp = fixture.ws.subapps[0];
-  if (!app || !subapp) throw new Error("fixture workspace has no app");
+  if (!repo || !app) throw new Error("fixture workspace has no repo");
   return {
     workspace: info(fixture.ws),
     logger: nullLogger,
@@ -157,9 +157,9 @@ export function commandContext(fixture: Fixture, overrides: Partial<CommandConte
     store: new Map<string, unknown>(),
     command: "demo:run",
     runId: "test-run",
-    app: { name: app.name, path: app.path },
+    repo: { name: repo.name, path: repo.path },
     target: targetInfo(fixture),
-    cwd: subapp.cwd,
+    cwd: app.cwd,
     log: () => {},
     signal: new AbortController().signal,
     ...overrides,
@@ -177,18 +177,18 @@ export function hookContext(
 }
 
 export function targetInfo(fixture: Fixture): TargetInfo {
-  const subapp = fixture.ws.subapps[0];
-  if (!subapp) throw new Error("fixture workspace has no subapp");
+  const app = fixture.ws.apps[0];
+  if (!app) throw new Error("fixture workspace has no app");
   return {
-    id: subapp.id,
-    appName: subapp.appName,
-    name: subapp.name,
-    implicit: subapp.implicit,
-    cwd: subapp.cwd,
-    scripts: { ...subapp.scripts },
-    env: { ...subapp.env },
-    dependsOn: [...subapp.dependsOn],
-    hasHealth: subapp.health !== undefined,
+    id: app.id,
+    repoName: app.repoName,
+    name: app.name,
+    implicit: app.implicit,
+    cwd: app.cwd,
+    scripts: { ...app.scripts },
+    env: { ...app.env },
+    dependsOn: [...app.dependsOn],
+    hasHealth: app.health !== undefined,
   };
 }
 

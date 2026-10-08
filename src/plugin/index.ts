@@ -20,7 +20,6 @@ export function definePlugin(def: PluginDefinition): PluginDefinition {
 }
 
 export type {
-  AppInfo,
   CommandContext,
   HookContext,
   HookDef,
@@ -37,6 +36,7 @@ export type {
   PluginSetupContext,
   ReadinessContext,
   ReadinessVerdict,
+  RepoInfo,
   TargetInfo,
   WorkspaceInfo,
 } from "./types.js";

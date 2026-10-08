@@ -7,7 +7,7 @@
  * duplicated lines, and a log view that repeats itself is harder to trust than
  * one that might miss a line at the seam.
  *
- * A target that names an app expands to all its subapps, so the output is
+ * A target that names a repo expands to all its apps, so the output is
  * prefixed with the target id whenever more than one stream is being shown —
  * and never when there is only one, because that prefix would just be noise in
  * front of every line of a `grep`.
@@ -57,17 +57,17 @@ function emptyNote(target: string, opts: LogsOptions): string {
     : `no log lines for "${target}" in run ${opts.run}`;
 }
 
-/** Subapp ids a target string covers — the client-side twin of `expandTarget`. */
+/** App ids a target string covers — the client-side twin of `expandTarget`. */
 function expandTarget(snapshot: Snapshot, spec: string): string[] {
-  const subapps = snapshot.apps.flatMap((app) => app.subapps);
-  if (subapps.some((s) => s.id === spec)) return [spec];
-  const app = snapshot.apps.find((a) => a.name === spec);
-  if (app) return app.subapps.map((s) => s.id);
-  throw new U8Error("UNKNOWN_TARGET", `unknown target "${spec}" — expected an app name or "app.subapp"`, {
+  const apps = snapshot.repos.flatMap((repo) => repo.apps);
+  if (apps.some((a) => a.id === spec)) return [spec];
+  const repo = snapshot.repos.find((r) => r.name === spec);
+  if (repo) return repo.apps.map((a) => a.id);
+  throw new U8Error("UNKNOWN_TARGET", `unknown target "${spec}" — expected a repo name or "repo.app"`, {
     spec,
-    // De-duplicated: an implicit subapp's id *is* its app name, and listing
+    // De-duplicated: an implicit app's id *is* its repo name, and listing
     // "example, example" as the alternatives reads like a bug.
-    known: [...new Set([...snapshot.apps.map((a) => a.name), ...subapps.map((s) => s.id)])],
+    known: [...new Set([...snapshot.repos.map((r) => r.name), ...apps.map((a) => a.id)])],
   });
 }
 

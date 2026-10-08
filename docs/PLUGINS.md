@@ -34,9 +34,9 @@ object works too — and that is the portable form, because importing it require
 installed in the workspace (see [Resolution](#resolution)). The definition may be the default export,
 the module itself, or a transpiled CommonJS `exports.default` — all three are unwrapped.
 
-`name` must match `^[A-Za-z0-9][A-Za-z0-9_-]*$` and may not be `app` or `x` (reserved for the core
-commands and config-defined indicators). Two plugins claiming the same name is an error for the
-second one.
+`name` must match `^[A-Za-z0-9][A-Za-z0-9_-]*$` and may not be `app`, `repo` or `x` (reserved for
+the core commands and indicators, and for config-defined indicators). Two plugins claiming the same
+name is an error for the second one.
 
 ### Configuration: the factory export
 
@@ -176,7 +176,7 @@ data, not an exception** — it only rejects when the shell itself could not be 
 
 Two details worth knowing:
 
-- The default `cwd` is the callsite's: the workspace root in `setup`, the app path for app-scoped
+- The default `cwd` is the callsite's: the workspace root in `setup`, the repo path for repo-scoped
   indicators, the target's cwd everywhere else.
 - The default `env` is the callsite's too, and `exec` always layers it over the daemon's own
   environment (so `PATH` works). **In command and hook contexts, passing `env` replaces the target's
@@ -189,7 +189,7 @@ plugin keeps one `git status` monitor per repo in it.
 `TargetInfo` — what a "target" looks like to a plugin:
 
 ```ts
-{ id, appName, name, implicit, cwd, scripts, env, dependsOn, hasHealth }
+{ id, repoName, name, implicit, cwd, scripts, env, dependsOn, hasHealth }
 ```
 
 These are copies. Mutating `scripts` or `env` changes nothing in the daemon.
@@ -203,7 +203,7 @@ An indicator is a named value rendered in row templates as `{<plugin>@<name>}`.
 ```ts
 indicators: {
   open: {
-    scope: "subapp",                        // "subapp" (default) | "app"
+    scope: "app",                           // "app" (default) | "repo"
     description: "…",                       // documentation; not rendered in v1
     update: { mode: "poll", intervalMs: 5_000 },
     async value(ctx) { return "…"; },
@@ -215,11 +215,11 @@ indicators: {
 
 | `scope` | Evaluated once per | `ctx.cwd` | `ctx.target` |
 | --- | --- | --- | --- |
-| `"subapp"` (default) | subapp | the subapp's working directory | present |
-| `"app"` | app | the app's repo root | absent |
+| `"app"` (default) | app | the app's working directory | present |
+| `"repo"` | repo | the repo root | absent |
 
-App-scoped values are what a subapp row falls back to when the token is not defined at subapp scope —
-that is how `{git@branch}` works in a `templates.subapp` string.
+Repo-scoped values are what an app row falls back to when the token is not defined at app scope —
+that is how `{git@branch}` works in a `templates.app` string.
 
 ### Update modes
 
@@ -299,7 +299,7 @@ commands: {
     kind: "task",                                   // metadata; see below
     description: "Fail unless the target's $PORT is listening",
     appliesTo: (target) => target.env["PORT"] !== undefined,
-    groupBy: "target",                              // or "app"
+    groupBy: "target",                              // or "repo"
     async run(ctx) { … },
   },
 }
@@ -309,14 +309,14 @@ commands: {
 | --- | --- | --- |
 | `run(ctx)` | **required** | The work. Throw, or return a non-zero number, to fail this target. |
 | `appliesTo(target)` | all targets | Returning `false` skips the target (reported, not silently dropped). A throw counts as `false` and is logged. |
-| `groupBy` | `"target"` | `"app"` runs once per app: the first selected subapp represents it, `ctx.cwd` becomes the **app root**, and the rest are skipped with `covered by "<id>"`. This is what `git:pull` uses. |
+| `groupBy` | `"target"` | `"repo"` runs once per repo: the first selected app represents it, `ctx.cwd` becomes the **repo root**, and the rest are skipped with `covered by "<id>"`. This is what `git:pull` uses. |
 | `kind` | `"task"` | Reported in `u8 status --json`. In v1 every plugin command runs to completion — a plugin cannot claim a target's supervised process the way a config `kind: "service"` command can. |
 | `description` | — | Shown in the palette and `--json`. |
 
 `CommandContext` adds to the base:
 
 ```ts
-{ command, runId, app, target, cwd, log(text), signal }
+{ command, runId, repo, target, cwd, log(text), signal }
 ```
 
 - `log(text)` appends a line to this target's run log and streams it to attached clients
@@ -367,7 +367,7 @@ hooks: {
 - Order per target: config-declared shell hooks first, then plugins in load order. Within one plugin,
   its exact-name binding runs before its `"*"` binding.
 
-`HookContext` is the base plus `{ command, phase, runId, app, target, cwd, result? }`. `pre` and
+`HookContext` is the base plus `{ command, phase, runId, repo, target, cwd, result? }`. `pre` and
 `post` for a target of a skipped command do not run at all — a skip happens before the pipeline.
 
 ---
@@ -403,7 +403,7 @@ otherwise `"ready"` once it has probed healthy.
 ## Lifecycle
 
 ```ts
-setup(ctx)   // once, at load. ctx adds { targets: TargetInfo[], apps: AppInfo[] }
+setup(ctx)   // once, at load. ctx adds { targets: TargetInfo[], repos: RepoInfo[] }
 teardown()   // once, at shutdown / reload of the plugin list. No context.
 ```
 
@@ -447,7 +447,7 @@ export default {
 
   indicators: {
     open: {
-      scope: "subapp",
+      scope: "app",
       description: "Whether the target's $PORT accepts connections",
       update: { mode: "poll", intervalMs: 5_000 },
       async value(ctx) {
@@ -507,8 +507,8 @@ Wire it up:
 ```jsonc
 "plugins": ["./plugins/ports.ts"],
 "templates": {
-  // the demo's own subapp row, with {ports@open} appended
-  "subapp": "  {app@status:pad(8)} {app@name:max(16):pad(16)} {health@status:pad(9)} {app@uptime:dim:pad(5)} {x@port:dim} {ports@open:dim}"
+  // the demo's own app row, with {ports@open} appended
+  "app": "  {app@status:pad(8)} {app@name:max(16):pad(16)} {health@status:pad(9)} {app@uptime:dim:pad(5)} {x@port:dim} {ports@open:dim}"
 }
 ```
 
@@ -586,8 +586,8 @@ it and export the object directly.
 
 - [`src/plugin/types.ts`](../src/plugin/types.ts) — the whole SDK surface, with the comments that
   explain each field.
-- [`src/plugins/builtin/git.ts`](../src/plugins/builtin/git.ts) — app-scoped push indicators with a
-  refcounted watcher, and `groupBy: "app"` commands.
+- [`src/plugins/builtin/git.ts`](../src/plugins/builtin/git.ts) — repo-scoped push indicators with a
+  refcounted watcher, and `groupBy: "repo"` commands.
 - [`src/plugins/builtin/health.ts`](../src/plugins/builtin/health.ts) — an event indicator, lifecycle
   hooks and a `readiness()` implementation.
 - [`src/plugins/builtin/protos.ts`](../src/plugins/builtin/protos.ts) — a factory plugin: its

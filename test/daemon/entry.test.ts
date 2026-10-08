@@ -230,7 +230,7 @@ describe("signals during startup", () => {
   }
 
   const CONFIG = JSON.stringify({
-    apps: { svc: { path: ".", scripts: { start: "while true; do sleep 0.05; done" } } },
+    repos: { svc: { path: ".", scripts: { start: "while true; do sleep 0.05; done" } } },
   });
 
   /**

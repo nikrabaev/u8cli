@@ -18,10 +18,10 @@ export {
   STATUS_GLYPH,
   UPTIME_POLL_MS,
   aggregateStatus,
+  appStatus,
   coreIndicators,
   formatUptime,
   statusResult,
-  subappStatus,
   type CoreStatus,
 } from "./core.js";
 

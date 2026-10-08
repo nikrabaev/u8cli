@@ -264,7 +264,7 @@ async function renameIfExists(from: string, to: string): Promise<void> {
 // Layout
 // ---------------------------------------------------------------------------
 
-/** `<serviceLogDir>/<target>.log` — one rotating file per subapp. */
+/** `<serviceLogDir>/<target>.log` — one rotating file per app. */
 export function serviceLogPath(dir: string, targetId: TargetId): string {
   return path.join(dir, `${safeSegment(targetId)}.log`);
 }

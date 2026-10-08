@@ -38,7 +38,7 @@ type OutputListener = (stream: LogStream, text: string, ts: number) => void;
  * Spawns `spec.script` under a shell and returns a handle to the resulting group.
  *
  * `spec.env` is used **verbatim** — this layer never injects `process.env`. The
- * daemon owns that merge (daemon env → workspace → app → subapp) so that what
+ * daemon owns that merge (daemon env → workspace → repo → app) so that what
  * gets recorded as the spawn-time definition is exactly what the process saw.
  *
  * Spawn failures (a missing cwd, an unusable shell) surface as a `"u8"` output

@@ -77,12 +77,12 @@ describe("frame", () => {
     expect(lines).toHaveLength(frameRows(24));
     expect(lines.at(-1)).toContain("q quit");
     // Body top-aligned directly under the header, with the slack below it.
-    expect(lines[1]).toContain("SUB api stopped");
+    expect(lines[1]).toContain("APP api stopped");
     expect(lines.slice(5, -1).every((line) => line.trim() === "")).toBe(true);
   });
 
   it("keeps the hint bar on the last line when there is nothing to list", async () => {
-    const ui = mount({ snapshot: fixtureSnapshot({ profiles: [{ name: "all", isDefault: true, subappIds: [] }] }) });
+    const ui = mount({ snapshot: fixtureSnapshot({ profiles: [{ name: "all", isDefault: true, appIds: [] }] }) });
     await settle();
     const lines = ui.frame().split("\n");
 
@@ -120,10 +120,10 @@ describe("main screen", () => {
 
     const frame = ui.frame();
     expect(frame).toContain("fixture · profile all · 0/3 running · daemon 0.1.0");
-    expect(frame).toContain("SUB api stopped");
-    expect(frame).toContain("APP platform");
-    expect(frame).toContain("SUB web stopped");
-    expect(frame).toContain("SUB admin stopped");
+    expect(frame).toContain("APP api stopped");
+    expect(frame).toContain("REPO platform");
+    expect(frame).toContain("APP web stopped");
+    expect(frame).toContain("APP admin stopped");
     // The bar is truncated to the terminal, so it has to fit one: every binding
     // is on it, none of them behind an ellipsis.
     expect(frame).toContain("↑↓ move  ↵ logs  s/x/r target  S/X/R all  : palette  P profile  ? help  q quit");
@@ -132,14 +132,14 @@ describe("main screen", () => {
   it("marks the selected row and moves the mark with j/k", async () => {
     const ui = mount();
     await settle();
-    expect(ui.frame()).toContain("❯ SUB api stopped");
+    expect(ui.frame()).toContain("❯ APP api stopped");
 
     await ui.type("j");
-    expect(ui.frame()).toContain("❯ APP platform");
-    expect(ui.frame()).not.toContain("❯ SUB api");
+    expect(ui.frame()).toContain("❯ REPO platform");
+    expect(ui.frame()).not.toContain("❯ APP api");
 
     await ui.type("k");
-    expect(ui.frame()).toContain("❯ SUB api stopped");
+    expect(ui.frame()).toContain("❯ APP api stopped");
   });
 
   it("sends the lifecycle keys to the daemon", async () => {
@@ -158,14 +158,14 @@ describe("main screen", () => {
     await settle();
 
     ui.client.push("indicator.changed", {
-      values: [{ ns: "app", name: "status", scope: "subapp", owner: "api", value: "running", display: "●", tone: "ok" }],
+      values: [{ ns: "app", name: "status", scope: "app", owner: "api", value: "running", display: "●", tone: "ok" }],
     });
     ui.client.push("service.changed", {
       state: { targetId: "api", status: "running", stale: false, restartAttempts: 0 },
     });
     await ui.tick();
 
-    expect(ui.frame()).toContain("SUB api running");
+    expect(ui.frame()).toContain("APP api running");
     expect(ui.frame()).toContain("1/3 running");
   });
 
@@ -177,7 +177,7 @@ describe("main screen", () => {
       progress: { runId: "r1", command: "greet", targetId: "api", state: "running" },
     });
     await ui.tick();
-    expect(ui.frame()).toContain("SUB api stopped  … running");
+    expect(ui.frame()).toContain("APP api stopped  … running");
 
     ui.client.push("task.finished", {
       result: {
@@ -199,10 +199,10 @@ describe("main screen", () => {
 
 describe("banners", () => {
   it("carries the config error while the daemon runs its last-good config", async () => {
-    const ui = mount({ snapshot: fixtureSnapshot({ configError: "apps.api.path: no such directory" }) });
+    const ui = mount({ snapshot: fixtureSnapshot({ configError: "repos.api.path: no such directory" }) });
     await settle();
 
-    expect(ui.frame()).toContain("config error — running the last-good config: apps.api.path: no such directory");
+    expect(ui.frame()).toContain("config error — running the last-good config: repos.api.path: no such directory");
   });
 
   it("names a plugin that failed to load", async () => {
@@ -224,7 +224,7 @@ describe("banners", () => {
     expect(ui.frame()).toContain("daemon reconnecting");
     expect(ui.frame()).toContain("daemon unavailable — reconnecting…");
     // The rows are still there: the dashboard is stale, not gone.
-    expect(ui.frame()).toContain("SUB api stopped");
+    expect(ui.frame()).toContain("APP api stopped");
 
     ui.client.reattach(fixtureSnapshot());
     await ui.tick();
@@ -250,7 +250,7 @@ describe("log view", () => {
 
     await ui.type("");
     await settle();
-    expect(ui.frame()).toContain("SUB api stopped");
+    expect(ui.frame()).toContain("APP api stopped");
     expect(ui.client.unsubscribeCalls).toEqual(["api"]);
     expect(ui.client.subscribed.size).toBe(0);
   });
@@ -316,7 +316,7 @@ describe("command palette", () => {
     await settle();
 
     expect(ui.client.paramsOf("command.run")).toEqual([]);
-    expect(ui.frame()).toContain("SUB api stopped");
+    expect(ui.frame()).toContain("APP api stopped");
   });
 });
 
@@ -335,8 +335,8 @@ describe("profile switcher", () => {
 
     expect(ui.client.paramsOf("profile.use")).toEqual([{ name: "frontend" }]);
     expect(ui.frame()).toContain("profile frontend");
-    expect(ui.frame()).toContain("SUB web stopped");
-    expect(ui.frame()).not.toContain("SUB api");
+    expect(ui.frame()).toContain("APP web stopped");
+    expect(ui.frame()).not.toContain("APP api");
   });
 });
 
@@ -347,10 +347,10 @@ describe("help", () => {
 
     await ui.type("?");
     expect(ui.frame()).toContain("quit the dashboard; the daemon and its services keep running");
-    expect(ui.frame()).not.toContain("SUB api stopped");
+    expect(ui.frame()).not.toContain("APP api stopped");
 
     await ui.type("?");
-    expect(ui.frame()).toContain("SUB api stopped");
+    expect(ui.frame()).toContain("APP api stopped");
   });
 });
 
@@ -358,20 +358,20 @@ describe("terminal", () => {
   it("windows the list to the terminal and follows a resize", async () => {
     const ui = mount();
     await settle();
-    expect(ui.frame()).toContain("SUB admin stopped");
+    expect(ui.frame()).toContain("APP admin stopped");
 
     // 5 rows: header + footer + the line held back from Ink's full-screen path.
     await resize(ui, 5);
     expect(ui.frame()).toContain("rows 1-2/4");
-    expect(ui.frame()).not.toContain("SUB admin stopped");
+    expect(ui.frame()).not.toContain("APP admin stopped");
 
     // The cursor stays visible as it walks off the bottom of the window.
     await ui.type("G");
-    expect(ui.frame()).toContain("❯ SUB admin stopped");
-    expect(ui.frame()).not.toContain("SUB api stopped");
+    expect(ui.frame()).toContain("❯ APP admin stopped");
+    expect(ui.frame()).not.toContain("APP api stopped");
 
     await resize(ui, 24);
-    expect(ui.frame()).toContain("SUB api stopped");
+    expect(ui.frame()).toContain("APP api stopped");
     expect(ui.frame()).not.toContain("rows 1-");
   });
 
@@ -394,7 +394,7 @@ describe("teardown", () => {
 
     const last = ui.frame();
     ui.client.push("indicator.changed", {
-      values: [{ ns: "app", name: "status", scope: "subapp", owner: "api", value: "running", display: "●", tone: "ok" }],
+      values: [{ ns: "app", name: "status", scope: "app", owner: "api", value: "running", display: "●", tone: "ok" }],
     });
     await ui.tick();
     // Unmounted: the change lands in the controller but nothing draws it.

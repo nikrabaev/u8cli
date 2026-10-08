@@ -88,7 +88,7 @@ export function fakeSnapshot(): Snapshot {
     daemonVersion: "0.0.0-test",
     workspace: { id: "wsid", name: "ws", rootDir: "/tmp/ws", configPath: "/tmp/ws/u8.jsonc" },
     templates: DEFAULT_TEMPLATES,
-    apps: [],
+    repos: [],
     profiles: [],
     activeProfile: "default",
     commands: [],

@@ -1,7 +1,7 @@
 /**
  * A running target the config no longer declares (SPEC §8: a reload leaves
  * running processes alone). It must stay stoppable — by id and by an unqualified
- * "stop everything" — or deleting an app from `u8.jsonc` while it runs orphans
+ * "stop everything" — or deleting a repo from `u8.jsonc` while it runs orphans
  * its process until the daemon dies.
  *
  * Only stop resolution is widened: starting or running a command against a
@@ -17,17 +17,17 @@ afterEach(() => {
 
 const START = "true # start";
 
-/** `api` and `web` (which depends on it), plus a two-subapp `platform`. */
+/** `api` and `web` (which depends on it), plus a two-app `platform`. */
 function stack(): Harness {
   return createHarness({
     dirs: ["api", "web", "platform/shell", "platform/admin"],
     config: {
-      apps: {
+      repos: {
         api: { path: "api", scripts: { start: START } },
         web: { path: "web", scripts: { start: START }, dependsOn: ["api"] },
         platform: {
           path: "platform",
-          subapps: { shell: { path: "shell", scripts: { start: START } }, admin: { path: "admin", scripts: { start: START } } },
+          apps: { shell: { path: "shell", scripts: { start: START } }, admin: { path: "admin", scripts: { start: START } } },
         },
       },
       profiles: { all: { default: true, targets: ["api", "web", "platform"] } },
@@ -38,7 +38,7 @@ function stack(): Harness {
 /** The same workspace with `web` and `platform` deleted. */
 function apiOnly(): object {
   return {
-    apps: { api: { path: "api", scripts: { start: START } } },
+    repos: { api: { path: "api", scripts: { start: START } } },
     profiles: { all: { default: true, targets: ["api"] } },
   };
 }
@@ -69,7 +69,7 @@ describe("targets dropped by a reload", () => {
     expect(seen).toEqual([["web", h.dir]]);
   });
 
-  it("is reachable through the app name it belonged to", async () => {
+  it("is reachable through the repo name it belonged to", async () => {
     const h = stack();
     await settled(h.engine.startTargets());
 
@@ -80,20 +80,20 @@ describe("targets dropped by a reload", () => {
     expect(h.supervisor.isRunning("platform.shell")).toBe(false);
   });
 
-  it("is picked up by its app name when only the subapp was dropped", async () => {
+  it("is picked up by its repo name when only the app was dropped", async () => {
     const h = stack();
     await settled(h.engine.startTargets());
 
     h.reload({
-      apps: {
+      repos: {
         api: { path: "api", scripts: { start: START } },
-        platform: { path: "platform", subapps: { shell: { path: "shell", scripts: { start: START } } } },
+        platform: { path: "platform", apps: { shell: { path: "shell", scripts: { start: START } } } },
       },
       profiles: { all: { default: true, targets: ["api", "platform"] } },
     });
     const result = await settled(h.engine.stopTargets(["platform"]));
 
-    // `platform.admin` is gone from the config but still running under the app.
+    // `platform.admin` is gone from the config but still running under the repo.
     expect(statesByTarget(result)).toEqual({ "platform.shell": "ok", "platform.admin": "ok" });
   });
 

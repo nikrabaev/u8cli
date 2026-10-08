@@ -49,7 +49,7 @@ describe("u8 --version / --help", () => {
   it("refuses arguments a subcommand has no use for", async () => {
     // `u8 status api` is somebody expecting a filter. Printing the whole
     // profile and exiting 0 would teach them nothing.
-    const real = createWorkspace({ apps: { api: { path: "." } } });
+    const real = createWorkspace({ repos: { api: { path: "." } } });
     const status = await cli(["status", "api"], { cwd: real.dir });
     expect(status.code).not.toBe(0);
     expect(status.err).toContain("too many arguments");
@@ -96,7 +96,7 @@ describe("u8 init", () => {
     expect(fs.existsSync(ws.paths.dir)).toBe(false);
 
     const loaded = loadWorkspaceFrom(ws.configPath);
-    expect(loaded.apps.map((a) => a.name)).toContain("example");
+    expect(loaded.repos.map((r) => r.name)).toContain("example");
   });
 
   it("refuses to clobber an existing config", async () => {
@@ -144,13 +144,13 @@ describe("errors", () => {
 
   it("prints a config's whole issue list instead of a stack", async () => {
     const ws = createWorkspace({
-      apps: { web: { path: ".", scripts: { start: 42 } } },
+      repos: { web: { path: ".", scripts: { start: 42 } } },
     });
     const result = await cli(["status"], { cwd: ws.dir });
 
     expect(result.code).toBe(1);
     expect(result.err).toContain("invalid workspace config");
-    expect(result.err).toContain("apps.web.scripts.start");
+    expect(result.err).toContain("repos.web.scripts.start");
     expect(result.err).not.toContain("    at ");
   });
 });

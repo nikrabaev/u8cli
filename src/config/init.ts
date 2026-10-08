@@ -1,7 +1,7 @@
 /**
  * `u8 init` — writes a commented `u8.jsonc` skeleton.
  *
- * The skeleton is deliberately minimal-but-valid: one app that loads cleanly,
+ * The skeleton is deliberately minimal-but-valid: one repo that loads cleanly,
  * with every other feature present as a commented example. It doubles as the
  * config reference most users will ever read, so it is kept in sync with the
  * schema by a round-trip test.
@@ -22,11 +22,11 @@ export function skeletonConfig(name: string): string {
   // Row templates: literal text plus {namespace@indicator} tokens with optional
   // :modifiers — pad(n), max(n), color(name), dim, bold.
   // "templates": {
-  //   "app": "{app@name:pad(24)} {app@dirname:dim} {git@branch:color(yellow)}",
-  //   "subapp": "  {app@status} {app@name:pad(22)} {health@status}"
+  //   "repo": "{repo@name:pad(24)} {repo@dirname:dim} {git@branch:color(yellow)}",
+  //   "app": "  {app@status} {app@name:pad(22)} {health@status}"
   // },
 
-  // Env for every process. Merge order: workspace -> app -> subapp.
+  // Env for every process. Merge order: workspace -> repo -> app.
   // "env": { "NODE_ENV": "development" },
 
   // Extra indicators, rendered as {x@version}. The command runs in each
@@ -56,7 +56,7 @@ export function skeletonConfig(name: string): string {
 
   // "limits": { "stopTimeout": 10000, "readyTimeout": 60000, "taskConcurrency": 4 },
 
-  "apps": {
+  "repos": {
     "example": {
       // Absolute, ~-relative, or relative to this file.
       "path": ".",
@@ -74,10 +74,10 @@ export function skeletonConfig(name: string): string {
       // "health": { "cmd": "pg_isready -q", "interval": 5000, "threshold": 2 },
       // "dependsOn": ["db"],
 
-      // A monorepo declares subapps instead — each one is separately runnable
-      // as "example.web" / "example.api". Anything set on the app above becomes
-      // the default for every subapp; the subapp entry overrides it.
-      // "subapps": {
+      // A monorepo declares apps instead — each one is separately runnable
+      // as "example.web" / "example.api". Anything set on the repo above becomes
+      // the default for every app; the app entry overrides it.
+      // "apps": {
       //   "web": { "path": "apps/web", "scripts": { "start": "pnpm dev" } },
       //   "api": {
       //     "path": "apps/api",
@@ -89,7 +89,7 @@ export function skeletonConfig(name: string): string {
   },
 
   // Named selections of targets. At most one may be "default": true; with none
-  // declared at all, u8 synthesizes an "all" profile covering every app.
+  // declared at all, u8 synthesizes an "all" profile covering every repo.
   // "profiles": {
   //   "full": { "default": true, "targets": ["example"] },
   //   "frontend": { "targets": ["example.web"] }

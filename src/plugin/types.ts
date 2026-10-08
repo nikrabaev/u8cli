@@ -17,7 +17,7 @@ export interface WorkspaceInfo {
   configPath: string;
 }
 
-export interface AppInfo {
+export interface RepoInfo {
   name: string;
   /** Absolute repo root. */
   path: string;
@@ -25,10 +25,10 @@ export interface AppInfo {
 
 export interface TargetInfo {
   id: TargetId;
-  appName: string;
+  repoName: string;
   name: string;
   implicit: boolean;
-  /** Absolute working directory of the subapp. */
+  /** Absolute working directory of the app. */
   cwd: string;
   scripts: Record<string, string>;
   env: Record<string, string>;
@@ -49,7 +49,7 @@ export interface PluginBaseContext {
 // Indicators
 // ---------------------------------------------------------------------------
 
-export type IndicatorScope = "app" | "subapp";
+export type IndicatorScope = "repo" | "app";
 
 export type IndicatorUpdate =
   | { mode: "poll"; intervalMs: number }
@@ -65,17 +65,17 @@ export type IndicatorResult =
 
 export interface IndicatorContext extends PluginBaseContext {
   scope: IndicatorScope;
-  app: AppInfo;
-  /** Present for subapp-scoped indicators. */
+  repo: RepoInfo;
+  /** Present for app-scoped indicators. */
   target?: TargetInfo;
-  /** App path for app scope, subapp cwd for subapp scope. */
+  /** Repo path for repo scope, app cwd for app scope. */
   cwd: string;
-  /** Current supervisor state, for subapp scope. */
+  /** Current supervisor state, for app scope. */
   service?: ServiceState;
 }
 
 export interface IndicatorDef {
-  /** Defaults to `"subapp"`. */
+  /** Defaults to `"app"`. */
   scope?: IndicatorScope;
   description?: string;
   /** Defaults to `{ mode: "poll", intervalMs: 5000 }` when `value` is defined. */
@@ -99,7 +99,7 @@ export interface IndicatorDef {
 export interface CommandContext extends PluginBaseContext {
   command: string;
   runId: string;
-  app: AppInfo;
+  repo: RepoInfo;
   target: TargetInfo;
   cwd: string;
   /** Appends a line to this target's run log (and streams it to clients). */
@@ -115,10 +115,10 @@ export interface PluginCommandDef {
   /** Filter targets this command applies to. Defaults to all selected targets. */
   appliesTo?(target: TargetInfo): boolean;
   /**
-   * De-duplication granularity. `"app"` runs the command once per app even when
-   * several of its subapps are selected — what `git:pull` wants.
+   * De-duplication granularity. `"repo"` runs the command once per repo even when
+   * several of its apps are selected — what `git:pull` wants.
    */
-  groupBy?: "target" | "app";
+  groupBy?: "target" | "repo";
   /** Throw, or return a non-zero number, to fail this target. */
   run(ctx: CommandContext): MaybePromise<void | number>;
 }
@@ -138,7 +138,7 @@ export interface HookContext extends PluginBaseContext {
   command: string;
   phase: "pre" | "post";
   runId: string;
-  app: AppInfo;
+  repo: RepoInfo;
   target: TargetInfo;
   cwd: string;
   /** Present in `post`: how the command fared for this target. */
@@ -168,9 +168,9 @@ export interface ReadinessContext extends PluginBaseContext {
 // ---------------------------------------------------------------------------
 
 export interface PluginSetupContext extends PluginBaseContext {
-  /** Every subapp in the workspace, for plugins that pre-index by target. */
+  /** Every app in the workspace, for plugins that pre-index by target. */
   targets: TargetInfo[];
-  apps: AppInfo[];
+  repos: RepoInfo[];
 }
 
 export interface PluginDefinition {

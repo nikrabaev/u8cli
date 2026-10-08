@@ -8,7 +8,7 @@ import {
   validateConfig,
   writeSkeletonConfig,
 } from "../../src/config/index.js";
-import { cleanupWorkspaces, sub, tmpWorkspace, u8ErrorFrom, writeConfig } from "./helpers.js";
+import { app, cleanupWorkspaces, tmpWorkspace, u8ErrorFrom, writeConfig } from "./helpers.js";
 
 afterEach(cleanupWorkspaces);
 
@@ -20,10 +20,10 @@ describe("writeSkeletonConfig", () => {
 
     const ws = loadWorkspace(dir);
     expect(ws.name).toBe(path.basename(dir));
-    expect(ws.apps.map((a) => a.name)).toEqual(["example"]);
-    expect(sub(ws, "example").implicit).toBe(true);
-    expect(sub(ws, "example").cwd).toBe(dir);
-    expect(sub(ws, "example").scripts.start).toBeTruthy();
+    expect(ws.repos.map((r) => r.name)).toEqual(["example"]);
+    expect(app(ws, "example").implicit).toBe(true);
+    expect(app(ws, "example").cwd).toBe(dir);
+    expect(app(ws, "example").scripts.start).toBeTruthy();
     // No profiles declared: the synthesized one covers everything.
     expect(ws.profiles).toHaveLength(1);
     expect(ws.defaultProfile).toBe("all");
@@ -34,7 +34,7 @@ describe("writeSkeletonConfig", () => {
     const dir = tmpWorkspace({});
     const text = fs.readFileSync(writeSkeletonConfig(dir), "utf8");
     for (const feature of [
-      "subapps",
+      "apps",
       "profiles",
       "commands",
       "hooks",
@@ -49,30 +49,30 @@ describe("writeSkeletonConfig", () => {
   });
 
   it("refuses to overwrite an existing config", () => {
-    const dir = tmpWorkspace({ "u8.jsonc": '{ "apps": {} }' });
+    const dir = tmpWorkspace({ "u8.jsonc": '{ "repos": {} }' });
     const e = u8ErrorFrom(() => writeSkeletonConfig(dir));
     expect(e.message).toContain("already exists");
-    expect(fs.readFileSync(path.join(dir, "u8.jsonc"), "utf8")).toBe('{ "apps": {} }');
+    expect(fs.readFileSync(path.join(dir, "u8.jsonc"), "utf8")).toBe('{ "repos": {} }');
   });
 
   it("refuses a symlinked config instead of writing through it", () => {
-    const dir = tmpWorkspace({ "elsewhere.jsonc": '{ "apps": {} }' });
+    const dir = tmpWorkspace({ "elsewhere.jsonc": '{ "repos": {} }' });
     fs.symlinkSync(path.join(dir, "elsewhere.jsonc"), path.join(dir, "u8.jsonc"));
     expect(u8ErrorFrom(() => writeSkeletonConfig(dir)).message).toContain("already exists");
-    expect(fs.readFileSync(path.join(dir, "elsewhere.jsonc"), "utf8")).toBe('{ "apps": {} }');
+    expect(fs.readFileSync(path.join(dir, "elsewhere.jsonc"), "utf8")).toBe('{ "repos": {} }');
   });
 
   it("stays valid when its documented examples are uncommented", () => {
     // Every commented example is a member the user is invited to enable, so the
     // surrounding punctuation has to already be right — a missing comma after
-    // "apps" would turn the first uncommented block into a parse error.
+    // "repos" would turn the first uncommented block into a parse error.
     const uncommented = skeletonConfig("demo")
       .split("\n")
       .map((line) => line.replace(/^(\s*)\/\/ (?=["{}[\]])/, "$1"))
       .join("\n");
 
     expect(uncommented).toContain('"profiles"');
-    expect(uncommented).toContain('"subapps"');
+    expect(uncommented).toContain('"apps"');
     validateConfig(parseConfigText(uncommented));
   });
 
@@ -88,7 +88,7 @@ describe("writeSkeletonConfig", () => {
     const ws = loadWorkspace(
       writeConfig(
         `{
-  "apps": { "example": { "path": "." } },
+  "repos": { "example": { "path": "." } },
   ${uncommentBlock(skeleton, "plugins")}
   ${uncommentBlock(skeleton, "builtins")}
 }`,

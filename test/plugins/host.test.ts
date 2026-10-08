@@ -76,10 +76,10 @@ function twoPlugins(): Fixture {
       "plugins/one.js": `export default {
         name: "one",
         indicators: {
-          alpha: { scope: "app", update: { mode: "poll", intervalMs: 1000 }, value: () => "a" },
+          alpha: { scope: "repo", update: { mode: "poll", intervalMs: 1000 }, value: () => "a" },
           beta: { update: { mode: "event" }, subscribe: (ctx, emit) => { emit("b"); return () => {}; } },
         },
-        commands: { pull: { kind: "task", groupBy: "app", run: () => undefined } },
+        commands: { pull: { kind: "task", groupBy: "repo", run: () => undefined } },
         hooks: {
           "app:start": { pre: (ctx) => { ctx.logger.debug("one/app:start"); } },
           "*": { post: () => undefined },
@@ -104,7 +104,7 @@ describe("contributions", () => {
     expect(regs.map((r) => `${r.ns}@${r.name}`)).toEqual(["one@alpha", "one@beta", "two@gamma"]);
 
     const alpha = regs[0];
-    expect(alpha?.def.scope).toBe("app");
+    expect(alpha?.def.scope).toBe("repo");
     expect(alpha?.def.update).toEqual({ mode: "poll", intervalMs: 1000 });
     // A subscribe-only provider must not grow a `value`, or the registry would
     // poll it instead of subscribing.
@@ -119,7 +119,7 @@ describe("contributions", () => {
     await host.load();
 
     expect(host.commands().map((c) => [c.plugin, c.name, c.def.kind, c.def.groupBy])).toEqual([
-      ["one", "one:pull", "task", "app"],
+      ["one", "one:pull", "task", "repo"],
       ["two", "two:push", undefined, undefined],
     ]);
   });
@@ -154,7 +154,7 @@ describe("contributions", () => {
 });
 
 describe("setup context", () => {
-  it("hands over the workspace, its targets and apps, and an exec at the root", async () => {
+  it("hands over the workspace, its targets and repos, and an exec at the root", async () => {
     const fixture = createFixture({
       config: { plugins: ["./plugins/probe.js"] },
       dirs: ["web"],
@@ -166,7 +166,7 @@ describe("setup context", () => {
             ctx.store.set("seen", {
               workspace: ctx.workspace.rootDir,
               targets: ctx.targets.map((t) => t.id),
-              apps: ctx.apps.map((a) => a.name),
+              repos: ctx.repos.map((r) => r.name),
               cwd: pwd.stdout.trim(),
             });
           },
@@ -184,7 +184,7 @@ describe("setup context", () => {
     expect(seen["workspace"]).toBe(fixture.dir);
     expect(seen["cwd"]).toBe(fixture.dir);
     expect(seen["targets"]).toEqual(["api"]);
-    expect(seen["apps"]).toEqual(["api"]);
+    expect(seen["repos"]).toEqual(["api"]);
   });
 });
 
@@ -683,7 +683,7 @@ describe("built-in options", () => {
     return createFixture({
       config: {
         builtins: { git: false, health: true },
-        apps: {
+        repos: {
           api: {
             path: "api",
             scripts: { start: "sleep 30" },

@@ -2,29 +2,29 @@
  * Pure lookups over a {@link NormalizedWorkspace}.
  *
  * Everything the engine, CLI and TUI need to turn user input ("start platform",
- * "run test on the active profile") into a concrete list of subapps and scripts
+ * "run test on the active profile") into a concrete list of apps and scripts
  * lives here, so target semantics are defined exactly once and testable without
  * a daemon.
  */
 import { U8Error } from "../util/errors.js";
 import {
+  findApp,
   findCommand,
   findProfile,
-  findSubapp,
   type NormalizedCommand,
   type NormalizedWorkspace,
   type TargetId,
 } from "./types.js";
 
-/** Subapp ids a single target string covers, or `undefined` when it matches nothing. */
+/** App ids a single target string covers, or `undefined` when it matches nothing. */
 export function expandTarget(ws: NormalizedWorkspace, spec: string): TargetId[] | undefined {
-  if (ws.subapps.some((s) => s.id === spec)) return [spec];
-  const app = ws.apps.find((a) => a.name === spec);
-  return app?.subapps.map((s) => s.id);
+  if (ws.apps.some((a) => a.id === spec)) return [spec];
+  const repo = ws.repos.find((r) => r.name === spec);
+  return repo?.apps.map((a) => a.id);
 }
 
 /**
- * Target strings → subapp ids: app names expand to all their subapps, duplicates
+ * Target strings → app ids: repo names expand to all their apps, duplicates
  * collapse, and the order the user (or the config) wrote them in is preserved.
  */
 export function resolveTargetStrings(ws: NormalizedWorkspace, specs: readonly string[]): TargetId[] {
@@ -32,7 +32,7 @@ export function resolveTargetStrings(ws: NormalizedWorkspace, specs: readonly st
   for (const spec of specs) {
     const ids = expandTarget(ws, spec);
     if (!ids) {
-      throw new U8Error("UNKNOWN_TARGET", `unknown target "${spec}" — expected an app name or "app.subapp"`, {
+      throw new U8Error("UNKNOWN_TARGET", `unknown target "${spec}" — expected a repo name or "repo.app"`, {
         spec,
       });
     }
@@ -41,7 +41,7 @@ export function resolveTargetStrings(ws: NormalizedWorkspace, specs: readonly st
   return out;
 }
 
-/** Subapp ids of a profile; defaults to the workspace's default profile. */
+/** App ids of a profile; defaults to the workspace's default profile. */
 export function profileTargets(ws: NormalizedWorkspace, name?: string): TargetId[] {
   const wanted = name ?? ws.defaultProfile;
   const profile = findProfile(ws, wanted);
@@ -51,7 +51,7 @@ export function profileTargets(ws: NormalizedWorkspace, name?: string): TargetId
       known: ws.profiles.map((p) => p.name),
     });
   }
-  return [...profile.subappIds];
+  return [...profile.appIds];
 }
 
 export interface CommandTarget {
@@ -103,19 +103,19 @@ export function commandTargets(
  * nothing. Callers in the supervisor must use these accessors.
  */
 export function coreStartScript(ws: NormalizedWorkspace, id: TargetId): string | null {
-  return findSubapp(ws, id)?.scripts["start"] ?? null;
+  return findApp(ws, id)?.scripts["start"] ?? null;
 }
 
 /** `null` means "no custom stop script": terminate the process group instead. */
 export function coreStopScript(ws: NormalizedWorkspace, id: TargetId): string | null {
-  return findSubapp(ws, id)?.scripts["stop"] ?? null;
+  return findApp(ws, id)?.scripts["stop"] ?? null;
 }
 
-/** Direct dependencies of a subapp, already expanded to concrete ids. */
+/** Direct dependencies of an app, already expanded to concrete ids. */
 export function dependenciesOf(ws: NormalizedWorkspace, id: TargetId): TargetId[] {
-  const subapp = findSubapp(ws, id);
-  if (!subapp) throw new U8Error("UNKNOWN_TARGET", `unknown target "${id}"`, { target: id });
-  return [...subapp.dependsOn];
+  const app = findApp(ws, id);
+  if (!app) throw new U8Error("UNKNOWN_TARGET", `unknown target "${id}"`, { target: id });
+  return [...app.dependsOn];
 }
 
 /**
@@ -128,7 +128,7 @@ export function topoWaves(ws: NormalizedWorkspace, ids: readonly TargetId[]): Ta
   const selected = new Set<TargetId>();
   for (const id of ids) {
     if (selected.has(id)) continue;
-    if (!findSubapp(ws, id)) throw new U8Error("UNKNOWN_TARGET", `unknown target "${id}"`, { target: id });
+    if (!findApp(ws, id)) throw new U8Error("UNKNOWN_TARGET", `unknown target "${id}"`, { target: id });
     selected.add(id);
     order.push(id);
   }

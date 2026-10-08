@@ -80,7 +80,7 @@ export function buildProgram(io: CliIo, state: ProgramState): Command {
     withGlobals(
       sub(program, kind)
         .description(`${kind} services (defaults to the active profile)`)
-        .argument("[targets...]", 'apps or "app.subapp" ids')
+        .argument("[targets...]", 'repos or "repo.app" ids')
         .option("--all", "every target in the workspace, not just the active profile"),
     ).action(async (targets: string[], opts: { all?: boolean }, cmd: Command) => {
       state.code = await taskCommand(context(cmd), { kind }, { targets, all: opts.all });
@@ -91,7 +91,7 @@ export function buildProgram(io: CliIo, state: ProgramState): Command {
     sub(program, "run")
       .description("run a command against targets")
       .argument("<command>", "command name (e.g. test, git:pull)")
-      .argument("[targets...]", 'apps or "app.subapp" ids; defaults to the active profile')
+      .argument("[targets...]", 'repos or "repo.app" ids; defaults to the active profile')
       .option("--serial", "run one target at a time")
       .option("--concurrency <n>", "maximum targets running at once", positiveInt),
   ).action(
@@ -111,7 +111,7 @@ export function buildProgram(io: CliIo, state: ProgramState): Command {
 
   withGlobals(
     sub(program, "status")
-      .description("show the profile's apps and subapps")
+      .description("show the profile's repos and apps")
       .option("--json", "machine-readable output (never coloured)")
       .option("--profile <name>", "render this profile instead of the active one"),
   ).action(async (opts: { json?: boolean; profile?: string }, cmd: Command) => {
@@ -121,7 +121,7 @@ export function buildProgram(io: CliIo, state: ProgramState): Command {
   withGlobals(
     sub(program, "logs")
       .description("print (and optionally follow) a target's log")
-      .argument("<target>", 'an app or "app.subapp" id')
+      .argument("<target>", 'a repo or "repo.app" id')
       .option("-f, --follow", "keep streaming until interrupted")
       .option("-n, --lines <n>", "how many lines to backfill", nonNegativeInt)
       .option("--run <runId>", "read a task run's log instead of the service log"),

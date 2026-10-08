@@ -2,4 +2,4 @@
 export { createEngine, type EngineDeps } from "./engine.js";
 export { runPool } from "./pool.js";
 export { runScript, targetEnv, type ScriptOutcome, type ScriptRun } from "./script.js";
-export { toAppInfo, toTargetInfo, toWorkspaceInfo } from "./context.js";
+export { toRepoInfo, toTargetInfo, toWorkspaceInfo } from "./context.js";

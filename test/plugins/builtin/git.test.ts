@@ -12,7 +12,7 @@ import type {
   IndicatorResult,
   PluginCommandDef,
 } from "../../../src/plugin/types.js";
-import gitPlugin, { FALLBACK_POLL_MS, WATCH_DEBOUNCE_MS, findRepo } from "../../../src/plugins/builtin/git.js";
+import gitPlugin, { FALLBACK_POLL_MS, WATCH_DEBOUNCE_MS, findCheckout } from "../../../src/plugins/builtin/git.js";
 import { exec as execCommand } from "../../../src/process/index.js";
 import {
   cleanupHarnesses,
@@ -89,7 +89,7 @@ function withRemote(root: string, name: string): { repo: string; other: string }
 /**
  * Puts a recording `git` earlier on `$PATH` that logs its arguments and then
  * execs the real one. Counting invocations end-to-end is the only honest way to
- * prove the "one status per app" claim — nothing in the plugin is stubbed out.
+ * prove the "one status per repo" claim — nothing in the plugin is stubbed out.
  */
 function installGitSpy(dir: string): () => string[] {
   const bin = path.join(dir, "spy-bin");
@@ -153,10 +153,10 @@ afterEach(async () => {
 });
 
 /** Activates the four git providers against a real workspace, as the daemon does. */
-async function start(apps: Record<string, string>): Promise<IndicatorRegistry> {
+async function start(repos: Record<string, string>): Promise<IndicatorRegistry> {
   const raw: RawWorkspaceConfig = {
     name: "fixture",
-    apps: Object.fromEntries(Object.entries(apps).map(([name, dir]) => [name, { path: dir }])),
+    repos: Object.fromEntries(Object.entries(repos).map(([name, dir]) => [name, { path: dir }])),
   };
   const reg = createIndicatorRegistry({
     workspace: holderOf(makeWorkspace(root, raw)),
@@ -170,8 +170,8 @@ async function start(apps: Record<string, string>): Promise<IndicatorRegistry> {
   return reg;
 }
 
-function value(name: string, app = "repo"): string {
-  return registry?.get("git", name, app)?.value ?? "";
+function value(name: string, repo = "repo"): string {
+  return registry?.get("git", name, repo)?.value ?? "";
 }
 
 function valueOf(result: IndicatorResult): string {
@@ -180,19 +180,19 @@ function valueOf(result: IndicatorResult): string {
 }
 
 /**
- * The context an app-scoped provider is handed, minus the registry. `store` is
+ * The context a repo-scoped provider is handed, minus the registry. `store` is
  * passed in because the four cells sharing one Map is what makes them share one
  * {@link RepoMonitor} — the registry keeps one per namespace.
  */
-function subscribeCtx(appPath: string, store: Map<string, unknown>): IndicatorContext {
+function subscribeCtx(repoPath: string, store: Map<string, unknown>): IndicatorContext {
   return {
     workspace: { id: "fixture", name: "fixture", rootDir: root, configPath: path.join(root, "u8.jsonc") },
     logger,
     store,
-    exec: (cmd, opts = {}) => execCommand(cmd, { cwd: appPath, ...opts }),
-    scope: "app",
-    app: { name: "repo", path: appPath },
-    cwd: appPath,
+    exec: (cmd, opts = {}) => execCommand(cmd, { cwd: repoPath, ...opts }),
+    scope: "repo",
+    repo: { name: "repo", path: repoPath },
+    cwd: repoPath,
   };
 }
 
@@ -255,7 +255,7 @@ describe("git indicators", () => {
   it("stays empty, and never shells out, outside a repo", async () => {
     const plain = path.join(root, "repo");
     fs.mkdirSync(plain, { recursive: true });
-    expect(findRepo(plain)).toBeUndefined();
+    expect(findCheckout(plain)).toBeUndefined();
     const calls = installGitSpy(root);
 
     await start({ repo: "repo" });
@@ -273,7 +273,7 @@ describe("git indicators", () => {
     const wt = path.join(root, "wt");
 
     expect(fs.statSync(path.join(wt, ".git")).isFile()).toBe(true);
-    expect(findRepo(wt)?.gitDir).toBe(path.join(repo, ".git", "worktrees", "wt"));
+    expect(findCheckout(wt)?.gitDir).toBe(path.join(repo, ".git", "worktrees", "wt"));
 
     await start({ repo: "wt" });
     await waitFor(() => value("branch") === "feature", "the worktree's branch");
@@ -430,13 +430,13 @@ describe("git indicators", () => {
 // Commands, driven through the real engine
 // ---------------------------------------------------------------------------
 
-/** `mono` is a two-subapp repo; `plain` is an app that is not a checkout. */
+/** `mono` is a two-app repo; `plain` is a repo that is not a checkout. */
 function harness(): Harness {
   const h = createHarness({
     dirs: ["mono/a", "mono/b", "plain"],
     config: {
-      apps: {
-        mono: { path: "mono", subapps: { a: { path: "a" }, b: { path: "b" } } },
+      repos: {
+        mono: { path: "mono", apps: { a: { path: "a" }, b: { path: "b" } } },
         plain: { path: "plain" },
       },
     },
@@ -447,7 +447,7 @@ function harness(): Harness {
 }
 
 describe("git commands", () => {
-  it("runs once per app even when several of its subapps are selected", async () => {
+  it("runs once per repo even when several of its apps are selected", async () => {
     const h = harness();
     initRepo(path.join(h.dir, "mono"));
     commit(path.join(h.dir, "mono"), "f.txt", "one\n");
@@ -457,13 +457,13 @@ describe("git commands", () => {
 
     expect(result.ok).toBe(true);
     expect(statesByTarget(result)).toEqual({ "mono.a": "ok", "mono.b": "skipped" });
-    expect(resultFor(result, "mono.b").error).toContain("once per app");
+    expect(resultFor(result, "mono.b").error).toContain("once per repo");
     expect(calls()).toEqual(["fetch --all --prune"]);
-    // The command runs in the repo root, not in a subapp directory.
+    // The command runs in the repo root, not in an app directory.
     expect(h.logs.some((l) => l.targetId === "mono.a" && l.text === "$ git fetch --all --prune")).toBe(true);
   });
 
-  it("skips apps that are not git repos", async () => {
+  it("skips repos that are not git repos", async () => {
     const h = harness();
     initRepo(path.join(h.dir, "mono"));
     commit(path.join(h.dir, "mono"), "f.txt", "one\n");

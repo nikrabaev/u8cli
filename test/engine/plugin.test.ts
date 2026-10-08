@@ -6,15 +6,15 @@ afterEach(() => {
   cleanupHarnesses();
 });
 
-/** gateway (implicit) plus a two-subapp monorepo — what `groupBy: "app"` is for. */
+/** gateway (implicit) plus a two-app monorepo — what `groupBy: "repo"` is for. */
 function monorepo(): Harness {
   return createHarness({
     dirs: ["gateway", "platform/shell", "platform/auth"],
     config: {
       env: { GREETING: "hello" },
-      apps: {
+      repos: {
         gateway: { path: "gateway" },
-        platform: { path: "platform", subapps: { shell: { path: "shell" }, auth: { path: "auth" } } },
+        platform: { path: "platform", apps: { shell: { path: "shell" }, auth: { path: "auth" } } },
       },
     },
   });
@@ -66,11 +66,11 @@ describe("plugin commands", () => {
     expect(resultFor(result, "platform.shell").logPath).toBeDefined();
   });
 
-  it("runs once per app for groupBy: \"app\", from the app root", async () => {
+  it("runs once per repo for groupBy: \"repo\", from the repo root", async () => {
     const h = monorepo();
     const cwds: string[] = [];
     h.plugins.addCommand("git", "git:pull", {
-      groupBy: "app",
+      groupBy: "repo",
       run(ctx) {
         cwds.push(ctx.cwd);
       },
@@ -78,7 +78,7 @@ describe("plugin commands", () => {
 
     const result = await settled(h.engine.runCommand({ command: "git:pull" }));
 
-    // platform.shell represents the app; platform.auth is reported, not dropped.
+    // platform.shell represents the repo; platform.auth is reported, not dropped.
     expect(statesByTarget(result)).toEqual({
       gateway: "ok",
       "platform.shell": "ok",
@@ -92,7 +92,7 @@ describe("plugin commands", () => {
     const h = monorepo();
     const ran: string[] = [];
     h.plugins.addCommand("git", "git:fetch", {
-      appliesTo: (target) => target.appName === "platform",
+      appliesTo: (target) => target.repoName === "platform",
       run(ctx) {
         ran.push(ctx.target.id);
       },

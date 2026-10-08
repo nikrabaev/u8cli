@@ -59,22 +59,30 @@ describe("identity providers", () => {
     expect(cell("app", "dirname", "platform.shell")?.value).toBe("shell");
     expect(cell("app", "path", "platform.shell")?.value).toBe(path.join(root, "platform/apps/shell"));
 
-    const appName = registry.values().find((v) => v.scope === "app" && v.name === "name" && v.owner === "platform");
-    expect(appName?.value).toBe("platform");
-    const appDir = registry.values().find((v) => v.scope === "app" && v.name === "dirname" && v.owner === "platform");
-    expect(appDir?.value).toBe("platform");
-    const appPath = registry.values().find((v) => v.scope === "app" && v.name === "path" && v.owner === "platform");
-    expect(appPath?.value).toBe(path.join(root, "platform"));
+    expect(cell("repo", "name", "platform")).toMatchObject({ scope: "repo", value: "platform" });
+    expect(cell("repo", "dirname", "platform")?.value).toBe("platform");
+    expect(cell("repo", "path", "platform")?.value).toBe(path.join(root, "platform"));
   });
 
-  it("names an implicit subapp after its app", async () => {
+  it("keeps one namespace per scope", async () => {
+    await registry.start();
+
+    // A header row is written with `repo@`, an app row with `app@`; neither
+    // namespace answers for the other level's owner.
+    expect(cell("app", "name", "platform")).toBeUndefined();
+    expect(cell("repo", "name", "platform.shell")).toBeUndefined();
+    expect(registry.values().filter((v) => v.ns === "repo").every((v) => v.scope === "repo")).toBe(true);
+    expect(registry.values().filter((v) => v.ns === "app").every((v) => v.scope === "app")).toBe(true);
+  });
+
+  it("names an implicit app after its repo", async () => {
     await registry.start();
     expect(cell("app", "name", "gateway")?.value).toBe("gateway");
     expect(cell("app", "path", "gateway")?.value).toBe(path.join(root, "gateway"));
   });
 });
 
-describe("subapp status", () => {
+describe("app status", () => {
   const cases: Array<[ServiceStatus, string]> = [
     ["stopped", "muted"],
     ["starting", "info"],
@@ -117,31 +125,31 @@ describe("subapp status", () => {
   });
 });
 
-describe("app status aggregation", () => {
+describe("repo status aggregation", () => {
   it("is stopped when nothing runs", async () => {
     await registry.start();
-    expect(cell("app", "status", "platform")).toMatchObject({ value: "stopped", tone: "muted" });
+    expect(cell("repo", "status", "platform")).toMatchObject({ value: "stopped", tone: "muted" });
   });
 
-  it("is running only when every subapp runs", async () => {
+  it("is running only when every app runs", async () => {
     await registry.start();
     await transition("platform.shell", { status: "running" });
-    // Half up is not "running", and nothing is in motion — the app reads stopped.
-    expect(cell("app", "status", "platform")?.value).toBe("stopped");
+    // Half up is not "running", and nothing is in motion — the repo reads stopped.
+    expect(cell("repo", "status", "platform")?.value).toBe("stopped");
 
     await transition("platform.auth", { status: "starting" });
-    expect(cell("app", "status", "platform")).toMatchObject({ value: "starting", tone: "info" });
+    expect(cell("repo", "status", "platform")).toMatchObject({ value: "starting", tone: "info" });
 
     await transition("platform.auth", { status: "running" });
-    expect(cell("app", "status", "platform")).toMatchObject({ value: "running", tone: "ok" });
+    expect(cell("repo", "status", "platform")).toMatchObject({ value: "running", tone: "ok" });
   });
 
-  it("lets one crash colour the whole app", async () => {
+  it("lets one crash colour the whole repo", async () => {
     await registry.start();
     await transition("platform.shell", { status: "running" });
     await transition("platform.auth", { status: "crashed", exitCode: 1 });
 
-    expect(cell("app", "status", "platform")).toMatchObject({ value: "crashed", tone: "error" });
+    expect(cell("repo", "status", "platform")).toMatchObject({ value: "crashed", tone: "error" });
     // The sibling row keeps its own truth.
     expect(cell("app", "status", "platform.shell")?.value).toBe("running");
   });

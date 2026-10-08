@@ -31,7 +31,7 @@ function debugStack(command: Record<string, unknown> = {}): Harness {
   return createHarness({
     dirs: ["db", "gateway", "web"],
     config: {
-      apps: {
+      repos: {
         db: { path: "db", scripts: { start: "true # db-start" } },
         gateway: { path: "gateway", scripts: { start: "true # gw-start" }, dependsOn: ["db"] },
         web: { path: "web", scripts: { start: "true # web-start" }, dependsOn: ["gateway"] },
@@ -69,7 +69,7 @@ describe("config service commands", () => {
     const h = createHarness({
       dirs: ["db", "gateway"],
       config: {
-        apps: {
+        repos: {
           db: { path: "db", scripts: { start: "true # db-start" } },
           gateway: { path: "gateway", scripts: { start: "true # gw-start" } },
         },

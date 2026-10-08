@@ -55,7 +55,7 @@ export {
   type RawCommand,
   type RawHealth,
   type RawProfile,
-  type RawSubapp,
+  type RawRepo,
   type RawWorkspaceConfig,
 } from "./schema.js";
 export * from "./types.js";

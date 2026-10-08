@@ -25,7 +25,7 @@ Layers depend downward only; a lower layer never imports a higher one.
 - `src/engine` — command runs, hook pipeline, `dependsOn` orchestration
 - `src/plugins` — host/loader plus the `git` and `health` built-ins under `src/plugins/builtin`
 - `src/cli`, `src/tui` — the two front ends; both render rows through `src/template`
-- `examples/demo` — a real 3-app workspace used for end-to-end checks
+- `examples/demo` — a real 3-repo workspace used for end-to-end checks
 
 ## Frozen contracts
 
@@ -67,7 +67,7 @@ consumer and update the tests that pin the behaviour.
 - ⚠️ **Ask first:** editing a frozen contract; adding a dependency; changing the on-disk log format or the state-dir layout; anything that changes `--json` output shape.
 - 🚫 **Never:** commit secrets.
 - 🚫 **Never:** resolve `app:stop` through `commandTargets` — a `null` there means "signal the process group", not "skip". Use `coreStopScript` in `src/config/resolve.ts`.
-- 🚫 **Never:** inject `process.env` inside `src/process` — the daemon owns the env merge (workspace → app → subapp) so what runs is what config says.
+- 🚫 **Never:** inject `process.env` inside `src/process` — the daemon owns the env merge (workspace → repo → app) so what runs is what config says.
 - 🚫 **Never:** let a plugin failure take down the daemon; a bad plugin is disabled and reported.
 - 🚫 **Never:** reference line numbers in docs, or duplicate `package.json` / config bodies.
 

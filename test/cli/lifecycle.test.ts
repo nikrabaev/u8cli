@@ -8,7 +8,7 @@
 import fs from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import type { StatusJson, StatusJsonSubapp } from "../../src/cli/status.js";
+import type { StatusJson, StatusJsonApp } from "../../src/cli/status.js";
 import {
   cleanup,
   cleanupStateHome,
@@ -32,12 +32,12 @@ afterAll(async () => {
   cleanupStateHome();
 });
 
-async function subapp(id: string): Promise<StatusJsonSubapp> {
+async function app(id: string): Promise<StatusJsonApp> {
   const result = await cli(["status", "--json"], { cwd: ws.dir });
   expect(result.code).toBe(0);
   const json = JSON.parse(result.out) as StatusJson;
-  const found = json.apps.flatMap((a) => a.subapps).find((s) => s.id === id);
-  if (!found) throw new Error(`no subapp "${id}" in the status output`);
+  const found = json.repos.flatMap((r) => r.apps).find((a) => a.id === id);
+  if (!found) throw new Error(`no app "${id}" in the status output`);
   return found;
 }
 
@@ -46,10 +46,10 @@ async function subapp(id: string): Promise<StatusJsonSubapp> {
  * grace window (SPEC §5.3), and `u8 start` answers as soon as the process
  * exists — so "is it up?" is a poll, not a single read.
  */
-async function settledAs(id: string, status: string): Promise<StatusJsonSubapp> {
-  let state: StatusJsonSubapp | undefined;
+async function settledAs(id: string, status: string): Promise<StatusJsonApp> {
+  let state: StatusJsonApp | undefined;
   await waitFor(async () => {
-    state = await subapp(id);
+    state = await app(id);
     return state.status === status;
   }, `${id} to be ${status}`);
   if (!state) throw new Error("unreachable");

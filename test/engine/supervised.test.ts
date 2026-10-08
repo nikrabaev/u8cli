@@ -134,7 +134,7 @@ describe("a service that dies on spawn", () => {
   it("fails the target instead of reporting it ok", async () => {
     const h = live(
       () => ({
-        apps: { solo: { path: ".", scripts: { start: "echo boom; exit 7" } } },
+        repos: { solo: { path: ".", scripts: { start: "echo boom; exit 7" } } },
         limits: LIMITS,
       }),
       [],
@@ -152,7 +152,7 @@ describe("a service that dies on spawn", () => {
   it("does not launch a dependent, and reports it skipped", async () => {
     const h = live(
       () => ({
-        apps: {
+        repos: {
           dep: { path: ".", scripts: { start: "echo dep-starting; exit 3" } },
           child: { path: ".", scripts: { start: "sleep 100" }, dependsOn: ["dep"] },
         },
@@ -174,7 +174,7 @@ describe("a service that dies on spawn", () => {
 describe("a kind:\"service\" config command, end to end", () => {
   it("leaves its own script running under the supervisor, and stops with the target", async () => {
     const h = live((dir) => ({
-      apps: { svc: { path: ".", scripts: { start: service(path.join(dir, "start.marker")) } } },
+      repos: { svc: { path: ".", scripts: { start: service(path.join(dir, "start.marker")) } } },
       commands: { "start.debug": { kind: "service", script: service(path.join(dir, "debug.marker")) } },
       limits: LIMITS,
     }));
@@ -201,7 +201,7 @@ describe("a kind:\"service\" config command, end to end", () => {
 
   it("skips a target the command has no script for, without falling back to start", async () => {
     const h = live((dir) => ({
-      apps: {
+      repos: {
         api: { path: "api", scripts: { start: service(path.join(dir, "api.marker")) } },
         web: { path: "web", scripts: { start: service(path.join(dir, "web.marker")) } },
       },
@@ -226,7 +226,7 @@ describe("a kind:\"service\" config command, end to end", () => {
 
 describe("a target the config dropped, end to end", () => {
   const both = (dir: string): object => ({
-    apps: {
+    repos: {
       api: { path: "api", scripts: { start: service(path.join(dir, "api.marker")) } },
       web: { path: "web", scripts: { start: service(path.join(dir, "web.marker")) } },
     },
@@ -234,7 +234,7 @@ describe("a target the config dropped, end to end", () => {
     limits: LIMITS,
   });
   const apiOnly = (dir: string): object => ({
-    apps: { api: { path: "api", scripts: { start: service(path.join(dir, "api.marker")) } } },
+    repos: { api: { path: "api", scripts: { start: service(path.join(dir, "api.marker")) } } },
     profiles: { all: { default: true, targets: ["api"] } },
     limits: LIMITS,
   });

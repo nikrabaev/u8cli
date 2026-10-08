@@ -70,7 +70,7 @@ describe("service lifecycle", () => {
   it("reports a crashed service with its exit code", async () => {
     const ws = createWorkspace(
       {
-        apps: { boom: { path: "boom", scripts: { start: "printf 'dying\\n'; exit 7" } } },
+        repos: { boom: { path: "boom", scripts: { start: "printf 'dying\\n'; exit 7" } } },
         profiles: { all: { default: true, targets: ["boom"] } },
       },
       ["boom"],
@@ -183,7 +183,7 @@ describe("logs", () => {
   it("streams to a client that subscribed without attaching", async () => {
     // `u8 logs -f` never attaches: the subscription set is the whole opt-in.
     const ws = createWorkspace(
-      { apps: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } } },
+      { repos: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } } },
       ["api"],
     );
     const driver = await connect(ws);
@@ -201,7 +201,7 @@ describe("logs", () => {
 
   it("stops streaming after logs.unsubscribe", async () => {
     const ws = createWorkspace(
-      { apps: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } } },
+      { repos: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } } },
       ["api"],
     );
     const client = await connect(ws);

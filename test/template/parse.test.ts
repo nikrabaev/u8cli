@@ -153,9 +153,9 @@ describe("shipped defaults", () => {
     expect(parsed.nodes.filter((n) => n.kind === "token").length).toBeGreaterThan(0);
   });
 
-  it("renders the default subapp row against a plausible cache", () => {
+  it("renders the default app row against a plausible cache", () => {
     const out = renderTemplate(
-      DEFAULT_TEMPLATES.subapp,
+      DEFAULT_TEMPLATES.app,
       lookupOf({
         "app@status": { value: "running", display: "●", tone: "ok" },
         "app@name": "gateway",

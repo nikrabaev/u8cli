@@ -73,11 +73,11 @@ describe("x@ indicators", () => {
     build(
       fixtureConfig({
         env: { U8_TEST_TAG: "workspace" },
-        apps: {
-          gateway: { path: "gateway", env: { U8_TEST_TAG: "app" } },
+        repos: {
+          gateway: { path: "gateway", env: { U8_TEST_TAG: "repo" } },
           platform: {
             path: "platform",
-            subapps: { shell: { path: "apps/shell", env: { U8_TEST_TAG: "subapp" } } },
+            apps: { shell: { path: "apps/shell", env: { U8_TEST_TAG: "app" } } },
           },
         },
         indicators: { tag: { cmd: 'printf "%s" "$U8_TEST_TAG"', interval: 200 } },
@@ -85,9 +85,9 @@ describe("x@ indicators", () => {
     );
 
     await registry.start();
-    await waitFor(() => registry.get("x", "tag", "platform.shell")?.value === "subapp", "the subapp env");
-    // The subapp override wins over the app's, which in turn wins over the workspace's.
-    expect(registry.get("x", "tag", "gateway")?.value).toBe("app");
+    await waitFor(() => registry.get("x", "tag", "platform.shell")?.value === "app", "the app env");
+    // The app override wins over the repo's, which in turn wins over the workspace's.
+    expect(registry.get("x", "tag", "gateway")?.value).toBe("repo");
   });
 
   it("re-polls and picks up a changed value", async () => {
@@ -154,13 +154,13 @@ describe("x@ indicators", () => {
     expect(registry.get("x", "hang", "gateway")?.value).toBe("");
   });
 
-  it("supports app scope, running once per app in the app directory", async () => {
+  it("supports repo scope, running once per repo in the repo directory", async () => {
     write("gateway/marker.txt", "gw\n");
     write("platform/marker.txt", "pf\n");
-    build(fixtureConfig({ indicators: { marker: { cmd: "cat marker.txt", interval: 200, scope: "app" } } }));
+    build(fixtureConfig({ indicators: { marker: { cmd: "cat marker.txt", interval: 200, scope: "repo" } } }));
 
     await registry.start();
-    await waitFor(() => registry.get("x", "marker", "platform")?.value === "pf", "the app-scoped probe");
+    await waitFor(() => registry.get("x", "marker", "platform")?.value === "pf", "the repo-scoped probe");
     expect(registry.get("x", "marker", "gateway")?.value).toBe("gw");
     expect(registry.values().filter((v) => v.ns === "x")).toHaveLength(2);
   });

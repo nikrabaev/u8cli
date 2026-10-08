@@ -26,7 +26,7 @@ function pidAlive(pid: number): boolean {
 function oneTarget(commands: Record<string, unknown> = {}, limits: Record<string, unknown> = {}): Harness {
   return createHarness({
     dirs: ["gateway"],
-    config: { apps: { gateway: { path: "gateway" } }, commands, limits },
+    config: { repos: { gateway: { path: "gateway" } }, commands, limits },
   });
 }
 

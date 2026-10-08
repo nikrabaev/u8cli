@@ -6,7 +6,7 @@
  *  - **core service commands** (`app:start|stop|restart`) delegate to the
  *    supervisor, sequenced by the dependency DAG;
  *  - **config commands** run a shell script per target in that target's cwd;
- *  - **plugin commands** call `def.run(ctx)` once per target (or once per app).
+ *  - **plugin commands** call `def.run(ctx)` once per target (or once per repo).
  *
  * Whatever the work is, every target travels the same path: a hook pipeline
  * around it, a `TaskProgress` event on each state change, its output captured
@@ -31,13 +31,13 @@ import {
   expandTarget,
   findApp,
   findCommand,
-  findSubapp,
+  findRepo,
   profileTargets,
   resolveTargetStrings,
   topoWaves,
   type NormalizedApp,
   type NormalizedCommand,
-  type NormalizedSubapp,
+  type NormalizedRepo,
   type NormalizedWorkspace,
   type TargetId,
 } from "../config/index.js";
@@ -65,7 +65,7 @@ import type { ExecOptions, ExecResult } from "../process/types.js";
 import { errorMessage, U8Error } from "../util/errors.js";
 import type { Logger } from "../util/logger.js";
 import type { StatePaths } from "../util/paths.js";
-import { toAppInfo, toTargetInfo, toWorkspaceInfo } from "./context.js";
+import { toRepoInfo, toTargetInfo, toWorkspaceInfo } from "./context.js";
 import { postHookEnv, runPostHooks, runPreHooks, type HookPipeline } from "./hooks.js";
 import { runPool } from "./pool.js";
 import { describeExit, runScript, targetEnv } from "./script.js";
@@ -115,9 +115,9 @@ interface WorkOutcome {
 /** One unit the pipeline runs: a reported id plus where the work happens. */
 interface PipelineTarget {
   id: TargetId;
-  subapp: NormalizedSubapp;
   app: NormalizedApp;
-  /** The app path for app-grouped plugin commands, the subapp cwd otherwise. */
+  repo: NormalizedRepo;
+  /** The repo path for repo-grouped plugin commands, the app cwd otherwise. */
   cwd: string;
 }
 
@@ -335,11 +335,11 @@ export function createEngine(deps: EngineDeps): Engine {
       logger: deps.logger.child(plugin),
       store: storeFor(plugin),
       exec: (cmd: string, opts: ExecOptions = {}): Promise<ExecResult> =>
-        exec(cmd, { cwd: pt.cwd, env: pt.subapp.env, signal: rec.controller.signal, ...opts }),
+        exec(cmd, { cwd: pt.cwd, env: pt.app.env, signal: rec.controller.signal, ...opts }),
       command: rec.command,
       runId: rec.runId,
-      app: toAppInfo(pt.app),
-      target: toTargetInfo(pt.subapp),
+      repo: toRepoInfo(pt.repo),
+      target: toTargetInfo(pt.app),
       cwd: pt.cwd,
     };
   }
@@ -370,8 +370,8 @@ export function createEngine(deps: EngineDeps): Engine {
   }
 
   function targetInfoFor(id: TargetId): TargetInfo | undefined {
-    const subapp = findSubapp(workspace.current(), id);
-    return subapp ? toTargetInfo(subapp) : undefined;
+    const app = findApp(workspace.current(), id);
+    return app ? toTargetInfo(app) : undefined;
   }
 
   // -------------------------------------------------------------------------
@@ -408,9 +408,9 @@ export function createEngine(deps: EngineDeps): Engine {
         runScript({
           script,
           cwd: pt.cwd,
-          env: { ...targetEnv(pt.subapp.env), ...extraEnv },
+          env: { ...targetEnv(pt.app.env), ...extraEnv },
           signal: rec.controller.signal,
-          stopTimeoutMs: pt.subapp.stopTimeoutMs,
+          stopTimeoutMs: pt.app.stopTimeoutMs,
           logger: log,
           onLine: (stream, text, ts) => {
             sink.line(stream, text, ts);
@@ -509,11 +509,11 @@ export function createEngine(deps: EngineDeps): Engine {
    * dependencies: those are exactly the things nothing remembers, and inventing
    * them would let a stop resurrect what it is tearing down.
    */
-  function orphanSubapp(ws: NormalizedWorkspace, id: TargetId): NormalizedSubapp {
+  function orphanApp(ws: NormalizedWorkspace, id: TargetId): NormalizedApp {
     const dot = id.indexOf(".");
     return {
       id,
-      appName: dot === -1 ? id : id.slice(0, dot),
+      repoName: dot === -1 ? id : id.slice(0, dot),
       name: dot === -1 ? id : id.slice(dot + 1),
       implicit: dot === -1,
       cwd: ws.rootDir,
@@ -526,9 +526,9 @@ export function createEngine(deps: EngineDeps): Engine {
     };
   }
 
-  function pipelineTarget(ws: NormalizedWorkspace, subapp: NormalizedSubapp, cwd?: string): PipelineTarget {
-    const app = findApp(ws, subapp.appName) ?? { name: subapp.appName, path: subapp.cwd, subapps: [subapp] };
-    return { id: subapp.id, subapp, app, cwd: cwd ?? subapp.cwd };
+  function pipelineTarget(ws: NormalizedWorkspace, app: NormalizedApp, cwd?: string): PipelineTarget {
+    const repo = findRepo(ws, app.repoName) ?? { name: app.repoName, path: app.cwd, apps: [app] };
+    return { id: app.id, app, repo, cwd: cwd ?? app.cwd };
   }
 
   function hooksOf(ws: NormalizedWorkspace, command: string): {
@@ -555,7 +555,7 @@ export function createEngine(deps: EngineDeps): Engine {
   function orphanIds(ws: NormalizedWorkspace): TargetId[] {
     return supervisor
       .states()
-      .filter((s) => s.status !== "stopped" && findSubapp(ws, s.targetId) === undefined)
+      .filter((s) => s.status !== "stopped" && findApp(ws, s.targetId) === undefined)
       .map((s) => s.targetId);
   }
 
@@ -563,7 +563,7 @@ export function createEngine(deps: EngineDeps): Engine {
    * Target resolution for stop, widened by whatever the supervisor is still
    * running.
    *
-   * A reload leaves running processes untouched (SPEC §8), so deleting an app
+   * A reload leaves running processes untouched (SPEC §8), so deleting a repo
    * from `u8.jsonc` while it runs produces a target the config cannot name.
    * Resolving stop against the config alone would answer `UNKNOWN_TARGET` for it
    * and leave it out of an unqualified "stop everything" — an orphan surviving
@@ -580,14 +580,14 @@ export function createEngine(deps: EngineDeps): Engine {
 
     const out: TargetId[] = [];
     for (const spec of targets) {
-      // An app name keeps covering the subapps it used to have, including when
-      // the app itself survived the reload and only one of its subapps did not.
+      // A repo name keeps covering the apps it used to have, including when
+      // the repo itself survived the reload and only one of its apps did not.
       const ids = [
         ...(expandTarget(ws, spec) ?? []),
         ...orphans.filter((id) => id === spec || id.startsWith(`${spec}.`)),
       ];
       if (ids.length === 0) {
-        throw new U8Error("UNKNOWN_TARGET", `unknown target "${spec}" — expected an app name or "app.subapp"`, {
+        throw new U8Error("UNKNOWN_TARGET", `unknown target "${spec}" — expected a repo name or "repo.app"`, {
           spec,
         });
       }
@@ -602,8 +602,8 @@ export function createEngine(deps: EngineDeps): Engine {
    * a wave they cannot appear in is the only alternative.
    */
   function stopWaves(ws: NormalizedWorkspace, ids: readonly TargetId[]): TargetId[][] {
-    const known = ids.filter((id) => findSubapp(ws, id) !== undefined);
-    const orphans = ids.filter((id) => findSubapp(ws, id) === undefined);
+    const known = ids.filter((id) => findApp(ws, id) !== undefined);
+    const orphans = ids.filter((id) => findApp(ws, id) === undefined);
     const waves = [...topoWaves(ws, known)].reverse();
     return orphans.length > 0 ? [orphans, ...waves] : waves;
   }
@@ -637,21 +637,21 @@ export function createEngine(deps: EngineDeps): Engine {
     return launch(rec, async () => {
       const tasks: Array<() => Promise<void>> = [];
       for (const id of ids) {
-        const subapp = findSubapp(ws, id);
+        const app = findApp(ws, id);
         const script = scripts.get(id);
-        if (!subapp || script === undefined) {
+        if (!app || script === undefined) {
           finish(rec, id, "skipped", { error: `no script for "${id}" in command "${cmd.name}"` });
           continue;
         }
-        const pt = pipelineTarget(ws, subapp);
+        const pt = pipelineTarget(ws, app);
         tasks.push(async () => {
           await runPipeline(rec, pt, hooks, async (sink) => {
             const outcome = await runScript({
               script,
               cwd: pt.cwd,
-              env: targetEnv(subapp.env),
+              env: targetEnv(app.env),
               signal: rec.controller.signal,
-              stopTimeoutMs: subapp.stopTimeoutMs,
+              stopTimeoutMs: app.stopTimeoutMs,
               logger: log,
               onLine: (stream, text, ts) => {
                 sink.line(stream, text, ts);
@@ -674,8 +674,8 @@ export function createEngine(deps: EngineDeps): Engine {
 
   /**
    * A plugin command runs once per target, filtered by `appliesTo`. With
-   * `groupBy: "app"` it runs once per app instead — the first selected subapp of
-   * each app represents it and the command's cwd becomes the app root, which is
+   * `groupBy: "repo"` it runs once per repo instead — the first selected app of
+   * each repo represents it and the command's cwd becomes the repo root, which is
    * what `git:pull` needs to avoid fetching the same repo four times.
    */
   function runPluginCommand(bound: BoundCommand, ids: TargetId[], opts: RunOptions): RunHandle {
@@ -683,31 +683,31 @@ export function createEngine(deps: EngineDeps): Engine {
     const rec = createRun(bound.name, ids);
     const concurrency = concurrencyFor(ws, undefined, opts);
     const hooks = hooksOf(ws, bound.name);
-    const byApp = bound.def.groupBy === "app";
+    const byRepo = bound.def.groupBy === "repo";
     const representatives = new Map<string, TargetId>();
 
     return launch(rec, async () => {
       const tasks: Array<() => Promise<void>> = [];
       for (const id of ids) {
-        const subapp = findSubapp(ws, id);
-        if (!subapp) {
+        const app = findApp(ws, id);
+        if (!app) {
           finish(rec, id, "skipped", { error: `unknown target "${id}"` });
           continue;
         }
-        if (!applies(bound, subapp)) {
+        if (!applies(bound, app)) {
           finish(rec, id, "skipped", { error: `command "${bound.name}" does not apply to this target` });
           continue;
         }
-        if (byApp) {
-          const seen = representatives.get(subapp.appName);
+        if (byRepo) {
+          const seen = representatives.get(app.repoName);
           if (seen !== undefined) {
-            finish(rec, id, "skipped", { error: `covered by "${seen}" — "${bound.name}" runs once per app` });
+            finish(rec, id, "skipped", { error: `covered by "${seen}" — "${bound.name}" runs once per repo` });
             continue;
           }
-          representatives.set(subapp.appName, id);
+          representatives.set(app.repoName, id);
         }
 
-        const pt = pipelineTarget(ws, subapp, byApp ? findApp(ws, subapp.appName)?.path : undefined);
+        const pt = pipelineTarget(ws, app, byRepo ? findRepo(ws, app.repoName)?.path : undefined);
         tasks.push(async () => {
           await runPipeline(rec, pt, hooks, async (sink) => {
             try {
@@ -730,12 +730,12 @@ export function createEngine(deps: EngineDeps): Engine {
     });
   }
 
-  function applies(bound: BoundCommand, subapp: NormalizedSubapp): boolean {
+  function applies(bound: BoundCommand, app: NormalizedApp): boolean {
     if (!bound.def.appliesTo) return true;
     try {
-      return bound.def.appliesTo(toTargetInfo(subapp)) !== false;
+      return bound.def.appliesTo(toTargetInfo(app)) !== false;
     } catch (err) {
-      log.warn(`appliesTo of "${bound.name}" threw for ${subapp.id}: ${errorMessage(err)}`);
+      log.warn(`appliesTo of "${bound.name}" threw for ${app.id}: ${errorMessage(err)}`);
       return false;
     }
   }
@@ -775,14 +775,14 @@ export function createEngine(deps: EngineDeps): Engine {
    * being restarted.
    */
   function willNeverBecomeReady(ws: NormalizedWorkspace, dep: TargetId): boolean {
-    return supervisor.state(dep).status === "crashed" && findSubapp(ws, dep)?.restart !== "on-crash";
+    return supervisor.state(dep).status === "crashed" && findApp(ws, dep)?.restart !== "on-crash";
   }
 
   /** Polls every dependency until it is ready, the run is cancelled, or it times out. */
   async function awaitDependencies(rec: RunRecord, dependencies: readonly TargetId[]): Promise<Gate> {
     for (const dep of dependencies) {
       const ws = workspace.current();
-      const timeoutMs = findSubapp(ws, dep)?.readyTimeoutMs ?? ws.limits.readyTimeoutMs;
+      const timeoutMs = findApp(ws, dep)?.readyTimeoutMs ?? ws.limits.readyTimeoutMs;
       const deadline = Date.now() + timeoutMs;
       for (;;) {
         if (rec.controller.signal.aborted) return { kind: "aborted" };
@@ -867,14 +867,14 @@ export function createEngine(deps: EngineDeps): Engine {
           return;
         }
 
-        const subapp = findSubapp(ws, id);
-        if (!subapp) {
+        const app = findApp(ws, id);
+        if (!app) {
           finish(rec, id, "failed", { error: `unknown target "${id}"` });
           blocked.set(id, "unknown target");
           return;
         }
 
-        const dependencies = subapp.dependsOn.filter((d) => d !== id && selected.has(d));
+        const dependencies = app.dependsOn.filter((d) => d !== id && selected.has(d));
         const badDep = dependencies.find((d) => blocked.has(d));
         if (badDep !== undefined) {
           const message = `not started: dependency "${badDep}" ${blocked.get(badDep) ?? "did not start"}`;
@@ -914,7 +914,7 @@ export function createEngine(deps: EngineDeps): Engine {
           return;
         }
 
-        const state = await runPipeline(rec, pipelineTarget(ws, subapp), hooks, async (sink) => {
+        const state = await runPipeline(rec, pipelineTarget(ws, app), hooks, async (sink) => {
           try {
             // `app:start` lets the supervisor resolve the script itself, so its
             // spawn-time fingerprint stays the one a reload compares against.
@@ -948,7 +948,7 @@ export function createEngine(deps: EngineDeps): Engine {
    *
    * Unlike the start passes this one accepts targets the config no longer
    * declares — see {@link selectedStopIds} — so a dropped target still travels
-   * the whole pipeline, standing on {@link orphanSubapp}.
+   * the whole pipeline, standing on {@link orphanApp}.
    */
   async function stopPass(rec: RunRecord, ids: readonly TargetId[], concurrency: number): Promise<void> {
     const ws = workspace.current();
@@ -956,11 +956,11 @@ export function createEngine(deps: EngineDeps): Engine {
 
     for (const wave of stopWaves(ws, ids)) {
       const tasks = wave.map((id) => async () => {
-        const subapp = findSubapp(ws, id) ?? orphanSubapp(ws, id);
+        const app = findApp(ws, id) ?? orphanApp(ws, id);
         log.debug(`stopping ${id}`, { customStopScript: coreStopScript(ws, id) !== null });
-        await runPipeline(rec, pipelineTarget(ws, subapp), hooks, async (sink) => {
+        await runPipeline(rec, pipelineTarget(ws, app), hooks, async (sink) => {
           try {
-            await supervisor.stop(id, { timeoutMs: subapp.stopTimeoutMs });
+            await supervisor.stop(id, { timeoutMs: app.stopTimeoutMs });
             return { state: "ok", exitCode: 0 };
           } catch (err) {
             const message = errorMessage(err);
@@ -994,15 +994,15 @@ export function createEngine(deps: EngineDeps): Engine {
           blocked.set(id, "was cancelled");
           return;
         }
-        const subapp = findSubapp(ws, id);
-        if (!subapp) {
+        const app = findApp(ws, id);
+        if (!app) {
           finish(rec, id, "failed", { error: `unknown target "${id}"` });
           blocked.set(id, "unknown target");
           return;
         }
         progress(rec, id, "running");
         try {
-          await supervisor.stop(id, { timeoutMs: subapp.stopTimeoutMs });
+          await supervisor.stop(id, { timeoutMs: app.stopTimeoutMs });
         } catch (err) {
           const message = `stop failed: ${errorMessage(err)}`;
           finish(rec, id, "failed", { error: message });

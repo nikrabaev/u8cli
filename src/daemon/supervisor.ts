@@ -8,7 +8,7 @@
  *
  * Five rules drive the design:
  *  - **A target owns exactly one process.** Its definition is normally the
- *    subapp's `start` script, but a `kind: "service"` command (SPEC §2.5) may
+ *    app's `start` script, but a `kind: "service"` command (SPEC §2.5) may
  *    claim it through {@link StartOptions.script}/{@link StartOptions.via};
  *    starting a *different* definition therefore replaces what is running,
  *    while starting the same one again stays a no-op.
@@ -27,8 +27,8 @@
  *  - **Every timer is unref'd.** A pending restart backoff must never be the
  *    reason a daemon with nothing to do stays alive.
  */
-import { commandTargets, coreStartScript, coreStopScript, findCommand, findSubapp } from "../config/index.js";
-import type { NormalizedSubapp, NormalizedWorkspace, TargetId } from "../config/types.js";
+import { commandTargets, coreStartScript, coreStopScript, findApp, findCommand } from "../config/index.js";
+import type { NormalizedApp, NormalizedWorkspace, TargetId } from "../config/types.js";
 import type { LogLine, LogStream, ServiceState } from "../ipc/protocol.js";
 import {
   createLogWriter,
@@ -308,7 +308,7 @@ export function createSupervisor(deps: SupervisorDeps): ManagedSupervisor {
   // --- spawn-time definition ------------------------------------------------
 
   /**
-   * The script the current config would spawn this target from: the subapp's
+   * The script the current config would spawn this target from: the app's
    * `start` script normally, or the per-target script of the `kind: "service"`
    * command that owns the process. `null` means the config no longer defines
    * one — a dropped target, a command that lost the target, or a deleted command.
@@ -328,7 +328,7 @@ export function createSupervisor(deps: SupervisorDeps): ManagedSupervisor {
    * definition against the current config and compares the two.
    *
    * The definition is per-process: for a command-started one it is the command's
-   * script, so editing the subapp's own `start` script leaves a `start.debug`
+   * script, so editing the app's own `start` script leaves a `start.debug`
    * process alone, and editing (or deleting) `start.debug` is what marks it
    * stale. Anything else would report every command-started target as
    * permanently stale.
@@ -339,22 +339,22 @@ export function createSupervisor(deps: SupervisorDeps): ManagedSupervisor {
     via: string | undefined,
     script: string | null,
   ): string => {
-    const subapp = findSubapp(ws, id);
-    const env = Object.entries(subapp?.env ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-    return JSON.stringify([via ?? null, script, subapp?.cwd ?? null, env]);
+    const app = findApp(ws, id);
+    const env = Object.entries(app?.env ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return JSON.stringify([via ?? null, script, app?.cwd ?? null, env]);
   };
 
   /**
-   * The daemon's environment plus the subapp's overrides. The process layer uses
+   * The daemon's environment plus the app's overrides. The process layer uses
    * `env` verbatim, so this merge — and therefore what the fingerprint records —
    * happens exactly here (SPEC 5.3).
    */
-  const spawnEnv = (subapp: NormalizedSubapp): Record<string, string> => {
+  const spawnEnv = (app: NormalizedApp): Record<string, string> => {
     const env: Record<string, string> = {};
     for (const [key, value] of Object.entries(process.env)) {
       if (value !== undefined) env[key] = value;
     }
-    return { ...env, ...subapp.env };
+    return { ...env, ...app.env };
   };
 
   // --- durable ownership ----------------------------------------------------
@@ -408,7 +408,7 @@ export function createSupervisor(deps: SupervisorDeps): ManagedSupervisor {
     }
 
     const reason = crashReason(exit, adopted);
-    const policy = findSubapp(workspace.current(), entry.id)?.restart ?? "no";
+    const policy = findApp(workspace.current(), entry.id)?.restart ?? "no";
     if (policy !== "on-crash") {
       setState(entry, { ...common, status: "crashed", lastError: reason });
       closeLog(entry);
@@ -469,8 +469,8 @@ export function createSupervisor(deps: SupervisorDeps): ManagedSupervisor {
       await doStop(entry, {});
     }
 
-    const subapp = findSubapp(ws, entry.id);
-    if (!subapp) {
+    const app = findApp(ws, entry.id);
+    if (!app) {
       throw new U8Error("UNKNOWN_TARGET", `unknown target "${entry.id}"`, { target: entry.id });
     }
     if (script === null) {
@@ -486,8 +486,8 @@ export function createSupervisor(deps: SupervisorDeps): ManagedSupervisor {
     let handle: ProcessHandle;
     try {
       handle = spawnManaged(
-        { script, cwd: subapp.cwd, env: spawnEnv(subapp) },
-        { stopTimeoutMs: subapp.stopTimeoutMs, logger },
+        { script, cwd: app.cwd, env: spawnEnv(app) },
+        { stopTimeoutMs: app.stopTimeoutMs, logger },
       );
     } catch (err) {
       // `spawnManaged` throws only when there was no process to attach a
@@ -525,7 +525,7 @@ export function createSupervisor(deps: SupervisorDeps): ManagedSupervisor {
     // Immediately, and before the state is published: from here on the process
     // exists, and a daemon that dies in the next millisecond must still leave
     // behind something that names it.
-    remember(entry, handle, script, subapp.cwd);
+    remember(entry, handle, script, app.cwd);
 
     setState(entry, {
       status: "starting",
@@ -562,11 +562,11 @@ export function createSupervisor(deps: SupervisorDeps): ManagedSupervisor {
   const runStopScript = async (
     entry: Entry,
     script: string,
-    subapp: NormalizedSubapp,
+    app: NormalizedApp,
     timeoutMs: number,
   ): Promise<void> => {
     try {
-      const result = await exec(script, { cwd: subapp.cwd, env: subapp.env, timeoutMs });
+      const result = await exec(script, { cwd: app.cwd, env: app.env, timeoutMs });
       if (result.ok) {
         notice(entry, "stop script finished");
         return;
@@ -596,14 +596,14 @@ export function createSupervisor(deps: SupervisorDeps): ManagedSupervisor {
     }
 
     const ws = workspace.current();
-    const subapp = findSubapp(ws, entry.id);
-    const timeoutMs = opts.timeoutMs ?? subapp?.stopTimeoutMs ?? ws.limits.stopTimeoutMs;
+    const app = findApp(ws, entry.id);
+    const timeoutMs = opts.timeoutMs ?? app?.stopTimeoutMs ?? ws.limits.stopTimeoutMs;
 
     entry.stopRequested = true;
     setState(entry, { status: "stopping" });
 
     const stopScript = coreStopScript(ws, entry.id);
-    if (stopScript !== null && subapp) await runStopScript(entry, stopScript, subapp, timeoutMs);
+    if (stopScript !== null && app) await runStopScript(entry, stopScript, app, timeoutMs);
 
     // Unconditional: the stop script may have done nothing, or only half the job.
     // `onExit` was subscribed to `exited` at spawn time, so it has already run by
@@ -878,7 +878,7 @@ export function createSupervisor(deps: SupervisorDeps): ManagedSupervisor {
   const stateOf = (id: TargetId): ServiceState => {
     const entry = entries.get(id);
     // Unknown targets read as stopped rather than throwing: a client rendering a
-    // row for every subapp must not have to know which ones were ever started.
+    // row for every app must not have to know which ones were ever started.
     return entry ? { ...entry.state } : { targetId: id, status: "stopped", stale: false, restartAttempts: 0 };
   };
 
@@ -922,9 +922,9 @@ export function createSupervisor(deps: SupervisorDeps): ManagedSupervisor {
     states(): ServiceState[] {
       const out: ServiceState[] = [];
       const seen = new Set<TargetId>();
-      for (const subapp of workspace.current().subapps) {
-        seen.add(subapp.id);
-        out.push(stateOf(subapp.id));
+      for (const app of workspace.current().apps) {
+        seen.add(app.id);
+        out.push(stateOf(app.id));
       }
       // A target dropped from the config may still own a process; keep reporting
       // it until it settles. Merely *tracked* ids own nothing — `start` on an

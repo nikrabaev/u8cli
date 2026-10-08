@@ -13,14 +13,14 @@ indicator cache.
 | Concept | What it is |
 | --- | --- |
 | **Workspace** | A directory holding `u8.jsonc`, found by walking up from the cwd. Everything `u8` does is scoped to one. |
-| **App** | A repo, located anywhere (`path` is absolute, `~`-relative, or relative to the workspace). Groups subapps and carries app-scoped indicators. Not runnable itself. |
-| **Subapp** | The runnable unit: one process, one log, one status. An app declared without `subapps` gets one *implicit* subapp whose id is the app name. |
+| **Repo** | A source checkout, located anywhere (`path` is absolute, `~`-relative, or relative to the workspace). Groups its apps and carries repo-scoped indicators such as `git@branch`. Not runnable itself. |
+| **App** | The runnable unit: one process, one log, one status. A repo declared without `apps` gets one *implicit* app whose id is the repo name. |
 | **Profile** | A named selection of targets. The active profile is per-machine state, not config — switching it never touches `u8.jsonc`. |
 | **Command** | A named unit of work run against targets. `kind: "task"` runs to completion; `kind: "service"` is supervised. Built-ins: `app:start`, `app:stop`, `app:restart`. |
-| **Indicator** | A named value rendered in row templates as `{ns@name}` — `app@status`, `health@status`, `git@branch`, `x@`… for config-defined ones. |
+| **Indicator** | A named value rendered in row templates as `{ns@name}` — `app@status`, `repo@name`, `health@status`, `git@branch`, `x@`… for config-defined ones. |
 | **Plugin** | An npm package or local file loaded into the daemon, contributing indicators, commands, hooks and a readiness signal. `git` and `health` are built in. |
 
-A **target** is addressed as `app` (every subapp of that app) or `app.subapp` (exactly one).
+A **target** is addressed as `repo` (every app of that repo) or `repo.app` (exactly one).
 
 ---
 
@@ -39,12 +39,12 @@ u8 --version
 $ cd ~/Work/my-stack
 $ u8 init
 created u8.jsonc
-edit the apps you want u8 to run, then: u8 status
+edit the repos you want u8 to manage, then: u8 status
 ```
 
-Point the apps at your repos and give each one a `start` script, then bring the stack up. (The
-transcripts below are [`examples/demo`](examples/demo) in this repo: two single-service repos, a
-monorepo with two subapps, healthchecks and `dependsOn` throughout.)
+Point the repo entries at your checkouts and give each one a `start` script, then bring the stack
+up. (The transcripts below are [`examples/demo`](examples/demo) in this repo: two single-service
+repos, a monorepo with two apps, healthchecks and `dependsOn` throughout.)
 
 ```console
 $ u8 start
@@ -78,7 +78,7 @@ platform             platform main 9
 ```
 
 `db` and `api` are single-service repos, so each renders as one merged row; `platform` is a monorepo,
-so it gets a header row plus one row per subapp. Every column is a template token: status, name,
+so it gets a header row plus one row per app. Every column is a template token: status, name,
 `{health@status}`, `{app@uptime}` and a config-defined `{x@port}` on the child rows, and
 `{git@branch}` plus `{git@dirty}` on the header — the `9` is nine changed files in that checkout.
 In a terminal the status column is a coloured `●`; piped (as above) it falls back to the word,
@@ -134,7 +134,7 @@ and `SHELL` (the shell every script is run with, falling back to `/bin/sh`).
 
 ## The dashboard
 
-`u8` with no arguments is the interactive front end: the active profile's apps and subapps as
+`u8` with no arguments is the interactive front end: the active profile's repos and apps as
 template-rendered rows, refreshed from the daemon's push stream, with a log view and a command
 palette.
 
@@ -200,7 +200,7 @@ Everything runtime lives under `$U8_STATE_HOME/<workspace-id>/` (default `~/.u8/
 ├── daemon.log               # u8 daemon logs
 ├── state.json               # local state: the active profile (written once you switch)
 └── logs/
-    ├── services/<target>.log            # one rotating file per subapp (10 MB, 3 generations)
+    ├── services/<target>.log            # one rotating file per app (10 MB, 3 generations)
     └── tasks/<command>/<runId>/<target>.log   # one per (run, target); oldest runs pruned
 ```
 

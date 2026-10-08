@@ -60,7 +60,7 @@ describe("profile use", () => {
 
     const status = await cli(["status"], { cwd: ws.dir });
     expect(status.out).toContain("profile frontend");
-    expect(status.out).not.toContain("SUB api");
+    expect(status.out).not.toContain("APP api");
 
     expect((await cli(["profile", "list"], { cwd: ws.dir })).out).toMatch(/^\*\s+frontend\b/m);
   });

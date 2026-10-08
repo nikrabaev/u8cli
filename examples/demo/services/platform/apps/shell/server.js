@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Demo micro-frontend shell (subapp of the "platform" monorepo app).
+// Demo micro-frontend shell (app of the "platform" monorepo).
 import http from "node:http";
 
 const PORT = Number(process.env.PORT ?? 3100);

@@ -27,12 +27,12 @@ beforeAll(async () => {
   ws = createWorkspace(
     {
       name: "logs-fixture",
-      apps: {
+      repos: {
         api: { path: "api", scripts: { start: service("api-ready") } },
         ticker: { path: "ticker", scripts: { start: TICKER } },
         platform: {
           path: "platform",
-          subapps: {
+          apps: {
             web: { path: "web", scripts: { start: service("web-ready") } },
             admin: { path: "admin", scripts: { start: service("admin-ready") } },
           },
@@ -73,7 +73,7 @@ describe("backfill", () => {
     expect(out).not.toContain("[");
   });
 
-  it("prefixes every line when a target expands to more than one subapp", async () => {
+  it("prefixes every line when a target expands to more than one app", async () => {
     const out = await backfill(["logs", "platform"], "web-ready");
 
     await waitFor(async () => (await cli(["logs", "platform"], { cwd: ws.dir })).out.includes("admin-ready"), "admin's log");
@@ -89,7 +89,7 @@ describe("backfill", () => {
   });
 
   it("says so, on stderr, when a target has never written a line", async () => {
-    const idle = createWorkspace({ apps: { never: { path: "." } } });
+    const idle = createWorkspace({ repos: { never: { path: "." } } });
     const result = await cli(["logs", "never"], { cwd: idle.dir });
 
     expect(result.code).toBe(0);
@@ -138,8 +138,8 @@ describe("--follow", () => {
     // supervisor's grace window, which says nothing about the interrupt.
     await waitFor(async () => {
       const rows = await cli(["status", "--json"], { cwd: ws.dir });
-      const subapps = (JSON.parse(rows.out) as StatusJson).apps.flatMap((a) => a.subapps);
-      return subapps.find((s) => s.id === "ticker")?.status === "running";
+      const apps = (JSON.parse(rows.out) as StatusJson).repos.flatMap((r) => r.apps);
+      return apps.find((a) => a.id === "ticker")?.status === "running";
     }, "the ticker to still be running after the interrupt");
   });
 });

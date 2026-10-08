@@ -117,7 +117,7 @@ export function createWorkspace(
 /** The two-service workspace most tests use: `web` depends on `api`. */
 export function twoServiceConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    apps: {
+    repos: {
       api: { path: "api", scripts: { start: SERVICE_SCRIPT } },
       web: { path: "web", scripts: { start: SERVICE_SCRIPT }, dependsOn: ["api"] },
     },

@@ -100,7 +100,7 @@ function linkedTo(pkg: string, version: string): ConsumerSpec {
 let root: string;
 
 /**
- * The context the registry hands a subapp-scoped provider. `exec` throws on
+ * The context the registry hands an app-scoped provider. `exec` throws on
  * purpose: an indicator polled every few seconds must answer from the
  * filesystem, never by forking yalc.
  */
@@ -110,8 +110,8 @@ function indicatorContext(cwd: string): IndicatorContext {
     logger: nullLogger,
     store: new Map<string, unknown>(),
     exec: () => Promise.reject(new Error("protos indicators must not shell out")),
-    scope: "subapp",
-    app: { name: "api", path: cwd },
+    scope: "app",
+    repo: { name: "api", path: cwd },
     cwd,
   };
 }
@@ -141,7 +141,7 @@ function command(def: PluginDefinition, name: string): PluginCommandDef {
 function targetAt(cwd: string, id = "api"): TargetInfo {
   return {
     id,
-    appName: id,
+    repoName: id,
     name: id,
     implicit: true,
     cwd,
@@ -293,10 +293,10 @@ describe("protos registration", () => {
     expect(broken).toEqual({ mode: "poll", intervalMs: DEFAULT_PROTOS_INTERVAL_MS });
   });
 
-  it("scopes everything to the subapp, because .yalc and node_modules are per subapp", () => {
+  it("scopes everything to the app, because .yalc and node_modules are per app", () => {
     const def = plugin();
 
-    for (const indicator of Object.values(def.indicators ?? {})) expect(indicator.scope).toBe("subapp");
+    for (const indicator of Object.values(def.indicators ?? {})) expect(indicator.scope).toBe("app");
     for (const cmd of Object.values(def.commands ?? {})) {
       expect(cmd.kind).toBe("task");
       expect(cmd.groupBy).toBe("target");
@@ -350,7 +350,7 @@ describe("protos indicators", () => {
     expect(valueOf(await cell(def, "react-query", dir))).toBe("^2.0.0");
   });
 
-  it("renders an empty cell for a subapp that does not consume the package", async () => {
+  it("renders an empty cell for an app that does not consume the package", async () => {
     const dir = makeConsumer(path.join(root, "api"), { dependencies: { [PROTOS]: "^1.0.0" } });
 
     const result = await cell(plugin(), "react-query", dir);
@@ -393,7 +393,7 @@ describe("protos indicators", () => {
 
     // Same byte count, same mtime: a change no stat can see, and therefore one
     // the cache is entitled to miss. Not tolerating that miss is what would make
-    // every poll re-parse three manifests per package per subapp.
+    // every poll re-parse three manifests per package per app.
     fs.writeFileSync(manifest, body("^8.8.8"), "utf8");
     fs.utimesSync(manifest, pinned, pinned);
     expect(valueOf(await cell(def, "protos", dir))).toBe("^1.0.0");
@@ -477,7 +477,7 @@ describe("protos command targeting", () => {
 
     expect(applies(def, "link", consumer)).toBe(true);
     expect(applies(def, "link:protos", consumer)).toBe(true);
-    // The other configured package is not this subapp's business.
+    // The other configured package is not this app's business.
     expect(applies(def, "link:react-query", consumer)).toBe(false);
     expect(applies(def, "link", stranger)).toBe(false);
   });
@@ -507,7 +507,7 @@ function harness(): Harness {
   const h = createHarness({
     dirs: ["api", "web", "docs"],
     config: {
-      apps: {
+      repos: {
         api: { path: "api" },
         web: { path: "web" },
         docs: { path: "docs" },
@@ -526,7 +526,7 @@ function logsFor(h: Harness, targetId: string): string[] {
 }
 
 describe("protos:link", () => {
-  it("runs yalc add in the subapp, once per package it consumes", async () => {
+  it("runs yalc add in the app, once per package it consumes", async () => {
     const h = harness();
     makeConsumer(h.file("api"), { dependencies: { [PROTOS]: "^1.0.0", [QUERY]: "^2.0.0" } });
     const yalc = installYalcStub(h.dir, { stdout: "Package @myorg/protos@1.4.2 added ==> ." });
@@ -536,8 +536,8 @@ describe("protos:link", () => {
     expect(result.ok).toBe(true);
     expect(statesByTarget(result)).toEqual({ api: "ok" });
     expect(yalc.args()).toEqual([`add ${PROTOS}`, `add ${QUERY}`]);
-    // Each subapp has its own node_modules and its own .yalc, so the link has to
-    // happen there rather than in the app root.
+    // Each app has its own node_modules and its own .yalc, so the link has to
+    // happen there rather than in the repo root.
     expect(yalc.calls().every((line) => line.startsWith(`${h.file("api")}\t`))).toBe(true);
 
     const log = logsFor(h, "api");
@@ -559,7 +559,7 @@ describe("protos:link", () => {
     expect(yalc.args()).toEqual([`add ${QUERY}`]);
   });
 
-  it("skips a subapp that does not consume the package, and never forks yalc for it", async () => {
+  it("skips an app that does not consume the package, and never forks yalc for it", async () => {
     const h = harness();
     makeConsumer(h.file("api"), { dependencies: { [PROTOS]: "^1.0.0" } });
     makeConsumer(h.file("docs"), { dependencies: { lodash: "^4.0.0" } });

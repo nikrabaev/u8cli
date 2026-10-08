@@ -59,7 +59,7 @@ describe("cold start", () => {
     const pong = await client.request("daemon.ping", {});
 
     expect(pong.pong).toBe(true);
-    expect(pong.protocolVersion).toBe(1);
+    expect(pong.protocolVersion).toBe(2);
     expect(fs.existsSync(ws.paths.socket)).toBe(true);
 
     const pid = daemonPid(ws);
@@ -87,7 +87,7 @@ describe("cold start", () => {
 
   it("reports a startup failure quickly, pointing at the daemon log", async () => {
     // `path` is required, so this workspace cannot normalize.
-    const ws = createWorkspace({ apps: { api: {} } });
+    const ws = createWorkspace({ repos: { api: {} } });
 
     const startedAt = Date.now();
     const failure = await ensureDaemon({ configPath: ws.configPath, timeoutMs: 10_000 }).then(
@@ -226,7 +226,7 @@ describe("idle exit", () => {
   it("stops counting a run that outstays the ceiling", async () => {
     const ws = createWorkspace(
       {
-        apps: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } },
+        repos: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } },
         profiles: { all: { default: true, targets: ["api"] } },
         commands: { wedged: { script: "while true; do sleep 0.1; done" } },
       },
@@ -316,7 +316,7 @@ describe("shutdown", () => {
     // The service records its own pid, so the assertion is about the real child.
     const ws = createWorkspace(
       (dir) => ({
-        apps: { api: { path: "api", scripts: { start: markerService(`${dir}/api.pid`) } } },
+        repos: { api: { path: "api", scripts: { start: markerService(`${dir}/api.pid`) } } },
         profiles: { all: { default: true, targets: ["api"] } },
       }),
       ["api"],
@@ -352,7 +352,7 @@ describe("shutdown", () => {
       {
         // Long enough for the second start to land inside the window.
         limits: { stopTimeout: 2_000 },
-        apps: {
+        repos: {
           api: { path: "api", scripts: { start: STUBBORN_SERVICE } },
           late: { path: "late", scripts: { start: SERVICE_SCRIPT } },
         },
@@ -394,7 +394,7 @@ describe("shutdown", () => {
     const ws = createWorkspace(
       (dir) => ({
         limits: { stopTimeout: 1_000 },
-        apps: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } },
+        repos: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } },
         profiles: { all: { default: true, targets: ["api"] } },
         commands: {
           wedged: {

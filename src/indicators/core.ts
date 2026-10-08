@@ -1,12 +1,14 @@
 /**
- * The `app@` namespace — the only indicators every workspace has.
+ * The `app@` and `repo@` namespaces — the only indicators every workspace has.
  *
- * Each one is registered at **both** scopes: the app header row and the subapp
- * row are written with the same tokens (`{app@name}`, `{app@status}`), and the
- * registry disambiguates by owner. They read injected state and never shell out,
- * because `refresh()` re-runs them on every service transition.
+ * One namespace per scope: an app row is written with `{app@name}` /
+ * `{app@status}` and the repo header row with `{repo@name}` / `{repo@status}`,
+ * so a token says which level it reads instead of leaving the row to decide.
+ * They read injected state and never shell out, because `refresh()` re-runs
+ * them on every service transition.
  */
 import path from "node:path";
+import { REPO_NAMESPACE } from "../config/types.js";
 import type { IndicatorRegistration } from "../daemon/contracts.js";
 import type { IndicatorTone, ServiceState, ServiceStatus } from "../ipc/protocol.js";
 import type { IndicatorContext, IndicatorResult } from "../plugin/types.js";
@@ -43,14 +45,14 @@ export function statusResult(status: CoreStatus): IndicatorResult {
   return { value: status, display: STATUS_GLYPH, tone: STATUS_TONES[status] };
 }
 
-export function subappStatus(state: ServiceState | undefined): CoreStatus {
+export function appStatus(state: ServiceState | undefined): CoreStatus {
   if (!state) return "stopped";
   return state.status === "running" && state.stale ? "stale" : state.status;
 }
 
 /**
- * An app is as bad as its worst subapp: one crash colours the whole header row
- * red, and "running" is reserved for the case where the entire app is up.
+ * A repo is as bad as its worst app: one crash colours the whole header row
+ * red, and "running" is reserved for the case where the entire repo is up.
  */
 export function aggregateStatus(states: readonly ServiceState[]): CoreStatus {
   if (states.length === 0) return "stopped";
@@ -80,78 +82,78 @@ export function formatUptime(ms: number): string {
  * needs a clock of its own.
  */
 export function coreIndicators(deps: CoreIndicatorDeps): IndicatorRegistration[] {
-  const subappState = (ctx: IndicatorContext): ServiceState | undefined =>
+  const appState = (ctx: IndicatorContext): ServiceState | undefined =>
     ctx.service ?? (ctx.target ? deps.services.state(ctx.target.id) : undefined);
 
   return [
-    // --- subapp scope: the child row ---------------------------------------
+    // --- app scope: the child row ---------------------------------------
     reg("name", {
-      scope: "subapp",
-      description: "Subapp name",
+      scope: "app",
+      description: "App name",
       update: { mode: "static" },
       value: (ctx) => ctx.target?.name ?? "",
     }),
     reg("dirname", {
-      scope: "subapp",
-      description: "Basename of the subapp's working directory",
+      scope: "app",
+      description: "Basename of the app's working directory",
       update: { mode: "static" },
       value: (ctx) => path.basename(ctx.cwd),
     }),
     reg("path", {
-      scope: "subapp",
+      scope: "app",
       description: "Absolute working directory",
       update: { mode: "static" },
       value: (ctx) => ctx.cwd,
     }),
     reg("status", {
-      scope: "subapp",
+      scope: "app",
       description: "Service lifecycle state",
       update: { mode: "event" },
-      value: (ctx) => statusResult(subappStatus(subappState(ctx))),
+      value: (ctx) => statusResult(appStatus(appState(ctx))),
     }),
     reg("pid", {
-      scope: "subapp",
+      scope: "app",
       description: "Process id while the service is up",
       update: { mode: "event" },
-      value: (ctx) => pidValue(subappState(ctx)),
+      value: (ctx) => pidValue(appState(ctx)),
     }),
     reg("uptime", {
-      scope: "subapp",
+      scope: "app",
       description: "Time since the current run started",
       update: { mode: "poll", intervalMs: UPTIME_POLL_MS },
-      value: (ctx) => uptimeValue(subappState(ctx)),
+      value: (ctx) => uptimeValue(appState(ctx)),
     }),
     reg("exitcode", {
-      scope: "subapp",
+      scope: "app",
       description: "Exit code of the last finished run",
       update: { mode: "event" },
-      value: (ctx) => exitCodeValue(subappState(ctx)),
+      value: (ctx) => exitCodeValue(appState(ctx)),
     }),
 
-    // --- app scope: the header row -----------------------------------------
-    reg("name", {
-      scope: "app",
-      description: "App name",
+    // --- repo scope: the header row -----------------------------------------
+    repoReg("name", {
+      scope: "repo",
+      description: "Repo name",
       update: { mode: "static" },
-      value: (ctx) => ctx.app.name,
+      value: (ctx) => ctx.repo.name,
     }),
-    reg("dirname", {
-      scope: "app",
-      description: "Basename of the app's repo root",
+    repoReg("dirname", {
+      scope: "repo",
+      description: "Basename of the repo root",
       update: { mode: "static" },
-      value: (ctx) => path.basename(ctx.app.path),
+      value: (ctx) => path.basename(ctx.repo.path),
     }),
-    reg("path", {
-      scope: "app",
+    repoReg("path", {
+      scope: "repo",
       description: "Absolute repo root",
       update: { mode: "static" },
-      value: (ctx) => ctx.app.path,
+      value: (ctx) => ctx.repo.path,
     }),
-    reg("status", {
-      scope: "app",
-      description: "Aggregate state of the app's subapps",
+    repoReg("status", {
+      scope: "repo",
+      description: "Aggregate state of the repo's apps",
       update: { mode: "event" },
-      value: (ctx) => statusResult(aggregateStatus(appStates(deps, ctx.app.name))),
+      value: (ctx) => statusResult(aggregateStatus(repoStates(deps, ctx.repo.name))),
     }),
   ];
 }
@@ -160,12 +162,16 @@ function reg(name: string, def: IndicatorRegistration["def"]): IndicatorRegistra
   return { ns: CORE_NAMESPACE, name, def };
 }
 
-function appStates(deps: CoreIndicatorDeps, appName: string): ServiceState[] {
-  const app = deps.workspace.current().apps.find((a) => a.name === appName);
-  if (!app) return [];
+function repoReg(name: string, def: IndicatorRegistration["def"]): IndicatorRegistration {
+  return { ns: REPO_NAMESPACE, name, def };
+}
+
+function repoStates(deps: CoreIndicatorDeps, repoName: string): ServiceState[] {
+  const repo = deps.workspace.current().repos.find((r) => r.name === repoName);
+  if (!repo) return [];
   const out: ServiceState[] = [];
-  for (const subapp of app.subapps) {
-    const state = deps.services.state(subapp.id);
+  for (const app of repo.apps) {
+    const state = deps.services.state(app.id);
     // A supervisor that has not seen this target yet is "not running", not a crash.
     if (state) out.push(state);
   }

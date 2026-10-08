@@ -62,9 +62,9 @@ describe("header", () => {
 
   it("reports the window only while the list is taller than it", () => {
     const rows = Array.from({ length: 40 }, (_, i) => ({
-      kind: "subapp" as const,
+      kind: "app" as const,
       id: `a.${i}`,
-      appName: "a",
+      repoName: "a",
       text: "",
       targets: [`a.${i}`],
     }));
@@ -85,10 +85,10 @@ describe("banners", () => {
       { plugin: "b", error: "bang" },
       { plugin: "c", error: "crash" },
     ];
-    const lines = banners(state({ configError: "apps.api.path: missing", pluginErrors: failures, connection: "reconnecting" }));
+    const lines = banners(state({ configError: "repos.api.path: missing", pluginErrors: failures, connection: "reconnecting" }));
 
     expect(lines.map((line) => line.text)).toEqual([
-      "config error — running the last-good config: apps.api.path: missing",
+      "config error — running the last-good config: repos.api.path: missing",
       'plugin "a" disabled: boom',
       'plugin "b" disabled: bang',
       "…and 1 more plugin error(s)",

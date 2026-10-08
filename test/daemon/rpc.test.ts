@@ -32,10 +32,10 @@ afterAll(() => {
 /** Ignores SIGTERM, so stopping it takes the whole stop timeout. */
 const STUBBORN_SERVICE = "trap '' TERM; printf 'ready\\n'; while true; do sleep 0.1; done";
 
-/** A workspace with a scriptless app, so `appliesTo` has something to exclude. */
+/** A workspace with a scriptless repo, so `appliesTo` has something to exclude. */
 function mixedConfig(): Record<string, unknown> {
   return twoServiceConfig({
-    apps: {
+    repos: {
       api: { path: "api", scripts: { start: SERVICE_SCRIPT } },
       web: { path: "web", scripts: { start: SERVICE_SCRIPT }, dependsOn: ["api"] },
       docs: { path: "docs" },
@@ -57,23 +57,23 @@ describe("snapshot", () => {
 
     const snapshot = await client.request("client.attach", { clientVersion: "test", interactive: true });
 
-    expect(snapshot.protocolVersion).toBe(1);
+    expect(snapshot.protocolVersion).toBe(2);
     expect(snapshot.workspace.configPath).toBe(ws.configPath);
     expect(snapshot.workspace.id).toBe(ws.paths.id);
-    expect(snapshot.apps.map((a) => a.name)).toEqual(["api", "web", "docs"]);
-    // Every app here is subapp-less, so each renders as one implicit subapp.
-    expect(snapshot.apps.every((a) => a.subapps.length === 1 && a.subapps[0]?.implicit)).toBe(true);
-    expect(snapshot.apps.find((a) => a.name === "web")?.subapps[0]?.dependsOn).toEqual(["api"]);
+    expect(snapshot.repos.map((r) => r.name)).toEqual(["api", "web", "docs"]);
+    // Every repo here is app-less, so each renders as one implicit app.
+    expect(snapshot.repos.every((r) => r.apps.length === 1 && r.apps[0]?.implicit)).toBe(true);
+    expect(snapshot.repos.find((r) => r.name === "web")?.apps[0]?.dependsOn).toEqual(["api"]);
 
     expect(snapshot.activeProfile).toBe("all");
-    expect(snapshot.profiles.find((p) => p.name === "all")?.subappIds).toEqual(["api", "web"]);
+    expect(snapshot.profiles.find((p) => p.name === "all")?.appIds).toEqual(["api", "web"]);
     expect(snapshot.services.map((s) => s.targetId)).toEqual(["api", "web", "docs"]);
     expect(snapshot.services.every((s) => s.status === "stopped")).toBe(true);
     // The git and health built-ins are enabled unless config disables them.
     expect(snapshot.plugins.map((p) => p.name).sort()).toEqual(["git", "health"]);
     expect(snapshot.plugins.every((p) => p.ok)).toBe(true);
     expect(snapshot.configError).toBeUndefined();
-    expect(snapshot.templates.subapp).toContain("{app@status");
+    expect(snapshot.templates.app).toContain("{app@status");
 
     const commands = new Map(snapshot.commands.map((c) => [c.name, c]));
     // `docs` has no start script, so starting does not apply to it — but the
@@ -255,7 +255,7 @@ describe("shutting down", () => {
         // Long enough that the RPCs below land while the first daemon.stop is
         // still waiting out the service it cannot terminate politely.
         limits: { stopTimeout: 2_000 },
-        apps: {
+        repos: {
           api: { path: "api", scripts: { start: STUBBORN_SERVICE } },
           late: { path: "late", scripts: { start: markerService(`${dir}/late.pid`) } },
         },
@@ -312,7 +312,7 @@ describe("reload", () => {
 
     ws.rewrite(
       twoServiceConfig({
-        apps: {
+        repos: {
           api: { path: "api", scripts: { start: `printf 'v2\\n'; ${SERVICE_SCRIPT}` } },
           web: { path: "web", scripts: { start: SERVICE_SCRIPT }, dependsOn: ["api"] },
         },
@@ -326,7 +326,7 @@ describe("reload", () => {
     expect(reloads[0]?.ok).toBe(true);
     expect(reloads[0]?.stale).toEqual(["api"]);
     // The snapshot rides along so a client re-renders from one payload.
-    expect(reloads[0]?.snapshot?.apps.find((a) => a.name === "api")).toBeDefined();
+    expect(reloads[0]?.snapshot?.repos.find((r) => r.name === "api")).toBeDefined();
 
     const snapshot = await client.request("workspace.snapshot", {});
     const api = snapshot.services.find((s) => s.targetId === "api");
@@ -356,13 +356,13 @@ describe("reload", () => {
     );
 
     ws.rewrite({
-      apps: { web: { path: "web", scripts: { start: SERVICE_SCRIPT } } },
+      repos: { web: { path: "web", scripts: { start: SERVICE_SCRIPT } } },
       profiles: { all: { default: true, targets: ["web"] } },
     });
     expect(await client.request("workspace.reload", {})).toEqual({ ok: true });
 
     const snapshot = await client.request("workspace.snapshot", {});
-    expect(snapshot.apps.map((a) => a.name)).toEqual(["web"]);
+    expect(snapshot.repos.map((r) => r.name)).toEqual(["web"]);
     // The process outlived its definition: it is still owned, still reported,
     // and now stale — its logs have to stay reachable.
     const api = snapshot.services.find((s) => s.targetId === "api");
@@ -371,7 +371,7 @@ describe("reload", () => {
     expect((await client.request("logs.read", { targetId: "api", lines: 20 })).lines.length).toBeGreaterThan(0);
 
     // Indicators were re-bound to the new workspace: the owner is gone, so its
-    // cells are gone with it, and nothing renders a row for a vanished app.
+    // cells are gone with it, and nothing renders a row for a vanished repo.
     const owners = new Set(snapshot.indicators.map((i) => i.owner));
     expect(owners.has("web")).toBe(true);
     expect(owners.has("api")).toBe(false);
@@ -417,7 +417,7 @@ describe("reload", () => {
     const run = await client.request("service.start", { targets: ["api"] });
     await client.request("run.await", { runId: run.runId });
 
-    ws.rewrite({ apps: { api: {} } }); // `path` is required
+    ws.rewrite({ repos: { api: {} } }); // `path` is required
 
     const reloaded = await client.request("workspace.reload", {});
     expect(reloaded.ok).toBe(false);
@@ -429,7 +429,7 @@ describe("reload", () => {
     const snapshot = await client.request("workspace.snapshot", {});
     expect(snapshot.configError).toContain("path");
     // Last-good config is still serving, and the service is still supervised.
-    expect(snapshot.apps.map((a) => a.name)).toEqual(["api", "web"]);
+    expect(snapshot.repos.map((r) => r.name)).toEqual(["api", "web"]);
     expect(snapshot.services.find((s) => s.targetId === "api")?.status).not.toBe("stopped");
 
     // A repaired file recovers without a restart.

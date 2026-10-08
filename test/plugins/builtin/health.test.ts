@@ -7,7 +7,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { loadWorkspace, normalizeWorkspace, type RawHealth, type RawWorkspaceConfig } from "../../../src/config/index.js";
-import { findSubapp, type NormalizedWorkspace } from "../../../src/config/types.js";
+import { findApp, type NormalizedWorkspace } from "../../../src/config/types.js";
 import type { WorkspaceHolder } from "../../../src/daemon/contracts.js";
 import type { ServiceStateAccess } from "../../../src/indicators/index.js";
 import type { IndicatorTone, ServiceState } from "../../../src/ipc/protocol.js";
@@ -169,13 +169,13 @@ interface FixtureOptions {
   onDisk?: boolean;
 }
 
-/** One app with an implicit subapp (`api`) rooted at a real temp directory. */
+/** One repo with an implicit app (`api`) rooted at a real temp directory. */
 function makeFixture(opts: FixtureOptions = {}): Fixture {
   const root = opts.root ?? tempRoot();
   const configPath = path.join(root, "u8.jsonc");
   const raw: RawWorkspaceConfig = {
     name: "fixture",
-    apps: {
+    repos: {
       api: {
         path: ".",
         scripts: { start: "sleep 30" },
@@ -190,18 +190,18 @@ function makeFixture(opts: FixtureOptions = {}): Fixture {
 }
 
 function targetOf(ws: NormalizedWorkspace, id: string): TargetInfo {
-  const subapp = findSubapp(ws, id);
-  if (!subapp) throw new Error(`no subapp "${id}"`);
+  const app = findApp(ws, id);
+  if (!app) throw new Error(`no app "${id}"`);
   return {
-    id: subapp.id,
-    appName: subapp.appName,
-    name: subapp.name,
-    implicit: subapp.implicit,
-    cwd: subapp.cwd,
-    scripts: { ...subapp.scripts },
-    env: { ...subapp.env },
-    dependsOn: [...subapp.dependsOn],
-    hasHealth: subapp.health !== undefined,
+    id: app.id,
+    repoName: app.repoName,
+    name: app.name,
+    implicit: app.implicit,
+    cwd: app.cwd,
+    scripts: { ...app.scripts },
+    env: { ...app.env },
+    dependsOn: [...app.dependsOn],
+    hasHealth: app.health !== undefined,
   };
 }
 
@@ -218,8 +218,8 @@ function baseCtx(fx: Fixture): PluginBaseContext {
 function indicatorCtx(fx: Fixture, service?: ServiceState): IndicatorContext {
   return {
     ...baseCtx(fx),
-    scope: "subapp",
-    app: { name: "api", path: fx.root },
+    scope: "app",
+    repo: { name: "api", path: fx.root },
     target: fx.target,
     cwd: fx.target.cwd,
     service,
@@ -236,7 +236,7 @@ function hookCtx(fx: Fixture, command: string, ok = true): HookContext {
     command,
     phase: "post",
     runId: "run-1",
-    app: { name: "api", path: fx.root },
+    repo: { name: "api", path: fx.root },
     target: fx.target,
     cwd: fx.target.cwd,
     result: { ok, exitCode: ok ? 0 : 1, durationMs: 1 },
@@ -302,11 +302,11 @@ function countLines(file: string): number {
 // ---------------------------------------------------------------------------
 
 describe("health plugin definition", () => {
-  it("is a subapp-scoped, event-mode plugin named health", () => {
+  it("is an app-scoped, event-mode plugin named health", () => {
     expect(healthPlugin.name).toBe(PLUGIN_NAME);
     const status = healthPlugin.indicators?.[STATUS_INDICATOR];
     expect(status).toBeDefined();
-    expect(status?.scope).toBe("subapp");
+    expect(status?.scope).toBe("app");
     expect(status?.update).toEqual({ mode: "event" });
     expect(typeof status?.subscribe).toBe("function");
     expect(typeof healthPlugin.readiness).toBe("function");
@@ -503,7 +503,7 @@ describe("http probe edge cases", () => {
 // ---------------------------------------------------------------------------
 
 describe("cmd probes", () => {
-  it("runs in the subapp cwd with its merged env and treats exit 0 as healthy", async () => {
+  it("runs in the app cwd with its merged env and treats exit 0 as healthy", async () => {
     const root = tempRoot();
     const fx = makeFixture({
       root,
@@ -576,7 +576,7 @@ describe("lifecycle", () => {
     expect(sub.last()).toBe("n/a");
   });
 
-  it("reports n/a for a subapp that declares no health check", async () => {
+  it("reports n/a for an app that declares no health check", async () => {
     const fx = makeFixture();
     const sub = await subscribeStatus(
       plugin(fx, { services: fakeServices("api", runningState()) }),

@@ -13,12 +13,12 @@ afterEach(cleanupWorkspaces);
 
 function workspace(): NormalizedWorkspace {
   return loadFixture({
-    apps: {
+    repos: {
       db: { path: ".", scripts: { start: "docker compose up", stop: "docker compose down" } },
       gateway: { path: ".", scripts: { start: "pnpm dev" }, dependsOn: ["db"] },
       platform: {
         path: ".",
-        subapps: {
+        apps: {
           shell: { scripts: { start: "pnpm dev --port 3100" } },
           api: { scripts: { start: "pnpm dev --port 3101" }, dependsOn: ["gateway"] },
         },
@@ -36,7 +36,7 @@ function workspace(): NormalizedWorkspace {
 }
 
 describe("resolveTargetStrings", () => {
-  it("expands apps, keeps subapp ids and preserves order", () => {
+  it("expands repos, keeps app ids and preserves order", () => {
     expect(resolveTargetStrings(workspace(), ["platform", "db"])).toEqual([
       "platform.shell",
       "platform.api",
@@ -91,9 +91,9 @@ describe("commandTargets", () => {
     expect(commandTargets(ws, cmd(ws, "deploy"), ["gateway", "gateway"])).toHaveLength(1);
   });
 
-  it("resolves app:start from each subapp's start script", () => {
+  it("resolves app:start from each app's start script", () => {
     const ws = loadFixture({
-      apps: {
+      repos: {
         db: { path: ".", scripts: { start: "up", stop: "down" } },
         docs: { path: "." },
       },

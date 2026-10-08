@@ -70,17 +70,17 @@ describe("rows", () => {
     const { state } = setup();
 
     expect(state().rows.map((row) => [row.kind, row.id, row.text])).toEqual([
-      // A single-subapp app is one merged row rendered with the subapp template.
-      ["merged", "api", "SUB api stopped"],
-      ["app", "platform", "APP platform"],
-      ["subapp", "platform.web", "SUB web stopped"],
-      ["subapp", "platform.admin", "SUB admin stopped"],
+      // A single-app repo is one merged row rendered with the app template.
+      ["merged", "api", "APP api stopped"],
+      ["repo", "platform", "REPO platform"],
+      ["app", "platform.web", "APP web stopped"],
+      ["app", "platform.admin", "APP admin stopped"],
     ]);
     expect(state().running).toBe(0);
     expect(state().total).toBe(3);
   });
 
-  it("acts on every selected subapp from an app header row", () => {
+  it("acts on every selected app from a repo header row", () => {
     const { state } = setup();
 
     expect(state().rows[0]?.targets).toEqual(["api"]);
@@ -104,7 +104,7 @@ describe("rows", () => {
     client.push("service.changed", { state: serviceState("api", "running") });
     frame();
 
-    expect(state().rows[0]?.text).toBe("SUB api running");
+    expect(state().rows[0]?.text).toBe("APP api running");
     expect(state().running).toBe(1);
   });
 });
@@ -157,7 +157,7 @@ describe("frames", () => {
 
     frame();
     expect(seen).toHaveLength(1);
-    expect(seen[0]?.rows[0]?.text).toBe("SUB api stopped");
+    expect(seen[0]?.rows[0]?.text).toBe("APP api stopped");
   });
 
   it("publishes immediately for anything the user pressed", () => {
@@ -182,7 +182,7 @@ describe("lifecycle keys", () => {
     await controller.restart("profile");
 
     expect(client.paramsOf("service.start")).toEqual([{ targets: ["api"] }]);
-    // An app header row acts on every subapp beneath it.
+    // A repo header row acts on every app beneath it.
     expect(client.paramsOf("service.stop")).toEqual([{ targets: ["platform.web", "platform.admin"] }]);
     // No targets means "the active profile" on the wire.
     expect(client.paramsOf("service.restart")).toEqual([{ targets: undefined }]);
@@ -253,7 +253,7 @@ describe("log view", () => {
     expect(client.subscribed.size).toBe(0);
   });
 
-  it("merges an app's subapps and prefixes their lines", async () => {
+  it("merges a repo's apps and prefixes their lines", async () => {
     const { client, controller, state } = setup();
     client.lines.push(logLine("platform.admin", "admin says hi", 2), logLine("platform.web", "web says hi", 1));
 
@@ -328,7 +328,7 @@ describe("log view", () => {
   });
 
   it("says nothing is selected rather than opening an empty view", async () => {
-    const client = createFakeClient(fixtureSnapshot({ apps: [], profiles: [{ name: "all", isDefault: true, subappIds: [] }] }));
+    const client = createFakeClient(fixtureSnapshot({ repos: [], profiles: [{ name: "all", isDefault: true, appIds: [] }] }));
     const { controller, state } = setup({ client });
 
     await controller.openLogs();
@@ -449,9 +449,9 @@ describe("daemon health", () => {
   it("shows a config error banner and clears it on a good reload", () => {
     const { client, frame, state } = setup();
 
-    client.push("config.reloaded", { ok: false, error: "apps.api.path: no such directory", stale: [] });
+    client.push("config.reloaded", { ok: false, error: "repos.api.path: no such directory", stale: [] });
     frame();
-    expect(state().configError).toBe("apps.api.path: no such directory");
+    expect(state().configError).toBe("repos.api.path: no such directory");
     expect(state().notice?.tone).toBe("error");
 
     client.push("config.reloaded", { ok: true, stale: [], snapshot: fixtureSnapshot() });
@@ -566,7 +566,7 @@ describe("teardown", () => {
     // A push after disposal must not reach a listener, or resurrect a frame.
     client.push("indicator.changed", { values: [statusIndicator("api", "running")] });
     expect(clock.pending).toBe(0);
-    expect(state().rows[0]?.text).toBe("SUB api stopped");
+    expect(state().rows[0]?.text).toBe("APP api stopped");
   });
 
   it("issues no subscription for a log view that was still opening", async () => {
@@ -582,7 +582,7 @@ describe("teardown", () => {
       await passthrough(targetId);
     };
 
-    controller.setCursor(1); // an app header row: two targets, two subscriptions
+    controller.setCursor(1); // a repo header row: two targets, two subscriptions
     const opening = controller.openLogs();
     await settle();
     await controller.dispose();

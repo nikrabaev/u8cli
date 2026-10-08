@@ -75,7 +75,7 @@ export function customIndicators(defs: readonly CustomIndicatorDef[]): Indicator
 }
 
 function ownerOf(ctx: IndicatorContext): string {
-  return ctx.target?.id ?? ctx.app.name;
+  return ctx.target?.id ?? ctx.repo.name;
 }
 
 function clamp(value: number, min: number, max: number): number {

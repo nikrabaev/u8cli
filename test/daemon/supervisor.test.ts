@@ -164,7 +164,7 @@ async function harness(build: ConfigBuilder, timing: Partial<SupervisorTiming> =
 }
 
 const oneService: ConfigBuilder = () => ({
-  apps: { svc: { path: ".", scripts: { start: fixture("service.sh") } } },
+  repos: { svc: { path: ".", scripts: { start: fixture("service.sh") } } },
   limits: { stopTimeout: 1_000 },
 });
 
@@ -215,9 +215,9 @@ describe("supervisor lifecycle", () => {
 
   it("reports every target as stopped before anything is started", async () => {
     const h = await harness(() => ({
-      apps: {
+      repos: {
         one: { path: ".", scripts: { start: fixture("service.sh") } },
-        two: { path: ".", subapps: { a: {}, b: {} } },
+        two: { path: ".", apps: { a: {}, b: {} } },
       },
     }));
 
@@ -251,9 +251,9 @@ describe("supervisor lifecycle", () => {
     expect(h.statuses("svc")).toEqual(["starting", "running", "stopping", "stopped", "starting"]);
   });
 
-  it("gives the child the daemon env merged with the subapp env, in the subapp cwd", async () => {
+  it("gives the child the daemon env merged with the app env, in the app cwd", async () => {
     const h = await harness(() => ({
-      apps: {
+      repos: {
         envy: {
           path: ".",
           env: { U8_FROM_CONFIG: "yes" },
@@ -272,7 +272,7 @@ describe("supervisor lifecycle", () => {
   });
 
   it("throws PROCESS_FAILED for a target with no start script", async () => {
-    const h = await harness(() => ({ apps: { nostart: { path: "." } } }));
+    const h = await harness(() => ({ repos: { nostart: { path: "." } } }));
 
     const err = await h.sup.start("nostart").catch((e: unknown) => e);
 
@@ -291,7 +291,7 @@ describe("supervisor lifecycle", () => {
     // Both create tracking entries: `start` before it validates the target,
     // `stop` because it accepts any id by design.
     await h.sup.start("ghost").catch(() => undefined);
-    await h.sup.stop("typo.subapp");
+    await h.sup.stop("typo.app");
 
     expect(h.sup.states().map((s) => s.targetId)).toEqual(["svc"]);
   });
@@ -300,7 +300,7 @@ describe("supervisor lifecycle", () => {
     const h = await harness(oneService);
     await startAndWaitRunning(h, "svc");
 
-    await h.reload(() => ({ apps: { other: { path: ".", scripts: { start: fixture("service.sh") } } } }));
+    await h.reload(() => ({ repos: { other: { path: ".", scripts: { start: fixture("service.sh") } } } }));
 
     expect(h.sup.states().map((s) => [s.targetId, s.status])).toEqual([
       ["other", "stopped"],
@@ -321,7 +321,7 @@ describe("supervisor lifecycle", () => {
 describe("waitForSettled", () => {
   it("resolves as crashed for a process that dies inside the grace", async () => {
     const h = await harness(
-      () => ({ apps: { boom: { path: ".", scripts: { start: fixture("crash-now.sh") } } } }),
+      () => ({ repos: { boom: { path: ".", scripts: { start: fixture("crash-now.sh") } } } }),
       crashTiming(),
     );
 
@@ -371,7 +371,7 @@ describe("waitForSettled", () => {
 describe("crash handling", () => {
   it("reports a crash inside the start grace, never passing through running", async () => {
     const h = await harness(
-      () => ({ apps: { boom: { path: ".", scripts: { start: fixture("crash-now.sh") } } } }),
+      () => ({ repos: { boom: { path: ".", scripts: { start: fixture("crash-now.sh") } } } }),
       crashTiming(),
     );
 
@@ -395,7 +395,7 @@ describe("crash handling", () => {
   it("detects a crash after the process reached running, and restarts it", async () => {
     const h = await harness(
       (dir) => ({
-        apps: {
+        repos: {
           later: {
             path: ".",
             restart: "on-crash",
@@ -426,7 +426,7 @@ describe("crash handling", () => {
   it("restarts on-crash with backoff and resets the counter after a healthy run", async () => {
     const h = await harness(
       (dir) => ({
-        apps: {
+        repos: {
           flappy: {
             path: ".",
             restart: "on-crash",
@@ -458,7 +458,7 @@ describe("crash handling", () => {
 
   it("gives up after the attempt cap and stays crashed", async () => {
     const h = await harness(
-      () => ({ apps: { doomed: { path: ".", restart: "on-crash", scripts: { start: fixture("crash-now.sh") } } } }),
+      () => ({ repos: { doomed: { path: ".", restart: "on-crash", scripts: { start: fixture("crash-now.sh") } } } }),
       crashTiming({ restartBackoffMs: [15], maxRestartAttempts: 3 }),
     );
 
@@ -479,7 +479,7 @@ describe("crash handling", () => {
 
   it("cancels a pending restart when the target is stopped, and holds no ref'd timer", async () => {
     const h = await harness(
-      () => ({ apps: { flaky: { path: ".", restart: "on-crash", scripts: { start: fixture("crash-now.sh") } } } }),
+      () => ({ repos: { flaky: { path: ".", restart: "on-crash", scripts: { start: fixture("crash-now.sh") } } } }),
       crashTiming({ restartBackoffMs: [250] }),
     );
     const baselineTimers = refdTimerCount();
@@ -503,7 +503,7 @@ describe("crash handling", () => {
   it("starting by hand after a give-up resets the attempt counter", async () => {
     const h = await harness(
       (dir) => ({
-        apps: {
+        repos: {
           flappy: {
             path: ".",
             restart: "on-crash",
@@ -527,7 +527,7 @@ describe("crash handling", () => {
 describe("stopping", () => {
   it("runs a custom stop script and still reaps a group it failed to kill", async () => {
     const h = await harness((dir) => ({
-      apps: {
+      repos: {
         svc: {
           path: ".",
           scripts: {
@@ -555,7 +555,7 @@ describe("stopping", () => {
   it("does not auto-restart when the stop script is what killed the process", async () => {
     const h = await harness(
       (dir) => ({
-        apps: {
+        repos: {
           svc: {
             path: ".",
             restart: "on-crash",
@@ -587,7 +587,7 @@ describe("stopping", () => {
 
   it("survives a stop script that fails and still stops the service", async () => {
     const h = await harness(() => ({
-      apps: { svc: { path: ".", scripts: { start: fixture("service.sh"), stop: "exit 9" } } },
+      repos: { svc: { path: ".", scripts: { start: fixture("service.sh"), stop: "exit 9" } } },
     }));
     const pid = await startAndWaitRunning(h, "svc");
 
@@ -614,7 +614,7 @@ describe("stopping", () => {
 
   it("stopAll brings every started service down", async () => {
     const h = await harness(() => ({
-      apps: {
+      repos: {
         a: { path: ".", scripts: { start: fixture("service.sh") } },
         b: { path: ".", scripts: { start: fixture("service.sh") } },
         c: { path: ".", scripts: { start: fixture("service.sh") } },
@@ -661,7 +661,7 @@ describe("logs", () => {
 
   it("rotates the service log using the workspace's own limits", async () => {
     const h = await harness(() => ({
-      apps: {
+      repos: {
         chatty: {
           path: ".",
           scripts: { start: `i=0; while [ $i -lt 40 ]; do printf 'x-%s\\n' "$i"; i=$((i+1)); done; sleep 5` },
@@ -717,7 +717,7 @@ describe("service commands", () => {
 
   /** `svc` with an ordinary start script plus a `kind: "service"` command. */
   const withDebugCommand = (script: (dir: string) => string): ConfigBuilder => (dir) => ({
-    apps: { svc: { path: ".", scripts: { start: marker(dir, "start") } } },
+    repos: { svc: { path: ".", scripts: { start: marker(dir, "start") } } },
     commands: { "start.debug": { kind: "service", script: script(dir) } },
     limits: { stopTimeout: 1_000 },
   });
@@ -758,7 +758,7 @@ describe("service commands", () => {
     const count = (dir: string): string => path.join(dir, "count");
     const h = await harness(
       (dir) => ({
-        apps: { svc: { path: ".", restart: "on-crash", scripts: { start: marker(dir, "start") } } },
+        repos: { svc: { path: ".", restart: "on-crash", scripts: { start: marker(dir, "start") } } },
         commands: {
           "start.debug": { kind: "service", script: fixture("crash-until.sh", count(dir), "1") },
         },
@@ -804,7 +804,7 @@ describe("service commands", () => {
    */
   it("does not replace a process a reload only made stale", async () => {
     const plain = (arg: string): ConfigBuilder => () => ({
-      apps: { svc: { path: ".", scripts: { start: fixture("service.sh", arg) } } },
+      repos: { svc: { path: ".", scripts: { start: fixture("service.sh", arg) } } },
       limits: { stopTimeout: 1_000 },
     });
     const h = await harness(plain("first"));
@@ -823,7 +823,7 @@ describe("service commands", () => {
 
     // The same holds for a command-started process whose command was edited.
     const debugged = await harness(() => ({
-      apps: { svc: { path: ".", scripts: { start: fixture("service.sh", "plain") } } },
+      repos: { svc: { path: ".", scripts: { start: fixture("service.sh", "plain") } } },
       commands: { "start.debug": { kind: "service", script: fixture("service.sh", "debug") } },
       limits: { stopTimeout: 1_000 },
     }));
@@ -834,7 +834,7 @@ describe("service commands", () => {
     await waitFor(() => debugged.sup.state("svc").status === "running", "the debug process");
 
     await debugged.reload(() => ({
-      apps: { svc: { path: ".", scripts: { start: fixture("service.sh", "plain") } } },
+      repos: { svc: { path: ".", scripts: { start: fixture("service.sh", "plain") } } },
       commands: { "start.debug": { kind: "service", script: fixture("service.sh", "edited-debug") } },
       limits: { stopTimeout: 1_000 },
     }));
@@ -860,7 +860,7 @@ describe("staleness", () => {
     expect(h.sup.state("svc").stale).toBe(false);
 
     await h.reload(() => ({
-      apps: { svc: { path: ".", scripts: { start: fixture("service.sh", "now-different") } } },
+      repos: { svc: { path: ".", scripts: { start: fixture("service.sh", "now-different") } } },
       limits: { stopTimeout: 1_000 },
     }));
 
@@ -885,7 +885,7 @@ describe("staleness", () => {
    */
   it("measures the script it actually spawned, not the one the config reads now", async () => {
     const build = (debugArg: string): ConfigBuilder => () => ({
-      apps: { svc: { path: ".", scripts: { start: fixture("service.sh", "plain") } } },
+      repos: { svc: { path: ".", scripts: { start: fixture("service.sh", "plain") } } },
       commands: { "start.debug": { kind: "service", script: fixture("service.sh", debugArg) } },
       limits: { stopTimeout: 1_000 },
     });
@@ -901,7 +901,7 @@ describe("staleness", () => {
   it("measures a command-started process against that command, not the start script", async () => {
     const debug = (arg: string): string => fixture("service.sh", arg);
     const build = (start: string, debugArg: string): ConfigBuilder => () => ({
-      apps: { svc: { path: ".", scripts: { start: fixture("service.sh", start) } } },
+      repos: { svc: { path: ".", scripts: { start: fixture("service.sh", start) } } },
       commands: { "start.debug": { kind: "service", script: debug(debugArg) } },
       limits: { stopTimeout: 1_000 },
     });
@@ -926,7 +926,7 @@ describe("staleness", () => {
 
     // So is losing the command altogether.
     await h.reload(() => ({
-      apps: { svc: { path: ".", scripts: { start: debug("debug") } } },
+      repos: { svc: { path: ".", scripts: { start: debug("debug") } } },
     }));
     h.sup.markStale(["svc"]);
     expect(h.sup.state("svc").stale).toBe(true);
@@ -936,7 +936,7 @@ describe("staleness", () => {
     const h = await harness(oneService);
     await startAndWaitRunning(h, "svc");
     await h.reload(() => ({
-      apps: { svc: { path: ".", scripts: { start: fixture("service.sh", "now-different") } } },
+      repos: { svc: { path: ".", scripts: { start: fixture("service.sh", "now-different") } } },
     }));
     h.sup.markStale(["svc"]);
     expect(h.sup.state("svc").stale).toBe(true);

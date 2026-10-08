@@ -40,7 +40,7 @@ import type {
   PluginHost,
   WorkspaceHolder,
 } from "../daemon/contracts.js";
-import { toAppInfo, toTargetInfo } from "../engine/index.js";
+import { toRepoInfo, toTargetInfo } from "../engine/index.js";
 import type { ServiceState, SnapshotPlugin } from "../ipc/protocol.js";
 import type {
   HookDef,
@@ -205,8 +205,8 @@ export function createPluginHost(deps: PluginHostDeps): LoadablePluginHost {
         // still reach its own members through `this`.
         await def.setup.call(def, {
           ...pluginBaseContext({ workspace: ws, logger, store, cwd: ws.rootDir, signal: abort.signal }),
-          targets: ws.subapps.map(toTargetInfo),
-          apps: ws.apps.map(toAppInfo),
+          targets: ws.apps.map(toTargetInfo),
+          repos: ws.repos.map(toRepoInfo),
         });
       } catch (err) {
         // Re-thrown as a PLUGIN_LOAD so the record can still be attributed to

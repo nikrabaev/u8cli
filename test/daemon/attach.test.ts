@@ -30,7 +30,7 @@ afterAll(() => {
 
 function oneService(): Record<string, unknown> {
   return {
-    apps: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } },
+    repos: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } },
     profiles: { all: { default: true, targets: ["api"] } },
   };
 }

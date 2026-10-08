@@ -2,6 +2,24 @@
 
 Notable changes to u8cli. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [semver](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The two levels of the workspace model are renamed.** What was an *app* (a checkout on disk) is now a **repo**, and what was a *subapp* (the runnable unit) is now an **app** — the word the core commands (`app:start`) and indicators (`{app@status}`) already used for it. Target ids (`api`, `platform.shell`), the state directory and the log paths are unchanged. Everything that carried the old words moved with them:
+
+  | Before | After |
+  | --- | --- |
+  | `apps` / `subapps` in `u8.jsonc` | `repos` / `apps` |
+  | `templates.app` / `templates.subapp` | `templates.repo` / `templates.app` |
+  | `scope: "app"` / `"subapp"` on a config or plugin indicator | `"repo"` / `"app"` |
+  | `{app@name}`, `{app@dirname}`, `{app@path}`, `{app@status}` on a header row | `{repo@name}`, `{repo@dirname}`, `{repo@path}`, `{repo@status}` |
+  | `groupBy: "app"` on a plugin command | `groupBy: "repo"` |
+  | `ctx.app`, `ctx.apps`, `AppInfo`, `TargetInfo.appName` in the plugin API | `ctx.repo`, `ctx.repos`, `RepoInfo`, `TargetInfo.repoName` |
+  | `apps[].subapps[]` and `appName` in `u8 status --json` | `repos[].apps[]` and `repoName`, under `schemaVersion: 2` |
+
+  A config still written with the old keys is rejected with one message naming every rename, and an `{app@…}` token left on a repo header row is reported as a config warning. `repo` joins `app` and `x` as a name a plugin may not take. The wire protocol is now v2, so a daemon left running by an older build has to be stopped with `u8 daemon stop` before the new client will talk to it.
+
 ## [0.1.0-rc.1] — 2026-08-14
 
 First release candidate. Everything in the v1 design is implemented and covered by 785 tests.

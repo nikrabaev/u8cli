@@ -12,6 +12,6 @@ import { writeLine } from "./io.js";
 export function initCommand(ctx: CliContext): number {
   const written = writeSkeletonConfig(ctx.cwd);
   writeLine(ctx.io.stdout, `created ${path.relative(ctx.io.cwd, written) || written}`);
-  writeLine(ctx.io.stdout, ctx.style.dim("edit the apps you want u8 to run, then: u8 status"));
+  writeLine(ctx.io.stdout, ctx.style.dim("edit the repos you want u8 to manage, then: u8 status"));
   return 0;
 }

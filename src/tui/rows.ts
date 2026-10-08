@@ -5,31 +5,31 @@
  * SPEC §4's rules are duplicated from `cli/status.ts` rather than imported:
  * that module builds strings for a pipe, this one builds selectable rows for a
  * cursor, and the shared part is a dozen lines. What must NOT diverge is the
- * layout itself — app header row, subapp rows beneath, a single-subapp app
- * merged into one row rendered with the subapp template, and the app-scope
- * fallback that lets a subapp row mention `{git@branch}`.
+ * layout itself — repo header row, app rows beneath, a single-app repo
+ * merged into one row rendered with the app template, and the repo-scope
+ * fallback that lets an app row mention `{git@branch}`.
  */
 import type { TargetId, Templates } from "../config/types.js";
-import type { IndicatorValue, SnapshotApp, SnapshotProfile, SnapshotSubapp } from "../ipc/protocol.js";
+import type { IndicatorValue, SnapshotApp, SnapshotProfile, SnapshotRepo } from "../ipc/protocol.js";
 import { renderTemplate, type IndicatorLookup } from "../template/index.js";
 
 /** One selectable line. `id` is stable, so the cursor survives a rebuild. */
 export interface DashboardRow {
-  kind: "app" | "subapp" | "merged";
-  /** App name for `app` rows, target id otherwise. */
+  kind: "repo" | "app" | "merged";
+  /** Repo name for `repo` rows, target id otherwise. */
   id: string;
-  appName: string;
+  repoName: string;
   /** Rendered row text; carries ANSI when `color` is on. */
   text: string;
   /**
-   * Subapps a lifecycle key on this row acts on — its own for a subapp row,
-   * every selected child for an app header row.
+   * Apps a lifecycle key on this row acts on — its own for an app row,
+   * every selected child for a repo header row.
    */
   targets: TargetId[];
 }
 
 export interface RowInput {
-  apps: readonly SnapshotApp[];
+  repos: readonly SnapshotRepo[];
   templates: Templates;
   profile: SnapshotProfile;
   indicators: readonly IndicatorValue[];
@@ -38,24 +38,24 @@ export interface RowInput {
 
 export function buildRows(input: RowInput): DashboardRow[] {
   const values = indexIndicators(input.indicators);
-  const selected = new Set(input.profile.subappIds);
+  const selected = new Set(input.profile.appIds);
   const opts = { color: input.color };
   const rows: DashboardRow[] = [];
 
-  for (const app of input.apps) {
-    const subapps = app.subapps.filter((s) => selected.has(s.id));
-    if (subapps.length === 0) continue;
+  for (const repo of input.repos) {
+    const apps = repo.apps.filter((a) => selected.has(a.id));
+    if (apps.length === 0) continue;
 
-    // SPEC §4: an app with one subapp is one row, not a header plus a child.
-    const only = app.subapps.length === 1 ? subapps[0] : undefined;
+    // SPEC §4: a repo with one app is one row, not a header plus a child.
+    const only = repo.apps.length === 1 ? apps[0] : undefined;
     if (only !== undefined) {
       rows.push({
         kind: "merged",
         id: only.id,
-        appName: app.name,
+        repoName: repo.name,
         text: renderTemplate(
-          only.template ?? app.template ?? input.templates.subapp,
-          subappLookup(values, only, input.color),
+          only.template ?? repo.template ?? input.templates.app,
+          appLookup(values, only, input.color),
           opts,
         ).trimEnd(),
         targets: [only.id],
@@ -64,27 +64,27 @@ export function buildRows(input: RowInput): DashboardRow[] {
     }
 
     rows.push({
-      kind: "app",
-      id: app.name,
-      appName: app.name,
+      kind: "repo",
+      id: repo.name,
+      repoName: repo.name,
       text: renderTemplate(
-        app.template ?? input.templates.app,
-        appLookup(values, app, input.color),
+        repo.template ?? input.templates.repo,
+        repoLookup(values, repo, input.color),
         opts,
       ).trimEnd(),
-      targets: subapps.map((s) => s.id),
+      targets: apps.map((a) => a.id),
     });
-    for (const subapp of subapps) {
+    for (const app of apps) {
       rows.push({
-        kind: "subapp",
-        id: subapp.id,
-        appName: app.name,
+        kind: "app",
+        id: app.id,
+        repoName: repo.name,
         text: renderTemplate(
-          subapp.template ?? input.templates.subapp,
-          subappLookup(values, subapp, input.color),
+          app.template ?? input.templates.app,
+          appLookup(values, app, input.color),
           opts,
         ).trimEnd(),
-        targets: [subapp.id],
+        targets: [app.id],
       });
     }
   }
@@ -97,7 +97,7 @@ export function indicatorKey(value: IndicatorValue): string {
 }
 
 interface IndicatorIndex {
-  find(scope: "app" | "subapp", owner: string, ns: string, name: string): IndicatorValue | undefined;
+  find(scope: "repo" | "app", owner: string, ns: string, name: string): IndicatorValue | undefined;
 }
 
 function indexIndicators(values: readonly IndicatorValue[]): IndicatorIndex {
@@ -107,17 +107,17 @@ function indexIndicators(values: readonly IndicatorValue[]): IndicatorIndex {
 }
 
 /**
- * Lookup for a subapp row, falling back to the app's cells — without it the
- * merged row of a one-app workspace would render `{git@branch!}` in red, since
- * git is app-scoped and the merged row uses the *subapp* template.
+ * Lookup for an app row, falling back to the repo's cells — without it the
+ * merged row of a one-repo workspace would render `{git@branch!}` in red, since
+ * git is repo-scoped and the merged row uses the *app* template.
  */
-function subappLookup(values: IndicatorIndex, subapp: SnapshotSubapp, color: boolean): IndicatorLookup {
+function appLookup(values: IndicatorIndex, app: SnapshotApp, color: boolean): IndicatorLookup {
   return (ns, name) =>
-    legible(values.find("subapp", subapp.id, ns, name) ?? values.find("app", subapp.appName, ns, name), color);
+    legible(values.find("app", app.id, ns, name) ?? values.find("repo", app.repoName, ns, name), color);
 }
 
-function appLookup(values: IndicatorIndex, app: SnapshotApp, color: boolean): IndicatorLookup {
-  return (ns, name) => legible(values.find("app", app.name, ns, name), color);
+function repoLookup(values: IndicatorIndex, repo: SnapshotRepo, color: boolean): IndicatorLookup {
+  return (ns, name) => legible(values.find("repo", repo.name, ns, name), color);
 }
 
 /**

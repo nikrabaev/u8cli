@@ -1,16 +1,16 @@
 /**
  * The built-in `git` plugin — SPEC §7.1.
  *
- * Four app-scoped indicators (`branch`, `dirty`, `ahead`, `behind`) and two
- * read-only chores (`git:fetch`, `git:pull`). A repo is an app-level concept:
- * several subapps of a monorepo share one checkout, so everything here is keyed
- * by app, never by target.
+ * Four repo-scoped indicators (`branch`, `dirty`, `ahead`, `behind`) and two
+ * read-only chores (`git:fetch`, `git:pull`). A checkout is a repo-level concept:
+ * several apps of a monorepo share one, so everything here is keyed by repo,
+ * never by target.
  *
  * Three decisions shape the file:
  *
- *  - **One `git status` per app per tick.** A dashboard row asks for four
- *    values; a provider per value would fork four gits per app on every update.
- *    Instead one {@link RepoMonitor} per app runs a single
+ *  - **One `git status` per repo per tick.** A dashboard row asks for four
+ *    values; a provider per value would fork four gits per repo on every update.
+ *    Instead one {@link RepoMonitor} per repo runs a single
  *    `git status --porcelain=v2 --branch`, parses it once, and feeds all four
  *    cells from that parse. The monitor is refcounted in the plugin's `store`,
  *    which the indicator registry shares across every provider in the namespace.
@@ -19,9 +19,9 @@
  *    a slow poll catches everything watches miss — editing a tracked file
  *    changes nothing inside `.git`, and fs.watch itself is unreliable across
  *    platforms, editors and network filesystems.
- *  - **A missing repo is a blank cell, never an error.** Non-git app dirs, a
- *    repo deleted underneath the daemon, and a machine with no `git` at all all
- *    resolve to empty values with at most one log line each.
+ *  - **A missing checkout is a blank cell, never an error.** Repo dirs that are
+ *    not under git, a checkout deleted underneath the daemon, and a machine with
+ *    no `git` at all all resolve to empty values with at most one log line each.
  */
 import { readFileSync, statSync, watch, type FSWatcher, type Stats } from "node:fs";
 import path from "node:path";
@@ -166,10 +166,10 @@ function shortSha(oid: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Repo discovery
+// Checkout discovery
 // ---------------------------------------------------------------------------
 
-export interface RepoLocation {
+export interface CheckoutLocation {
   /** Directory holding the `.git` entry. */
   root: string;
   /** The real git directory: `.git` itself, or what a `.git` *file* points at. */
@@ -177,14 +177,14 @@ export interface RepoLocation {
 }
 
 /**
- * Finds the repo governing `from`, walking upward the way git does — an app
- * pointing at `repo/services/api` is still in a repo.
+ * Finds the checkout governing `from`, walking upward the way git does — a repo
+ * entry pointing at `checkout/services/api` is still inside one.
  *
  * Synchronous on purpose: it is a handful of `stat` calls on a path the daemon
  * is about to shell out to anyway, and making it async would spread `await`
  * through `appliesTo`, which the plugin API defines as synchronous.
  */
-export function findRepo(from: string): RepoLocation | undefined {
+export function findCheckout(from: string): CheckoutLocation | undefined {
   let dir = path.resolve(from);
   for (;;) {
     const gitDir = resolveGitDir(path.join(dir, ".git"));
@@ -227,7 +227,7 @@ function statOf(target: string): Stats | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// The per-app monitor
+// The per-repo monitor
 // ---------------------------------------------------------------------------
 
 type Emit = (value: IndicatorResult) => void;
@@ -257,7 +257,7 @@ class RepoMonitor {
   private disposed = false;
   /**
    * Latched when the `git` binary turns out to be missing. Per monitor rather
-   * than per process: one warning per app is a diagnosis, and re-latching
+   * than per process: one warning per repo is a diagnosis, and re-latching
    * costs nothing, while a module-level flag would leak between workspaces.
    */
   private gitMissing = false;
@@ -394,7 +394,7 @@ class RepoMonitor {
     }
     this.running = true;
     try {
-      const repo = findRepo(this.cwd);
+      const repo = findCheckout(this.cwd);
       this.syncWatch(repo?.gitDir);
       const next = repo === undefined ? EMPTY : await this.read();
       if (this.disposed) return;
@@ -419,7 +419,7 @@ class RepoMonitor {
         signal: this.abort.signal,
       });
     } catch (err) {
-      // `exec` only rejects when the shell itself cannot start — the app
+      // `exec` only rejects when the shell itself cannot start — the repo
       // directory was deleted while we were pointed at it.
       this.logger.debug(`git status could not run for ${this.label}: ${errorMessage(err)}`);
       return EMPTY;
@@ -429,7 +429,7 @@ class RepoMonitor {
 
     if (isMissingBinary(res)) {
       // Disable, once. A machine without git would otherwise log every tick,
-      // forever, for every app.
+      // forever, for every repo.
       this.gitMissing = true;
       this.stopWatching();
       this.clearPoll();
@@ -497,14 +497,14 @@ function cellOf(field: Field, status: RepoStatus): IndicatorResult {
 /**
  * The monitor lives in the plugin's `store`, which the indicator registry shares
  * across every provider in the namespace — that sharing is what makes four
- * indicators cost one `git status`. Keyed by app path, so two apps in the same
+ * indicators cost one `git status`. Keyed by repo path, so two repos in the same
  * checkout still get independent lifetimes.
  */
 function monitorFor(ctx: IndicatorContext): RepoMonitor {
   const key = `repo:${ctx.cwd}`;
   const existing = ctx.store.get(key);
   if (existing instanceof RepoMonitor) return existing;
-  const monitor = new RepoMonitor(ctx.cwd, ctx.app.name, ctx.logger, () => {
+  const monitor = new RepoMonitor(ctx.cwd, ctx.repo.name, ctx.logger, () => {
     ctx.store.delete(key);
   });
   ctx.store.set(key, monitor);
@@ -513,7 +513,7 @@ function monitorFor(ctx: IndicatorContext): RepoMonitor {
 
 function indicator(field: Field, description: string): IndicatorDef {
   return {
-    scope: "app",
+    scope: "repo",
     description,
     update: { mode: "event" },
     subscribe(ctx, emit) {
@@ -527,16 +527,16 @@ function indicator(field: Field, description: string): IndicatorDef {
 // ---------------------------------------------------------------------------
 
 /**
- * Only apps that are actually checkouts. `appliesTo` sees a subapp, so the walk
- * upward from its cwd is what discovers the app's repo — a monorepo subapp sits
- * several directories below the `.git` it belongs to.
+ * Only targets that sit inside a checkout. `appliesTo` sees an app, so the walk
+ * upward from its cwd is what discovers it — a monorepo app sits several
+ * directories below the `.git` it belongs to.
  */
-function inRepo(target: TargetInfo): boolean {
-  return findRepo(target.cwd) !== undefined;
+function inCheckout(target: TargetInfo): boolean {
+  return findCheckout(target.cwd) !== undefined;
 }
 
 /**
- * Runs one git subcommand in the app root and mirrors its output into the run
+ * Runs one git subcommand in the repo root and mirrors its output into the run
  * log. `ctx.exec` buffers rather than streams — the SDK has no streaming exec —
  * so the lines land when the command finishes; git writes its progress to
  * stderr in bursts anyway.
@@ -566,7 +566,7 @@ async function assertPullable(ctx: CommandContext): Promise<void> {
   if (trackedChanges === 0) return;
   const plural = trackedChanges === 1 ? "" : "s";
   throw new Error(
-    `refusing to pull ${ctx.app.name}: ${trackedChanges} uncommitted change${plural} — commit or stash first`,
+    `refusing to pull ${ctx.repo.name}: ${trackedChanges} uncommitted change${plural} — commit or stash first`,
   );
 }
 
@@ -630,17 +630,17 @@ export default definePlugin({
     fetch: {
       kind: "task",
       description: "Fetch every remote and prune deleted branches",
-      // Once per app: the repo is shared, and fetching it four times because
-      // four subapps were selected is exactly what `groupBy` exists to avoid.
-      groupBy: "app",
-      appliesTo: inRepo,
+      // Once per repo: the checkout is shared, and fetching it four times because
+      // four apps were selected is exactly what `groupBy` exists to avoid.
+      groupBy: "repo",
+      appliesTo: inCheckout,
       run: (ctx) => runGit(ctx, "fetch --all --prune"),
     },
     pull: {
       kind: "task",
       description: "Fast-forward the current branch (never merges)",
-      groupBy: "app",
-      appliesTo: inRepo,
+      groupBy: "repo",
+      appliesTo: inCheckout,
       async run(ctx) {
         await assertPullable(ctx);
         await runGit(ctx, "pull --ff-only");

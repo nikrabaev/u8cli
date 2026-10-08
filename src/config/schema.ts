@@ -12,7 +12,7 @@
 import { z } from "zod";
 
 /**
- * App and subapp names become segments of a target id (`app.subapp`), so a name
+ * Repo and app names become segments of a target id (`repo.app`), so a name
  * containing `.` would make `"a.b"` ambiguous. `:` and `@` are namespace
  * separators for commands and indicators.
  */
@@ -60,7 +60,7 @@ const envMap = z.record(z.string().min(1), z.string());
 
 const scriptMap = z.record(z.string().min(1), z.string());
 
-/** An app name or `app.subapp`; resolved against the document in `normalize.ts`. */
+/** A repo name or `repo.app`; resolved against the document in `normalize.ts`. */
 const targetRef = z.string().min(1);
 
 export const healthSchema = z
@@ -79,7 +79,7 @@ export const healthSchema = z
 
 export const restartSchema = z.enum(["no", "on-crash"]);
 
-/** Fields an app shares with its subapps: on an app they are per-subapp defaults. */
+/** Fields a repo shares with its apps: on a repo they are per-app defaults. */
 const runnableFields = {
   template: z.string().optional(),
   env: envMap.optional(),
@@ -91,17 +91,17 @@ const runnableFields = {
   stopTimeout: posInt.optional(),
 };
 
-export const subappSchema = z.strictObject({
-  /** Relative to the app's `path`; defaults to the app directory. */
+export const appSchema = z.strictObject({
+  /** Relative to the repo's `path`; defaults to the repo directory. */
   path: z.string().min(1).optional(),
   ...runnableFields,
 });
 
-export const appSchema = z.strictObject({
+export const repoSchema = z.strictObject({
   /** Absolute, `~`-prefixed, or relative to the workspace root. */
   path: z.string().min(1),
   ...runnableFields,
-  subapps: z.record(nameKey("subapp"), subappSchema).optional(),
+  apps: z.record(nameKey("app"), appSchema).optional(),
 });
 
 /**
@@ -141,7 +141,7 @@ export const indicatorSchema = z.strictObject({
   /** Runs in the target's cwd; trimmed stdout is the value. */
   cmd: z.string().min(1),
   interval: posInt.optional(),
-  scope: z.enum(["subapp", "app"]).optional(),
+  scope: z.enum(["app", "repo"]).optional(),
 });
 
 /**
@@ -168,7 +168,7 @@ export const pluginSchema = z.union(
 /**
  * Options for the `protos` built-in. Unlike `git` and `health` it is *off* until
  * configured: it has nothing to link until a workspace names the packages its
- * subapps share, which is why enabling it with a bare `true` is rejected in
+ * apps share, which is why enabling it with a bare `true` is rejected in
  * `normalize.ts` with a message that says what is missing.
  */
 export const protosOptionsSchema = z.strictObject({
@@ -227,8 +227,8 @@ export const workspaceConfigSchema = z.strictObject({
   env: envMap.optional(),
   templates: z
     .strictObject({
+      repo: z.string().optional(),
       app: z.string().optional(),
-      subapp: z.string().optional(),
     })
     .optional(),
   /** npm package names or paths relative to the workspace root, with optional options. */
@@ -240,7 +240,7 @@ export const workspaceConfigSchema = z.strictObject({
    * explained rather than surfaced as a pattern mismatch.
    */
   indicators: z.record(z.string().min(1), indicatorSchema).optional(),
-  apps: z.record(nameKey("app"), appSchema),
+  repos: z.record(nameKey("repo"), repoSchema),
   profiles: z.record(nameKey("profile"), profileSchema).optional(),
   commands: z.record(z.string().min(1), commandSchema).optional(),
 });
@@ -249,15 +249,15 @@ export type RawWorkspaceConfig = z.infer<typeof workspaceConfigSchema>;
 export type RawPlugin = z.infer<typeof pluginSchema>;
 export type RawBuiltins = z.infer<typeof builtinsSchema>;
 export type RawProtosOptions = z.infer<typeof protosOptionsSchema>;
+export type RawRepo = z.infer<typeof repoSchema>;
 export type RawApp = z.infer<typeof appSchema>;
-export type RawSubapp = z.infer<typeof subappSchema>;
 export type RawCommand = z.infer<typeof commandSchema>;
 export type RawProfile = z.infer<typeof profileSchema>;
 export type RawHealth = z.infer<typeof healthSchema>;
 export type RawLimits = z.infer<typeof limitsSchema>;
 
-/** Everything an app and a subapp have in common — the inheritance surface. */
-export type RawRunnable = Omit<RawApp, "subapps" | "path"> & { path?: string };
+/** Everything a repo and an app have in common — the inheritance surface. */
+export type RawRunnable = Omit<RawRepo, "apps" | "path"> & { path?: string };
 
 /** JSON Schema for `$schema` editor support; emitted by `scripts/gen-schema.js`. */
 export const jsonSchema = () => z.toJSONSchema(workspaceConfigSchema);

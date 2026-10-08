@@ -10,11 +10,11 @@ rejected everywhere, so a typo is an error at load rather than a setting that si
 ```jsonc
 {
   "$schema": "https://unpkg.com/u8cli/schema.json",
-  "apps": { "web": { "path": "~/Work/web", "scripts": { "start": "pnpm dev" } } }
+  "repos": { "web": { "path": "~/Work/web", "scripts": { "start": "pnpm dev" } } }
 }
 ```
 
-`apps` is the only required key. Everything else has a default.
+`repos` is the only required key. Everything else has a default.
 
 ---
 
@@ -25,80 +25,80 @@ rejected everywhere, so a typo is an error at load rather than a setting that si
 | `$schema` | string | — | Editor completion/validation. The package ships `schema.json`. |
 | `name` | string | basename of the workspace directory | Workspace label in the dashboard header and `u8 status`. |
 | `env` | `{ [k: string]: string }` | `{}` | Environment for every spawned process; the bottom layer of the merge. |
-| `templates` | object | see [Templates](#templates) | Row templates for app and subapp rows. |
+| `templates` | object | see [Templates](#templates) | Row templates for repo and app rows. |
 | `plugins` | `(string \| { spec, options })[]` | `[]` | npm package names, or paths (`./`, `/`, `~`) to local files — each optionally with options. |
 | `builtins` | object | `git` and `health` on, `protos` off | Switches a built-in off, or configures one. |
 | `limits` | object | see [Limits](#limits) | Log rotation, timeouts, concurrency, daemon idle exit. |
 | `indicators` | `{ [name: string]: IndicatorDef }` | `{}` | Config-defined `{x@…}` indicators. |
-| `apps` | `{ [name: string]: App }` | **required** | The repos u8 manages. |
+| `repos` | `{ [name: string]: Repo }` | **required** | The repos u8 manages. |
 | `profiles` | `{ [name: string]: Profile }` | a synthesized `all` | Named selections of targets. |
 | `commands` | `{ [name: string]: Command }` | `{}` | Extra commands, plus hooks. |
 
-App, subapp and profile names must match `^[A-Za-z0-9][A-Za-z0-9_-]*$` — no `.`, `:` or `@`, because
-those are the separators for target ids (`app.subapp`), command namespaces (`git:pull`) and
+Repo, app and profile names must match `^[A-Za-z0-9][A-Za-z0-9_-]*$` — no `.`, `:` or `@`, because
+those are the separators for target ids (`repo.app`), command namespaces (`git:pull`) and
 indicators (`{git@branch}`). Command and `x@` indicator names may additionally contain `.`
 (`db.migrate`).
 
 ---
 
-## Apps and subapps
+## Repos and apps
 
-### App
+### Repo
 
 | Key | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `path` | string | **yes** | — | Absolute, `~`-prefixed, or relative to the workspace directory. |
-| `subapps` | `{ [name: string]: Subapp }` | no | — | Omit for a single-service repo; see below. |
-| `template` | string | no | `templates.app` | Overrides the app header row. |
-| `env` | map | no | — | Layered over `env`; inherited by every subapp. |
-| `scripts` | `{ [name: string]: string }` | no | — | Inherited by every subapp. |
-| `health` | object | no | — | Inherited by every subapp. |
-| `restart` | `"no" \| "on-crash"` | no | `"no"` | Inherited by every subapp. |
-| `dependsOn` | string[] | no | `[]` | Inherited by every subapp. |
-| `readyTimeout` | int > 0 (ms) | no | `limits.readyTimeout` | Inherited by every subapp. |
-| `stopTimeout` | int > 0 (ms) | no | `limits.stopTimeout` | Inherited by every subapp. |
+| `apps` | `{ [name: string]: App }` | no | — | Omit for a single-service repo; see below. |
+| `template` | string | no | `templates.repo` | Overrides the repo header row. |
+| `env` | map | no | — | Layered over `env`; inherited by every app. |
+| `scripts` | `{ [name: string]: string }` | no | — | Inherited by every app. |
+| `health` | object | no | — | Inherited by every app. |
+| `restart` | `"no" \| "on-crash"` | no | `"no"` | Inherited by every app. |
+| `dependsOn` | string[] | no | `[]` | Inherited by every app. |
+| `readyTimeout` | int > 0 (ms) | no | `limits.readyTimeout` | Inherited by every app. |
+| `stopTimeout` | int > 0 (ms) | no | `limits.stopTimeout` | Inherited by every app. |
 
-### Subapp
+### App
 
-Same keys minus `subapps`, plus:
+Same keys minus `apps`, plus:
 
 | Key | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `path` | string | no | the app's `path` | Relative to the **app's** path (`~` and absolute also work). |
+| `path` | string | no | the repo's `path` | Relative to the **repo's** path (`~` and absolute also work). |
 
-### Implicit subapps
+### Implicit apps
 
-The engine only knows subapps: every process, log file, status and command target is one. An app
-declared **without** `subapps` is normalized into an app holding a single *implicit* subapp whose
-target id is just the app name, taking its `path`, `scripts`, `env`, `health`, `restart`,
-`dependsOn` and timeouts from the app entry.
+The engine only knows apps: every process, log file, status and command target is one. A repo
+declared **without** `apps` is normalized into a repo holding a single *implicit* app whose
+target id is just the repo name, taking its `path`, `scripts`, `env`, `health`, `restart`,
+`dependsOn` and timeouts from the repo entry.
 
 ```jsonc
 "api": { "path": "./services/api", "scripts": { "start": "node server.js" } }
 // → one target, addressed as "api"
 ```
 
-An app **with** `subapps` is not runnable itself; each subapp is a target named `app.subapp`.
+A repo **with** `apps` is not runnable itself; each app is a target named `repo.app`.
 
-### App-level fields are defaults, not shared values
+### Repo-level fields are defaults, not shared values
 
-When an app declares `subapps`, the app-level `scripts`, `env`, `health`, `restart`, `dependsOn`,
-`readyTimeout` and `stopTimeout` become per-subapp defaults:
+When a repo declares `apps`, the repo-level `scripts`, `env`, `health`, `restart`, `dependsOn`,
+`readyTimeout` and `stopTimeout` become per-app defaults:
 
-- `scripts` and `env` are **merged key by key** (app first, subapp second — a subapp overrides only
+- `scripts` and `env` are **merged key by key** (repo first, app second — an app overrides only
   the keys it names).
-- `health`, `restart`, `readyTimeout`, `stopTimeout` are **replaced wholesale** when the subapp sets
-  them. In particular a subapp's `health` never inherits the app's `interval`/`threshold`: `http` and
+- `health`, `restart`, `readyTimeout`, `stopTimeout` are **replaced wholesale** when the app sets
+  them. In particular an app's `health` never inherits the repo's `interval`/`threshold`: `http` and
   `cmd` are mutually exclusive, so merging two checks would produce an invalid one.
-- `dependsOn` is replaced wholesale too. An app-level `dependsOn` is resolved once and applied to
-  every subapp that does not declare its own.
+- `dependsOn` is replaced wholesale too. A repo-level `dependsOn` is resolved once and applied to
+  every app that does not declare its own.
 
 ### Env merge order
 
 Deepest wins, over the daemon's own environment:
 
 ```text
-process env of the daemon  →  workspace env  →  app env  →  subapp env
+process env of the daemon  →  workspace env  →  repo env  →  app env
 ```
 
 The daemon's environment is applied at spawn time, so `PATH` and friends are always present. u8 does
@@ -108,8 +108,8 @@ The daemon's environment is applied at spawn time, so `PATH` and friends are alw
 
 | Written on | Resolved against |
 | --- | --- |
-| `apps.<app>.path` | the workspace directory (the one holding `u8.jsonc`) |
-| `apps.<app>.subapps.<sub>.path` | that app's resolved `path` |
+| `repos.<repo>.path` | the workspace directory (the one holding `u8.jsonc`) |
+| `repos.<repo>.apps.<app>.path` | that repo's resolved `path` |
 | `plugins` entries starting with `.`, `/` or `~` | the workspace directory |
 
 A leading `~` or `~/` expands to the home directory in all three places. Absolute paths are used
@@ -161,7 +161,7 @@ stays up.
 ### `dependsOn` and readiness
 
 `dependsOn` lists targets that must be **ready** before this one is launched. Entries are the same
-target strings used everywhere: an app name expands to all of its subapps, `app.subapp` names one.
+target strings used everywhere: a repo name expands to all of its apps, `repo.app` names one.
 Cycles are a validation error naming the loop.
 
 A dependency counts as ready when:
@@ -194,13 +194,13 @@ dependencies that are part of the same run are waited on.
 
 | Key | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `targets` | string[] | **yes** | App names and/or `app.subapp` ids. An app expands to all its subapps; duplicates are dropped, config order is kept. |
+| `targets` | string[] | **yes** | Repo names and/or `repo.app` ids. A repo expands to all its apps; duplicates are dropped, config order is kept. |
 | `default` | boolean | no | At most one profile may set it — two is a validation error. |
 
 Rules:
 
 - Declare no profiles at all and u8 synthesizes one named **`all`**, marked default, covering every
-  app in config order.
+  repo in config order.
 - Declare profiles but mark none `default: true` and the **first one declared** becomes the default.
 - Profiles are pure selection. They cannot override env, scripts or templates.
 - The *active* profile is per-machine state (`state.json` in the state dir), not config. Switch it
@@ -227,7 +227,7 @@ Rules:
 | `kind` | `"task" \| "service"` | `"task"` | `task` runs to completion (success = exit 0). `service` is supervised: the script becomes the target's process and "done" means running. |
 | `description` | string | — | Shown in `u8 status --json` and the dashboard palette. |
 | `script` | string | — | Shared script, run in **every** selected target's cwd. |
-| `targets` | `{ [target: string]: string \| null }` | `{}` | Per-target override, or `null` to skip. Keys may be app names (applies to all their subapps) or `app.subapp`. |
+| `targets` | `{ [target: string]: string \| null }` | `{}` | Per-target override, or `null` to skip. Keys may be repo names (applies to all their apps) or `repo.app`. |
 | `concurrency` | int > 0 | `limits.taskConcurrency` | Cap for this command. |
 | `hooks` | `{ pre?: string \| string[], post?: string \| string[] }` | — | Shell hooks; see below. |
 
@@ -235,12 +235,12 @@ Rules:
 
 For each selected target, in this order:
 
-1. an entry in `targets` for that exact `app.subapp` id → that script (or a skip if `null`);
-2. an entry in `targets` for its app name → that script (or a skip if `null`);
+1. an entry in `targets` for that exact `repo.app` id → that script (or a skip if `null`);
+2. an entry in `targets` for its repo name → that script (or a skip if `null`);
 3. otherwise the shared `script`;
 4. no shared `script` either → a skip.
 
-An explicit `app.subapp` entry always beats an app-wide one, whatever order they were written in.
+An explicit `repo.app` entry always beats a repo-wide one, whatever order they were written in.
 Both kinds of skip are *reported*, not dropped — the summary table shows `no script for "<id>" in
 command "<name>"` — and neither runs the command's hooks. Skipped targets are not failures: the run's
 exit code only reflects targets that actually failed.
@@ -267,7 +267,7 @@ time regardless.
 A config command name containing `:` or `@` is a validation error. Write `test`, `deploy`,
 `db.migrate`.
 
-The three core commands always exist. Their per-target script comes from the subapp's
+The three core commands always exist. Their per-target script comes from the app's
 `scripts.start` / `scripts.stop`, and they can be given hooks by a plugin (config `hooks` live on
 config commands only).
 
@@ -307,7 +307,7 @@ owner's working directory**. Trimmed stdout is the value.
 ```jsonc
 "indicators": {
   "version": { "cmd": "jq -r .version package.json", "interval": 60000 },
-  "size":    { "cmd": "du -sh . | cut -f1", "scope": "app" }
+  "size":    { "cmd": "du -sh . | cut -f1", "scope": "repo" }
 }
 ```
 
@@ -315,14 +315,14 @@ owner's working directory**. Trimmed stdout is the value.
 | --- | --- | --- | --- |
 | `cmd` | string | **required** | Shell command; trimmed stdout is the value. |
 | `interval` | int > 0 (ms) | `5000` | Poll interval. |
-| `scope` | `"subapp" \| "app"` | `"subapp"` | Run once per subapp (in its cwd) or once per app (in the app root). |
+| `scope` | `"app" \| "repo"` | `"app"` | Run once per app (in its cwd) or once per repo (in the repo root). |
 
 They render as `{x@version}`. Names are bare — `x` is the reserved namespace, so `"x@version"` as a
 key is a validation error.
 
-A `scope: "subapp"` probe gets the target's merged `env` on top of the daemon's; a `scope: "app"`
-probe gets only the daemon's, because an app has no env of its own. Read what you need from the
-filesystem rather than from `$PORT` in an app-scoped probe.
+A `scope: "app"` probe gets the target's merged `env` on top of the daemon's; a `scope: "repo"`
+probe gets only the daemon's, because a repo has no env of its own. Read what you need from the
+filesystem rather than from `$PORT` in a repo-scoped probe.
 
 A probe is killed at 80% of its own interval (clamped to 100 ms–5 s), so a slow command can never
 pile up. A failing or killed probe yields an **empty** cell and a warning in the daemon log, never a
@@ -337,26 +337,30 @@ A row is literal text plus `{ns@indicator}` tokens with optional `:`-chained mod
 
 ```jsonc
 "templates": {
-  "app":    "{app@name:max(24):pad(24)} {app@dirname:dim} {git@branch:color(yellow):max(20)} {git@dirty:color(red)}",
-  "subapp": "  {app@status:pad(8)} {app@name:max(22):pad(22)} {health@status:pad(9)}"
+  "repo": "{repo@name:max(24):pad(24)} {repo@dirname:dim} {git@branch:color(yellow):max(20)} {git@dirty:color(red)}",
+  "app":  "  {app@status:pad(8)} {app@name:max(22):pad(22)} {health@status:pad(9)}"
 }
 ```
 
-Those two strings are also the defaults. `templates.app` renders an app header row and
-`templates.subapp` each child row; any app or subapp may override its own with a `template` key. An
-app with exactly one subapp renders as a **single merged row** using the subapp template — and a
-subapp row falls back to the app's cells for a token the subapp does not have, which is what lets a
-merged row mention the app-scoped `{git@branch}`.
+Those two strings are also the defaults. `templates.repo` renders a repo header row and
+`templates.app` each child row; any repo or app may override its own with a `template` key. A repo
+with exactly one app renders as a **single merged row** using the app template.
+
+Each row has its own core namespace: an app row is written with `{app@…}`, a repo header row with
+`{repo@…}`. An app row falls back to its repo's cells for a token the app does not have, which is
+what lets a merged row mention the repo-scoped `{git@branch}` or `{repo@dirname}`. The fallback runs
+one way only: a header row stands for several apps, so `{app@status}` there names nothing — it
+renders as `{app@status!}` and is reported as a config warning. Use `{repo@status}`.
 
 Which string a row uses:
 
 | Row | Template |
 | --- | --- |
-| Header row of a multi-subapp app | that app's `template`, else `templates.app` |
-| Child row | that subapp's `template`, else `templates.subapp` |
-| Merged row of a single-subapp app | the subapp's `template`, else the **app's** `template`, else `templates.subapp` |
+| Header row of a multi-app repo | that repo's `template`, else `templates.repo` |
+| Child row | that app's `template`, else `templates.app` |
+| Merged row of a single-app repo | the app's `template`, else the **repo's** `template`, else `templates.app` |
 
-So an app-level `template` on a single-service app is what its merged row uses, and on a monorepo it
+So a repo-level `template` on a single-service repo is what its merged row uses, and on a monorepo it
 is the header row instead — it never leaks into child rows.
 
 ### Grammar
@@ -378,7 +382,7 @@ kinds of typo look different:
   `{git@brunch!}` in red.
 
 ```console
-$ u8 status          # templates.subapp = "  {app@nam e} | {app@name:pad(x)} | {git@brunch} | {{lit}} | {app@name}"
+$ u8 status          # templates.app = "  {app@nam e} | {app@name:pad(x)} | {git@brunch} | {{lit}} | {app@name}"
 tw · profile all · 0/1 running
   {app@nam e} | a | {git@brunch!} | {lit} | a
 ```
@@ -409,18 +413,22 @@ plugin.
 
 | Token | Scope | Value |
 | --- | --- | --- |
-| `{app@name}` | both | Subapp name / app name |
-| `{app@dirname}` | both | Basename of the working directory / repo root |
-| `{app@path}` | both | Absolute working directory / repo root |
-| `{app@status}` | both | `stopped`, `starting`, `running`, `crashed`, `stopping`, `stale`. On an app row: the worst of its subapps. Renders as `●`. |
-| `{app@pid}` | subapp | Process id while up, else empty |
-| `{app@uptime}` | subapp | `12s`, `4m`, `1h3m`, `2d5h`; empty unless running |
-| `{app@exitcode}` | subapp | Exit code of the last finished run |
-| `{git@branch}` | app | Branch, or short sha when detached; empty outside a repo |
-| `{git@dirty}` | app | Changed-file count including untracked; empty when clean |
-| `{git@ahead}` / `{git@behind}` | app | Commits vs upstream; empty when zero or no upstream |
-| `{health@status}` | subapp | `healthy`, `unhealthy`, `starting`, `n/a` |
-| `{protos@<alias>}` / `{protos@linked}` | subapp | Shared-package versions, once [protos](#protos) is configured |
+| `{app@name}` | app | App name; the repo name for an implicit app |
+| `{app@dirname}` | app | Basename of the working directory |
+| `{app@path}` | app | Absolute working directory |
+| `{app@status}` | app | `stopped`, `starting`, `running`, `crashed`, `stopping`, `stale`. Renders as `●`. |
+| `{app@pid}` | app | Process id while up, else empty |
+| `{app@uptime}` | app | `12s`, `4m`, `1h3m`, `2d5h`; empty unless running |
+| `{app@exitcode}` | app | Exit code of the last finished run |
+| `{repo@name}` | repo | Repo name |
+| `{repo@dirname}` | repo | Basename of the repo root |
+| `{repo@path}` | repo | Absolute repo root |
+| `{repo@status}` | repo | The worst state among the repo's apps: `crashed` if any crashed, `running` only when all run. Renders as `●`. |
+| `{git@branch}` | repo | Branch, or short sha when detached; empty outside a repo |
+| `{git@dirty}` | repo | Changed-file count including untracked; empty when clean |
+| `{git@ahead}` / `{git@behind}` | repo | Commits vs upstream; empty when zero or no upstream |
+| `{health@status}` | app | `healthy`, `unhealthy`, `starting`, `n/a` |
+| `{protos@<alias>}` / `{protos@linked}` | app | Shared-package versions, once [protos](#protos) is configured |
 | `{x@<name>}` | as declared | Your config-defined indicators |
 | `{<plugin>@<name>}` | as declared | Plugin indicators |
 
@@ -442,8 +450,8 @@ longer matches the config. It clears on the next restart.
 | `logMaxBytes` | int > 0 | `10485760` (10 MB) | Size at which a service log rotates. |
 | `logKeep` | int > 0 | `3` | Rotated generations kept per service. |
 | `taskRunsKeep` | int > 0 | `20` | Task runs kept per command before the oldest are pruned. |
-| `stopTimeout` | int > 0 (ms) | `10000` | SIGTERM → SIGKILL grace when stopping a process group. Overridable per app/subapp. |
-| `readyTimeout` | int > 0 (ms) | `60000` | Max wait for a dependency to become ready. Overridable per app/subapp. |
+| `stopTimeout` | int > 0 (ms) | `10000` | SIGTERM → SIGKILL grace when stopping a process group. Overridable per repo/app. |
+| `readyTimeout` | int > 0 (ms) | `60000` | Max wait for a dependency to become ready. Overridable per repo/app. |
 | `taskConcurrency` | int > 0 | `4` | Targets running at once, unless the command or the CLI says otherwise. |
 | `daemonIdle` | int > 0 (ms) | `600000` (10 min) | Idle time with no clients and no running services before the daemon exits. `U8_IDLE_MS` overrides it for a daemon it spawns; `0` there disables idle exit. |
 
@@ -529,13 +537,13 @@ indicators, nothing polled.
 ## protos
 
 A shared-contracts repo — `.proto` files that build into packages like `@myorg/protos` and
-`@myorg/react-query` — is consumed by most of the subapps around it. The local loop when a contract
+`@myorg/react-query` — is consumed by most of the apps around it. The local loop when a contract
 changes is: edit the protos, build them, `yalc publish`, then `yalc add` the package in each consumer
 that needs the new version.
 
 The `protos` built-in owns **that last step and the visibility around it**: commands that link and
-unlink, and indicators showing which version each subapp is actually on. Consumers are detected from
-each subapp's own `package.json`, so nothing has to be listed twice.
+unlink, and indicators showing which version each app is actually on. Consumers are detected from
+each app's own `package.json`, so nothing has to be listed twice.
 
 ```jsonc
 "builtins": {
@@ -600,8 +608,8 @@ produces the same command names.
 
 Selection is the usual one: the targets you name, or the active profile if you name none. Within
 that selection, a target is **skipped** — reported, not failed — when it has nothing to do:
-`protos:link` skips a subapp whose `package.json` does not depend on any configured package, and
-`protos:unlink` skips one with no link in place. Each subapp is linked separately, even two subapps
+`protos:link` skips an app whose `package.json` does not depend on any configured package, and
+`protos:unlink` skips one with no link in place. Each app is linked separately, even two apps
 of the same repo: they have their own `node_modules` and their own `.yalc`.
 
 ```console
@@ -622,15 +630,15 @@ rest. Each `yalc` invocation is echoed into the target's run log with its output
 
 | Token | Scope | Value |
 | --- | --- | --- |
-| `{protos@<alias>}` | subapp | What that package effectively is here — one per configured package |
-| `{protos@linked}` | subapp | `2 local` when two packages are linked here; empty when none are |
+| `{protos@<alias>}` | app | What that package effectively is here — one per configured package |
+| `{protos@linked}` | app | `2 local` when two packages are linked here; empty when none are |
 
-Each cell has four states, read from the subapp's own `package.json`, `.yalc/` and `node_modules/` —
+Each cell has four states, read from the app's own `package.json`, `.yalc/` and `node_modules/` —
 never from a shell command, so the poll is cheap:
 
 | State | Renders | Meaning |
 | --- | --- | --- |
-| absent | empty | This subapp does not depend on the package |
+| absent | empty | This app does not depend on the package |
 | linked | `1.4.2 local` (yellow) | A yalc link is in place: the version is the local build's own |
 | installed | `1.4.2` (green) | The published copy in `node_modules` |
 | declared | `^1.4.0` (dim) | Depended on, but nothing installed yet — the range from `package.json` |
@@ -639,7 +647,7 @@ Add them to a row like any other token:
 
 ```jsonc
 "templates": {
-  "subapp": "  {app@status:pad(8)} {app@name:max(16):pad(16)} {protos@protos:pad(12)} {protos@react-query:pad(12)} {protos@linked:pad(8)}"
+  "app": "  {app@status:pad(8)} {app@name:max(16):pad(16)} {protos@protos:pad(12)} {protos@react-query:pad(12)} {protos@linked:pad(8)}"
 }
 ```
 
@@ -664,7 +672,7 @@ The details that decide which state you see:
 - **Linked** needs both halves of what `yalc add` does: the `file:.yalc/…` range in `package.json`
   *and* the `.yalc/<pkg>` directory. Either alone is a leftover, and the cell falls back to whatever
   is really installed. A linked copy whose own version cannot be read renders as bare `local`.
-- The subapp's **own** `node_modules` is what is inspected, not a hoisted root: that is the tree its
+- The app's **own** `node_modules` is what is inspected, not a hoisted root: that is the tree its
   dev server resolves from.
 - A directory that is not a node project, or a `package.json` caught half-written by an install,
   renders blank; the next poll picks it up.
@@ -696,13 +704,13 @@ caught) and re-validates on change.
   "$schema": "https://unpkg.com/u8cli/schema.json",
   "name": "acme",
 
-  // Bottom layer of the env merge: workspace -> app -> subapp, over the daemon's env.
+  // Bottom layer of the env merge: workspace -> repo -> app, over the daemon's env.
   "env": { "NODE_ENV": "development" },
 
   "templates": {
-    "app": "{app@name:max(20):pad(20)} {app@dirname:dim} {git@branch:color(yellow):max(18)} {git@dirty:color(red)}",
+    "repo": "{repo@name:max(20):pad(20)} {repo@dirname:dim} {git@branch:color(yellow):max(18)} {git@dirty:color(red)}",
     // status/health are padded: without colour they render as words, not a glyph.
-    "subapp": "  {app@status:pad(8)} {app@name:max(16):pad(16)} {health@status:pad(9)} {app@uptime:dim:pad(5)} {x@port:dim}"
+    "app": "  {app@status:pad(8)} {app@name:max(16):pad(16)} {health@status:pad(9)} {app@uptime:dim:pad(5)} {x@port:dim}"
   },
 
   // Local file (jiti loads .ts) or an npm package from this workspace's node_modules.
@@ -724,8 +732,8 @@ caught) and re-validates on change.
     "port": { "cmd": "printf '%s' \"${PORT:--}\"", "interval": 30000 }
   },
 
-  "apps": {
-    // No "subapps" -> one implicit subapp, addressed as "db".
+  "repos": {
+    // No "apps" -> one implicit app, addressed as "db".
     "db": {
       "path": "./services/infra",              // relative to this file
       "scripts": { "start": "docker compose up postgres" },
@@ -744,14 +752,14 @@ caught) and re-validates on change.
       "dependsOn": ["db"]                      // waits for db to probe healthy
     },
 
-    // Monorepo: the app is not runnable; each subapp is.
+    // Monorepo: the repo is not runnable; each app is.
     "platform": {
       "path": "~/Work/acme/platform",
-      "env": { "TZ": "UTC" },                  // inherited by both subapps
+      "env": { "TZ": "UTC" },                  // inherited by both apps
       "scripts": { "start": "pnpm dev" },      // default; auth-mfe overrides it
-      "subapps": {
+      "apps": {
         "shell": {
-          "path": "apps/shell",                // relative to the app's path
+          "path": "apps/shell",                // relative to the repo's path
           "env": { "PORT": "3100" },
           "health": { "http": "http://localhost:3100/healthz" }
         },
@@ -760,7 +768,7 @@ caught) and re-validates on change.
           "env": { "PORT": "3101" },
           "scripts": { "start": "pnpm dev --port 3101" },
           "health": { "http": "http://localhost:3101/healthz" },
-          "dependsOn": ["api"],                // "api" = that app's implicit subapp
+          "dependsOn": ["api"],                // "api" = that repo's implicit app
           "readyTimeout": 90000
         }
       }
@@ -773,7 +781,7 @@ caught) and re-validates on change.
   },
 
   "commands": {
-    // Bare name: "app" and every plugin name are reserved namespaces.
+    // Bare name: "app", "repo" and every plugin name are reserved namespaces.
     "test": {
       "description": "Run each service's test suite",
       "script": "pnpm test",                   // every target that has no override

@@ -161,22 +161,22 @@ export function createEmptyDir(): Workspace {
 }
 
 /**
- * The workspace most tests drive: one single-subapp app (`api`, a merged row)
- * and one two-subapp app (`platform`), plus commands that pass, fail and skip.
+ * The workspace most tests drive: one single-app repo (`api`, a merged row)
+ * and one two-app repo (`platform`), plus commands that pass, fail and skip.
  */
 export function fixtureConfig(): Record<string, unknown> {
   return {
     name: "fixture",
     templates: {
-      app: "APP {app@name:pad(10)}{git@branch}",
-      subapp: "SUB {app@name:pad(10)} {app@status} {x@ver}",
+      repo: "REPO {repo@name:pad(10)}{git@branch}",
+      app: "APP {app@name:pad(10)} {app@status} {x@ver}",
     },
     indicators: { ver: { cmd: "printf 1.2.3", interval: 60_000 } },
-    apps: {
+    repos: {
       api: { path: "api", scripts: { start: service("api-ready") } },
       platform: {
         path: "platform",
-        subapps: {
+        apps: {
           web: { path: "web", scripts: { start: service("web-ready") } },
           admin: { path: "admin", scripts: { start: service("admin-ready") } },
         },

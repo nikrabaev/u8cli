@@ -31,7 +31,7 @@ beforeAll(() => {
   ws = createWorkspace(
     {
       name: "e2e",
-      apps: {
+      repos: {
         api: { path: "api", scripts: { start: service("api-ready") } },
         ticker: { path: "ticker", scripts: { start: TICKER } },
       },
@@ -67,7 +67,7 @@ describe("the u8 binary", () => {
 
     let pid = 0;
     await waitFor(async () => {
-      const api = (await statusJson()).apps.flatMap((a) => a.subapps).find((s) => s.id === "api");
+      const api = (await statusJson()).repos.flatMap((r) => r.apps).find((a) => a.id === "api");
       pid = api?.pid ?? 0;
       return api?.status === "running";
     }, "api to be running");
@@ -117,7 +117,7 @@ describe("the u8 binary", () => {
     expect((await runBin(["start", "ticker"], { cwd: ws.dir })).code).toBe(0);
     let pid = 0;
     await waitFor(async () => {
-      const ticker = (await statusJson()).apps.flatMap((s) => s.subapps).find((s) => s.id === "ticker");
+      const ticker = (await statusJson()).repos.flatMap((r) => r.apps).find((a) => a.id === "ticker");
       pid = ticker?.pid ?? 0;
       return ticker?.status === "running";
     }, "the ticker to be running");
@@ -140,7 +140,7 @@ describe("the u8 binary", () => {
     expect(status.code).toBe(0);
     expect(status.out).toContain("1 running");
 
-    const ticker = (await statusJson()).apps.flatMap((a) => a.subapps).find((s) => s.id === "ticker");
+    const ticker = (await statusJson()).repos.flatMap((r) => r.apps).find((a) => a.id === "ticker");
     expect(ticker?.status).toBe("running");
     expect(ticker?.pid).toBe(pid);
   });

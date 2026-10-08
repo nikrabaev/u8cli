@@ -11,7 +11,7 @@
 import type { CommandKind, CommandSource, TargetId, Templates } from "../config/types.js";
 
 /** Bumped on breaking wire changes; checked during the attach handshake. */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 // ---------------------------------------------------------------------------
 // Core value types
@@ -45,11 +45,11 @@ export interface ServiceState {
 
 export type IndicatorTone = "ok" | "warn" | "error" | "muted" | "info";
 
-/** One resolved indicator cell. `owner` is an app name or a target id per `scope`. */
+/** One resolved indicator cell. `owner` is a repo name or a target id per `scope`. */
 export interface IndicatorValue {
   ns: string;
   name: string;
-  scope: "app" | "subapp";
+  scope: "repo" | "app";
   owner: string;
   /** Raw value — what `--json` and modifiers like `max()` operate on. */
   value: string;
@@ -105,9 +105,9 @@ export interface TaskResult {
 // Snapshot — everything a client needs to render, in one payload
 // ---------------------------------------------------------------------------
 
-export interface SnapshotSubapp {
+export interface SnapshotApp {
   id: TargetId;
-  appName: string;
+  repoName: string;
   name: string;
   implicit: boolean;
   cwd: string;
@@ -118,17 +118,17 @@ export interface SnapshotSubapp {
   scripts: string[];
 }
 
-export interface SnapshotApp {
+export interface SnapshotRepo {
   name: string;
   path: string;
   template?: string;
-  subapps: SnapshotSubapp[];
+  apps: SnapshotApp[];
 }
 
 export interface SnapshotProfile {
   name: string;
   isDefault: boolean;
-  subappIds: TargetId[];
+  appIds: TargetId[];
 }
 
 export interface SnapshotCommand {
@@ -152,7 +152,7 @@ export interface Snapshot {
   daemonVersion: string;
   workspace: { id: string; name: string; rootDir: string; configPath: string };
   templates: Templates;
-  apps: SnapshotApp[];
+  repos: SnapshotRepo[];
   profiles: SnapshotProfile[];
   activeProfile: string;
   commands: SnapshotCommand[];
@@ -192,7 +192,7 @@ export interface RpcMethods {
 
   "profile.use": { params: { name: string }; result: { ok: true; activeProfile: string } };
 
-  /** Targets are raw strings (`app`, `app.subapp`); empty means the active profile. */
+  /** Targets are raw strings (`repo`, `repo.app`); empty means the active profile. */
   "service.start": { params: { targets?: string[] }; result: { runId: string } };
   "service.stop": { params: { targets?: string[] }; result: { runId: string } };
   "service.restart": { params: { targets?: string[] }; result: { runId: string } };

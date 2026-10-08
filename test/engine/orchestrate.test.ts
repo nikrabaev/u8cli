@@ -10,7 +10,7 @@ function chain(overrides: Record<string, unknown> = {}): Harness {
   return createHarness({
     dirs: ["db", "gateway", "web"],
     config: {
-      apps: {
+      repos: {
         db: { path: "db", scripts: { start: "sleep 30" }, ...overrides },
         gateway: { path: "gateway", scripts: { start: "sleep 30" }, dependsOn: ["db"] },
         web: { path: "web", scripts: { start: "sleep 30" }, dependsOn: ["gateway"] },
@@ -36,7 +36,7 @@ describe("startTargets", () => {
     const h = createHarness({
       dirs: ["a", "b", "c"],
       config: {
-        apps: {
+        repos: {
           a: { path: "a", scripts: { start: "sleep 30" } },
           b: { path: "b", scripts: { start: "sleep 30" } },
           c: { path: "c", scripts: { start: "sleep 30" }, dependsOn: ["a", "b"] },
@@ -145,7 +145,7 @@ describe("startTargets", () => {
     const h = createHarness({
       dirs: ["db", "gateway"],
       config: {
-        apps: {
+        repos: {
           db: { path: "db" },
           gateway: { path: "gateway", scripts: { start: "sleep 30" }, dependsOn: ["db"] },
         },

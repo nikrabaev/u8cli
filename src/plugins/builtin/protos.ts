@@ -1,6 +1,6 @@
 /**
  * The built-in `protos` plugin — link locally-built shared packages into the
- * subapps that consume them.
+ * apps that consume them.
  *
  * A team that generates client libraries from a `.proto` repo publishes them as
  * ordinary npm packages, but tries a new contract locally first: build the
@@ -266,11 +266,11 @@ function isDirectory(target: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// The state of one package in one subapp
+// The state of one package in one app
 // ---------------------------------------------------------------------------
 
 /**
- * - `absent` — this subapp does not consume the package at all;
+ * - `absent` — this app does not consume the package at all;
  * - `linked` — a yalc link is in place and in use;
  * - `installed` — a real copy is in `node_modules`;
  * - `declared` — depended on, but nothing is installed yet.
@@ -288,9 +288,9 @@ const ABSENT: PackageStatus = { state: "absent", text: "" };
 /**
  * What `pkg` currently is, for the consumer rooted at `cwd`.
  *
- * The subapp's *own* `node_modules` is what is inspected, deliberately: it is
+ * The app's *own* `node_modules` is what is inspected, deliberately: it is
  * the tree its dev server resolves from, and walking up to a hoisted root would
- * report a copy this subapp may not be using.
+ * report a copy this app may not be using.
  */
 function statusOf(cache: ManifestCache, cwd: string, pkg: string): PackageStatus {
   const consumer = cache.read(path.join(cwd, "package.json"));
@@ -312,7 +312,7 @@ function statusOf(cache: ManifestCache, cwd: string, pkg: string): PackageStatus
 /** Tone is a suggestion; a template's own `color()` modifier overrides it. */
 function cellOf(status: PackageStatus): IndicatorResult {
   switch (status.state) {
-    // Empty, not "n/a": a subapp that consumes nothing should render a blank
+    // Empty, not "n/a": an app that consumes nothing should render a blank
     // cell rather than a column of noise on every row that is not a consumer.
     case "absent":
       return "";
@@ -357,7 +357,7 @@ function missingYalcMessage(): string {
 }
 
 /**
- * Runs one yalc invocation in the subapp, mirroring its output into the run log.
+ * Runs one yalc invocation in the app, mirroring its output into the run log.
  *
  * `ctx.exec` buffers rather than streams — the SDK has no streaming exec — so
  * the lines land when the command finishes.
@@ -417,7 +417,7 @@ function diagnostic(res: ExecResult): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Links every named package that this subapp actually consumes.
+ * Links every named package that this app actually consumes.
  *
  * Every package is attempted even after one fails: a partial link is a state
  * the user can finish by hand, whereas stopping at the first failure hides the
@@ -453,7 +453,7 @@ async function link(ctx: CommandContext, cache: ManifestCache, packages: readonl
 }
 
 /**
- * Removes the yalc links this subapp currently has.
+ * Removes the yalc links this app currently has.
  *
  * A target with nothing linked never gets here: `appliesTo` reports it as
  * skipped, which is the honest answer — there was nothing to do, and nothing
@@ -507,8 +507,8 @@ function linkCommand(
   return {
     kind: "task",
     description,
-    // Per target, never per app: each subapp has its own node_modules and its
-    // own .yalc, so two subapps of one repo are two independent links.
+    // Per target, never per repo: each app has its own node_modules and its
+    // own .yalc, so two apps of one repo are two independent links.
     groupBy: "target",
     appliesTo: (target: TargetInfo) =>
       packages.some((pkg) => statusOf(cache, target.cwd, pkg.name).state !== "absent"),
@@ -540,7 +540,7 @@ function unlinkCommand(
 
 function packageIndicator(cache: ManifestCache, pkg: ProtosPackage, intervalMs: number): IndicatorDef {
   return {
-    scope: "subapp",
+    scope: "app",
     description: `Effective version of ${pkg.name} here: installed, declared, or the linked local build`,
     update: { mode: "poll", intervalMs },
     value: (ctx) => cellOf(statusOf(cache, ctx.cwd, pkg.name)),
@@ -549,7 +549,7 @@ function packageIndicator(cache: ManifestCache, pkg: ProtosPackage, intervalMs: 
 
 function rollupIndicator(cache: ManifestCache, packages: readonly ProtosPackage[], intervalMs: number): IndicatorDef {
   return {
-    scope: "subapp",
+    scope: "app",
     description: "How many shared packages are currently linked to a local build here",
     update: { mode: "poll", intervalMs },
     value(ctx) {
@@ -580,8 +580,8 @@ export function createProtosPlugin(options: ProtosOptions): PluginDefinition {
     [LINKED_INDICATOR]: rollupIndicator(cache, packages, intervalMs),
   };
   const commands: Record<string, PluginCommandDef> = {
-    link: linkCommand(cache, packages, "Link every configured shared package this subapp consumes"),
-    unlink: unlinkCommand(cache, packages, "Remove every local shared-package link from this subapp"),
+    link: linkCommand(cache, packages, "Link every configured shared package this app consumes"),
+    unlink: unlinkCommand(cache, packages, "Remove every local shared-package link from this app"),
   };
   for (const pkg of packages) {
     indicators[pkg.alias] = packageIndicator(cache, pkg, intervalMs);

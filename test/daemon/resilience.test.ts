@@ -44,7 +44,7 @@ describe("log firehose", () => {
   it("drops and reports log lines rather than growing without bound", async () => {
     const ws = createWorkspace(
       {
-        apps: { noisy: { path: "noisy", scripts: { start: FLOOD_SCRIPT } } },
+        repos: { noisy: { path: "noisy", scripts: { start: FLOOD_SCRIPT } } },
         profiles: { all: { default: true, targets: ["noisy"] } },
       },
       ["noisy"],
@@ -83,7 +83,7 @@ describe("idle exit", () => {
   it("waits for an in-flight run even with no clients left", async () => {
     const ws = createWorkspace(
       {
-        apps: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } },
+        repos: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } },
         profiles: { all: { default: true, targets: ["api"] } },
         commands: { slow: { script: "sleep 1.5" } },
       },
@@ -110,7 +110,7 @@ describe("idle exit", () => {
 describe("concurrent cold start", () => {
   it("two clients starting at once converge on one daemon", async () => {
     const ws = createWorkspace(
-      { apps: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } } },
+      { repos: { api: { path: "api", scripts: { start: SERVICE_SCRIPT } } } },
       ["api"],
     );
     track(ws);

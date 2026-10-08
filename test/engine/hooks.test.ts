@@ -12,7 +12,7 @@ function twoTargets(command: Record<string, unknown>): Harness {
   return createHarness({
     dirs: ["gateway", "db"],
     config: {
-      apps: { gateway: { path: "gateway" }, db: { path: "db" } },
+      repos: { gateway: { path: "gateway" }, db: { path: "db" } },
       commands: { probe: command },
     },
   });
@@ -55,7 +55,7 @@ describe("config hooks", () => {
     const h = createHarness({
       dirs: ["ok", "bad", "blocked"],
       config: {
-        apps: { ok: { path: "ok" }, bad: { path: "bad" }, blocked: { path: "blocked" } },
+        repos: { ok: { path: "ok" }, bad: { path: "bad" }, blocked: { path: "blocked" } },
         commands: {
           probe: {
             script: "true",
@@ -159,7 +159,7 @@ describe("plugin hooks", () => {
     const h = createHarness({
       dirs: ["ok", "bad", "blocked"],
       config: {
-        apps: { ok: { path: "ok" }, bad: { path: "bad" }, blocked: { path: "blocked" } },
+        repos: { ok: { path: "ok" }, bad: { path: "bad" }, blocked: { path: "blocked" } },
         commands: {
           probe: {
             script: "true",
@@ -221,7 +221,7 @@ describe("plugin hooks", () => {
           runId: ctx.runId,
           phase: ctx.phase,
           target: ctx.target.id,
-          app: ctx.app.name,
+          repo: ctx.repo.name,
           cwd: ctx.cwd,
           workspace: ctx.workspace.rootDir,
         });
@@ -239,7 +239,7 @@ describe("plugin hooks", () => {
       runId: handle.runId,
       phase: "pre",
       target: "gateway",
-      app: "gateway",
+      repo: "gateway",
       cwd: h.file("gateway"),
       workspace: h.dir,
     });

@@ -109,7 +109,7 @@ export interface ProfileOption {
   name: string;
   isDefault: boolean;
   active: boolean;
-  /** Subapps the profile selects. */
+  /** Apps the profile selects. */
   targets: number;
 }
 
@@ -128,7 +128,7 @@ export interface LogEntry {
 }
 
 export interface LogViewState {
-  /** The row the view was opened from — an app name or a target id. */
+  /** The row the view was opened from — a repo name or a target id. */
   title: string;
   targets: TargetId[];
   /** Prefix lines with their target id; only true when the view merges streams. */

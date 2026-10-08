@@ -4,14 +4,14 @@
  * Everything downstream of config loading consumes THIS, never the raw JSONC
  * shape. The two invariants that make the rest of the codebase simple:
  *
- *  1. Every runnable thing is a subapp. An app declared without `subapps` is
- *     normalized into an app holding a single *implicit* subapp whose target id
- *     is just the app name.
+ *  1. Every runnable thing is an app. A repo declared without `apps` is
+ *     normalized into a repo holding a single *implicit* app whose target id
+ *     is just the repo name.
  *  2. Every path is absolute and every env map is fully merged
- *     (workspace → app → subapp) by the time it lands here.
+ *     (workspace → repo → app) by the time it lands here.
  */
 
-/** `"gateway"` (implicit subapp) or `"platform.shell"` (explicit subapp). */
+/** `"gateway"` (implicit app) or `"platform.shell"` (explicit app). */
 export type TargetId = string;
 
 export type RestartPolicy = "no" | "on-crash";
@@ -31,11 +31,11 @@ export interface HealthCheckDef {
   threshold: number;
 }
 
-export interface NormalizedSubapp {
-  /** `app` for implicit subapps, `app.subapp` otherwise. */
+export interface NormalizedApp {
+  /** `repo` for implicit apps, `repo.app` otherwise. */
   id: TargetId;
-  appName: string;
-  /** Subapp name; equals the app name when implicit. */
+  repoName: string;
+  /** App name; equals the repo name when implicit. */
   name: string;
   implicit: boolean;
   /** Absolute working directory. */
@@ -44,34 +44,34 @@ export interface NormalizedSubapp {
   scripts: Record<string, string>;
   /** Fully merged: daemon env is applied at spawn time, not here. */
   env: Record<string, string>;
-  /** Resolved to concrete subapp ids (an app dependency expands to its subapps). */
+  /** Resolved to concrete app ids (a repo dependency expands to its apps). */
   dependsOn: TargetId[];
   health?: HealthCheckDef;
   restart: RestartPolicy;
-  /** Overrides `templates.subapp`. */
+  /** Overrides `templates.app`. */
   template?: string;
-  /** Max wait for this subapp to become ready when something depends on it. */
+  /** Max wait for this app to become ready when something depends on it. */
   readyTimeoutMs: number;
   /** SIGTERM → SIGKILL grace period. */
   stopTimeoutMs: number;
 }
 
-export interface NormalizedApp {
+export interface NormalizedRepo {
   name: string;
   /** Absolute repo root. */
   path: string;
-  /** Overrides `templates.app`. */
+  /** Overrides `templates.repo`. */
   template?: string;
-  subapps: NormalizedSubapp[];
+  apps: NormalizedApp[];
 }
 
 export interface NormalizedProfile {
   name: string;
   isDefault: boolean;
-  /** Target strings as authored (apps and/or subapps). */
+  /** Target strings as authored (repos and/or apps). */
   targets: string[];
-  /** Expanded, de-duplicated, config-order subapp ids. */
-  subappIds: TargetId[];
+  /** Expanded, de-duplicated, config-order app ids. */
+  appIds: TargetId[];
 }
 
 export interface NormalizedCommand {
@@ -97,8 +97,8 @@ export interface CustomIndicatorDef {
   name: string;
   cmd: string;
   intervalMs: number;
-  /** Whether the command runs once per subapp or once per app. */
-  scope: "subapp" | "app";
+  /** Whether the command runs once per app or once per repo. */
+  scope: "app" | "repo";
 }
 
 export interface PluginRef {
@@ -126,8 +126,8 @@ export interface Limits {
 }
 
 export interface Templates {
+  repo: string;
   app: string;
-  subapp: string;
 }
 
 /** Which built-in plugins are active. All default to on except `protos`, which
@@ -139,7 +139,7 @@ export interface BuiltinFlags {
 }
 
 /**
- * `builtins.protos` — links locally-built shared packages into the subapps that
+ * `builtins.protos` — links locally-built shared packages into the apps that
  * consume them, so a contract change can be tried end to end before it is
  * published. Today that means yalc.
  */
@@ -161,9 +161,9 @@ export interface NormalizedWorkspace {
   /** Hash of `configPath`; also the state-dir name. */
   id: string;
   templates: Templates;
+  repos: NormalizedRepo[];
+  /** Flat list of every app across every repo, in config order. */
   apps: NormalizedApp[];
-  /** Flat list of every subapp across every app, in config order. */
-  subapps: NormalizedSubapp[];
   profiles: NormalizedProfile[];
   defaultProfile: string;
   /** Config-declared commands plus the three core `app:*` commands. */
@@ -204,8 +204,8 @@ export const DEFAULT_LIMITS: Limits = {
  * width, so one long name would shift every column to its right on that row.
  */
 export const DEFAULT_TEMPLATES: Templates = {
-  app: "{app@name:max(24):pad(24)} {app@dirname:dim} {git@branch:color(yellow):max(20)} {git@dirty:color(red)}",
-  subapp: "  {app@status:pad(8)} {app@name:max(22):pad(22)} {health@status:pad(9)}",
+  repo: "{repo@name:max(24):pad(24)} {repo@dirname:dim} {git@branch:color(yellow):max(20)} {git@dirty:color(red)}",
+  app: "  {app@status:pad(8)} {app@name:max(22):pad(22)} {health@status:pad(9)}",
 };
 
 export const DEFAULT_HEALTH = {
@@ -217,18 +217,25 @@ export const DEFAULT_HEALTH = {
 /** Namespaces users may not claim for bare command names or `x@` indicators. */
 export const CORE_COMMAND_NAMESPACE = "app";
 
+/**
+ * Namespace of the repo-scope core indicators (`{repo@name}`, `{repo@status}`) —
+ * the header row's counterpart to `app@`. Reserved like `app`, so a plugin
+ * cannot shadow the tokens every repo template is written with.
+ */
+export const REPO_NAMESPACE = "repo";
+
 export const CORE_COMMANDS = ["app:start", "app:stop", "app:restart"] as const;
 
 // ---------------------------------------------------------------------------
 // Lookup helpers — pure functions over the normalized model.
 // ---------------------------------------------------------------------------
 
-export function findApp(ws: NormalizedWorkspace, name: string): NormalizedApp | undefined {
-  return ws.apps.find((a) => a.name === name);
+export function findRepo(ws: NormalizedWorkspace, name: string): NormalizedRepo | undefined {
+  return ws.repos.find((r) => r.name === name);
 }
 
-export function findSubapp(ws: NormalizedWorkspace, id: TargetId): NormalizedSubapp | undefined {
-  return ws.subapps.find((s) => s.id === id);
+export function findApp(ws: NormalizedWorkspace, id: TargetId): NormalizedApp | undefined {
+  return ws.apps.find((a) => a.id === id);
 }
 
 export function findProfile(ws: NormalizedWorkspace, name: string): NormalizedProfile | undefined {

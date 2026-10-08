@@ -33,7 +33,7 @@ export class U8Error extends Error {
 
 /** A single validation problem, addressed by its path within the config document. */
 export interface ConfigIssue {
-  /** Dotted path, e.g. `apps.gateway.subapps.web.path`. */
+  /** Dotted path, e.g. `repos.gateway.apps.web.path`. */
   path: string;
   message: string;
 }

@@ -29,13 +29,13 @@ beforeAll(() => {
   ws = createWorkspace(
     {
       name: "diagnose",
-      apps: {
+      repos: {
         boom: { path: "boom", scripts: { start: `printf '%s\\n' '${CRITICAL}' >&2; exit 3` } },
         quiet: { path: "quiet", scripts: { start: service("quiet-ready") } },
         fleet: {
           path: "fleet",
           scripts: { start: "exit 1" },
-          subapps: { a: { path: "." }, b: { path: "." }, c: { path: "." }, d: { path: "." } },
+          apps: { a: { path: "." }, b: { path: "." }, c: { path: "." }, d: { path: "." } },
         },
         // A `path` that resolves to a file: the shell is never spawned at all,
         // so this is the one start that has no process to hang a lifecycle on.
@@ -172,9 +172,9 @@ describe("a start that never got as far as a process", () => {
     await cli(["start", "nodir"], { cwd: ws.dir });
     const result = await cli(["status", "--json", "--profile", "broken"], { cwd: ws.dir });
     const json = JSON.parse(result.out) as {
-      apps: Array<{ subapps: Array<{ id: string; status: string; error: string | null }> }>;
+      repos: Array<{ apps: Array<{ id: string; status: string; error: string | null }> }>;
     };
-    const target = json.apps.flatMap((a) => a.subapps).find((s) => s.id === "nodir");
+    const target = json.repos.flatMap((r) => r.apps).find((a) => a.id === "nodir");
 
     expect(target?.status).toBe("crashed");
     expect(target?.error).toContain(`not a directory: ${ws.configPath}`);

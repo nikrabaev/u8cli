@@ -225,7 +225,7 @@ export class FakePluginHost implements PluginHost {
 
 export interface HarnessOptions {
   config: object;
-  /** Directories to create under the workspace root (app / subapp cwds). */
+  /** Directories to create under the workspace root (repo / app cwds). */
   dirs?: string[];
   files?: Record<string, string>;
   profile?: string;
@@ -374,7 +374,7 @@ export function peakConcurrency(marker: string): number {
 
 /**
  * Records its own overlap window into the marker file one level above the
- * target's cwd — every subapp using it must sit at the same depth, so all of
+ * target's cwd — every app using it must sit at the same depth, so all of
  * them append to the same file. `>>` is O_APPEND, so the one-word writes of
  * parallel shells cannot tear.
  */

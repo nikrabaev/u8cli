@@ -1,7 +1,7 @@
 /**
  * The built-in `health` plugin — SPEC §7.2, PLAN 9.3.
  *
- * One probe loop per subapp that declares a `health` check: it publishes the
+ * One probe loop per app that declares a `health` check: it publishes the
  * verdict as `{health@status}` and answers the readiness question `dependsOn`
  * gating asks (SPEC §5.4).
  *
@@ -37,7 +37,7 @@ import fs from "node:fs";
 import { request as httpRequest, type ClientRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 
-import { findSubapp, loadWorkspaceFrom } from "../../config/index.js";
+import { findApp, loadWorkspaceFrom } from "../../config/index.js";
 import { DEFAULT_HEALTH } from "../../config/types.js";
 import type { HealthCheckDef, NormalizedWorkspace, TargetId } from "../../config/types.js";
 import type { WorkspaceHolder } from "../../daemon/contracts.js";
@@ -207,7 +207,7 @@ interface CmdProbeOptions {
   signal?: AbortSignal;
 }
 
-/** Runs the shell probe in the subapp's cwd with its merged env; exit 0 is healthy. */
+/** Runs the shell probe in the app's cwd with its merged env; exit 0 is healthy. */
 export async function probeCmd(cmd: string, opts: CmdProbeOptions): Promise<ProbeOutcome> {
   const result = await exec(cmd, {
     cwd: opts.cwd,
@@ -484,13 +484,13 @@ function createDefReader(holder: WorkspaceHolder | undefined): (
 
   return (workspace, target, logger) => {
     if (!target.hasHealth) return undefined;
-    return findSubapp(load(workspace.configPath, logger) ?? blankWorkspace(), target.id)?.health;
+    return findApp(load(workspace.configPath, logger) ?? blankWorkspace(), target.id)?.health;
   };
 }
 
 /** Stand-in for a workspace that could not be read; every lookup misses. */
 function blankWorkspace(): NormalizedWorkspace {
-  return { subapps: [] } as unknown as NormalizedWorkspace;
+  return { apps: [] } as unknown as NormalizedWorkspace;
 }
 
 // ---------------------------------------------------------------------------
@@ -552,7 +552,7 @@ export function createHealthPlugin(opts: HealthPluginOptions = {}): PluginDefini
 
     indicators: {
       [STATUS_INDICATOR]: {
-        scope: "subapp",
+        scope: "app",
         description: "Health check verdict: healthy, unhealthy, starting or n/a",
         // Event mode: the verdict is pushed the moment a probe lands, instead of
         // waiting for a registry poll that knows nothing about probe timing.

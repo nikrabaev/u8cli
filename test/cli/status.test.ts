@@ -55,34 +55,34 @@ async function settledRows(): Promise<string[]> {
 }
 
 describe("rows", () => {
-  it("renders app headers, subapp rows and a merged row through the templates", async () => {
+  it("renders repo headers, app rows and a merged row through the templates", async () => {
     const lines = await settledRows();
 
     expect(lines[0]).toContain("fixture");
     expect(lines[0]).toContain("profile all");
     expect(lines[0]).toContain("0/3 running");
 
-    // `api` has one subapp, so it is one merged row rendered with the subapp
-    // template — no "APP api" header above it.
-    expect(lines).toContain("SUB api        stopped 1.2.3");
-    expect(lines).not.toContain("APP api");
+    // `api` has one app, so it is one merged row rendered with the app
+    // template — no "REPO api" header above it.
+    expect(lines).toContain("APP api        stopped 1.2.3");
+    expect(lines).not.toContain("REPO api");
 
     // `platform` has two, so it gets a header plus a child row each.
-    expect(lines).toContain("APP platform");
-    expect(lines).toContain("SUB web        stopped 1.2.3");
-    expect(lines).toContain("SUB admin      stopped 1.2.3");
+    expect(lines).toContain("REPO platform");
+    expect(lines).toContain("APP web        stopped 1.2.3");
+    expect(lines).toContain("APP admin      stopped 1.2.3");
   });
 
-  it("marks an unknown token, and resolves app-scoped ones on a subapp row", async () => {
+  it("marks an unknown token, and resolves repo-scoped ones on an app row", async () => {
     const other = createWorkspace(
       {
-        // `git@branch` is app-scoped; a subapp row that mentions it must fall
-        // back to the app's cell rather than render the red unknown marker —
-        // which is what the merged row of every one-app workspace depends on.
-        templates: { subapp: "{app@name} {nope@zilch} [{git@branch}]" },
-        apps: {
+        // `git@branch` is repo-scoped; an app row that mentions it must fall
+        // back to the repo's cell rather than render the red unknown marker —
+        // which is what the merged row of every one-repo workspace depends on.
+        templates: { app: "{app@name} {nope@zilch} [{git@branch}]" },
+        repos: {
           solo: { path: "." },
-          pair: { path: ".", subapps: { one: { path: "." }, two: { path: "." } } },
+          pair: { path: ".", apps: { one: { path: "." }, two: { path: "." } } },
         },
       },
       [],
@@ -97,7 +97,7 @@ describe("rows", () => {
   });
 
   it("says on stderr when a plugin was disabled, and reports it in --json", async () => {
-    const broken = createWorkspace({ plugins: ["./boom.mjs"], apps: { solo: { path: "." } } }, []);
+    const broken = createWorkspace({ plugins: ["./boom.mjs"], repos: { solo: { path: "." } } }, []);
     fs.writeFileSync(broken.file("boom.mjs"), "throw new Error('plugin exploded');\n", "utf8");
 
     const rows = await cli(["status"], { cwd: broken.dir });
@@ -118,8 +118,8 @@ describe("rows", () => {
     const result = await cli(["status", "--profile", "frontend"], { cwd: ws.dir });
 
     expect(result.code).toBe(0);
-    expect(result.out).toContain("SUB web");
-    expect(result.out).not.toContain("SUB api");
+    expect(result.out).toContain("APP web");
+    expect(result.out).not.toContain("APP api");
     expect(result.out).toContain("(active: all)");
   });
 
@@ -135,7 +135,7 @@ describe("rows", () => {
     const result = await cli([], { cwd: ws.dir });
 
     expect(result.code).toBe(0);
-    expect(result.out).toContain("SUB api");
+    expect(result.out).toContain("APP api");
     // The note is on stderr so `u8 | …` still sees rows only.
     expect(result.err).toContain("interactive dashboard");
     expect(result.out).not.toContain("interactive dashboard");
@@ -200,23 +200,23 @@ describe("--json", () => {
     );
     expect(json.configError).toBeNull();
 
-    const api = json.apps.find((a) => a.name === "api");
+    const api = json.repos.find((r) => r.name === "api");
     expect(api?.status).toBe("stopped");
-    expect(api?.subapps).toHaveLength(1);
-    const subapp = api?.subapps[0];
-    expect(subapp?.id).toBe("api");
-    expect(subapp?.implicit).toBe(true);
-    expect(subapp?.status).toBe("stopped");
-    expect(subapp?.pid).toBeNull();
-    expect(subapp?.cwd).toBe(ws.file("api"));
-    expect(subapp?.scripts).toEqual(["start"]);
+    expect(api?.apps).toHaveLength(1);
+    const app = api?.apps[0];
+    expect(app?.id).toBe("api");
+    expect(app?.implicit).toBe(true);
+    expect(app?.status).toBe("stopped");
+    expect(app?.pid).toBeNull();
+    expect(app?.cwd).toBe(ws.file("api"));
+    expect(app?.scripts).toEqual(["start"]);
     // Raw values, never the pre-rendered display.
-    expect(subapp?.indicators["app@status"]).toBe("stopped");
-    expect(subapp?.indicators["app@name"]).toBe("api");
-    expect(subapp?.indicators["x@ver"]).toBe("1.2.3");
+    expect(app?.indicators["app@status"]).toBe("stopped");
+    expect(app?.indicators["app@name"]).toBe("api");
+    expect(app?.indicators["x@ver"]).toBe("1.2.3");
 
-    const platform = json.apps.find((a) => a.name === "platform");
-    expect(platform?.subapps.map((s) => s.id)).toEqual(["platform.web", "platform.admin"]);
+    const platform = json.repos.find((r) => r.name === "platform");
+    expect(platform?.apps.map((a) => a.id)).toEqual(["platform.web", "platform.admin"]);
   });
 
   it("reports the profile that was rendered and the one that is active", async () => {
@@ -225,14 +225,14 @@ describe("--json", () => {
 
     expect(json.profile.name).toBe("frontend");
     expect(json.profile.active).toBe("all");
-    expect(json.apps.map((a) => a.name)).toEqual(["platform"]);
-    expect(json.apps[0]?.subapps.map((s) => s.id)).toEqual(["platform.web"]);
+    expect(json.repos.map((r) => r.name)).toEqual(["platform"]);
+    expect(json.repos[0]?.apps.map((a) => a.id)).toEqual(["platform.web"]);
   });
 });
 
 describe("workspace selection", () => {
   it("--config drives a workspace from anywhere", async () => {
-    const elsewhere = createWorkspace({ apps: { other: { path: "." } } });
+    const elsewhere = createWorkspace({ repos: { other: { path: "." } } });
     const result = await cli(["status", "--json", "--config", ws.configPath], { cwd: elsewhere.dir });
 
     const json = JSON.parse(result.out) as StatusJson;
@@ -240,7 +240,7 @@ describe("workspace selection", () => {
   });
 
   it("--cwd moves discovery, and a relative --config resolves against it", async () => {
-    const elsewhere = createWorkspace({ apps: { other: { path: "." } } });
+    const elsewhere = createWorkspace({ repos: { other: { path: "." } } });
     const viaCwd = await cli(["status", "--json", "--cwd", ws.dir], { cwd: elsewhere.dir });
     expect((JSON.parse(viaCwd.out) as StatusJson).workspace.name).toBe("fixture");
 
@@ -268,7 +268,7 @@ describe("a target whose directory is not there", () => {
     const broken = createWorkspace(
       {
         name: "broken",
-        apps: {
+        repos: {
           api: { path: "api", scripts: { start: "true" } },
           legacy: { path: "legacy", scripts: { start: "true" } },
         },
@@ -285,7 +285,7 @@ describe("a target whose directory is not there", () => {
     expect(stripAnsi(result.err)).toContain(
       `legacy cannot start: no such directory: ${broken.file("legacy")}`,
     );
-    // And nothing at all about the app that is fine.
+    // And nothing at all about the repo that is fine.
     expect(stripAnsi(result.err)).not.toContain("api cannot start");
   });
 
@@ -293,7 +293,7 @@ describe("a target whose directory is not there", () => {
     const broken = createWorkspace(
       {
         name: "notdir",
-        apps: { api: { path: "u8.jsonc", scripts: { start: "true" } } },
+        repos: { api: { path: "u8.jsonc", scripts: { start: "true" } } },
         profiles: { all: { default: true, targets: ["api"] } },
       },
       [],
@@ -306,14 +306,14 @@ describe("a target whose directory is not there", () => {
     );
   });
 
-  it("names the subapp when the subapp's own path is the missing one", async () => {
+  it("names the app when the app's own path is the missing one", async () => {
     const broken = createWorkspace(
       {
         name: "sub",
-        apps: {
+        repos: {
           platform: {
             path: "platform",
-            subapps: {
+            apps: {
               web: { path: "web", scripts: { start: "true" } },
               admin: { path: "admin", scripts: { start: "true" } },
             },

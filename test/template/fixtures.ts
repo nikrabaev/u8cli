@@ -9,7 +9,7 @@ export function lookupOf(values: Record<string, ValueSpec>): IndicatorLookup {
     const spec = values[`${ns}@${name}`];
     if (spec === undefined) return undefined;
     const body = typeof spec === "string" ? { value: spec } : spec;
-    return { ns, name, scope: "subapp", owner: "gateway", ...body } satisfies IndicatorValue;
+    return { ns, name, scope: "app", owner: "gateway", ...body } satisfies IndicatorValue;
   };
 }
 

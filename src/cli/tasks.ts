@@ -94,7 +94,7 @@ export async function taskCommand(ctx: CliContext, spec: TaskSpec, opts: TaskOpt
 }
 
 function selectTargets(snapshot: Snapshot, opts: TaskOptions): string[] | undefined {
-  if (opts.all === true) return snapshot.apps.flatMap((app) => app.subapps.map((s) => s.id));
+  if (opts.all === true) return snapshot.repos.flatMap((repo) => repo.apps.map((a) => a.id));
   return opts.targets.length === 0 ? undefined : [...opts.targets];
 }
 

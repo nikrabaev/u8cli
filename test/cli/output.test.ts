@@ -58,7 +58,7 @@ describe("reportError", () => {
       new ConfigError(
         "invalid workspace config",
         [
-          { path: "apps.web.path", message: "expected string" },
+          { path: "repos.web.path", message: "expected string" },
           { path: "profiles.dev", message: "unknown target" },
         ],
         "/ws/u8.jsonc",
@@ -69,7 +69,7 @@ describe("reportError", () => {
 
     expect(code).toBe(1);
     expect(target.err.text).toContain("/ws/u8.jsonc");
-    expect(target.err.text).toContain("• apps.web.path: expected string");
+    expect(target.err.text).toContain("• repos.web.path: expected string");
     expect(target.err.text).toContain("• profiles.dev: unknown target");
   });
 

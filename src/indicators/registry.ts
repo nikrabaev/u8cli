@@ -3,8 +3,8 @@
  * scheduling that keeps them fresh.
  *
  * Four rules shape the implementation:
- *  - **One value per (ns, name, owner).** Owners are app names for app-scoped
- *    providers and target ids for subapp-scoped ones, derived from the workspace
+ *  - **One value per (ns, name, owner).** Owners are repo names for repo-scoped
+ *    providers and target ids for app-scoped ones, derived from the workspace
  *    on every activation so a config reload re-binds without a restart.
  *  - **Nothing enters the cache unsanitized.** Values are arbitrary command
  *    stdout; see `sanitize.ts`.
@@ -14,7 +14,7 @@
  *    unref'd — indicators must not keep the daemon alive — and `stop()` leaves
  *    none behind.
  */
-import type { NormalizedSubapp, NormalizedWorkspace, TargetId } from "../config/types.js";
+import type { NormalizedApp, NormalizedWorkspace, TargetId } from "../config/types.js";
 import type { IndicatorRegistration, IndicatorRegistry, Unsubscribe } from "../daemon/contracts.js";
 import type { IndicatorTone, IndicatorValue } from "../ipc/protocol.js";
 import type {
@@ -93,7 +93,7 @@ interface ProviderEntry {
 type Settled<T> = { state: "ok"; value: T } | { state: "error"; error: unknown } | { state: "timeout" };
 
 /**
- * Creates the registry. Core `app@` providers are registered immediately and
+ * Creates the registry. Core `app@` / `repo@` providers are registered immediately and
  * config-declared `x@` providers are derived from the workspace on every
  * `start()` / `rebind()`, so the daemon only has to add plugin providers.
  */
@@ -154,13 +154,13 @@ class Registry implements IndicatorRegistry {
   }
 
   /**
-   * Subapp scope wins a tie: an implicit subapp's target id equals its app name,
-   * and such an app renders as a single merged row from the subapp template.
+   * App scope wins a tie: an implicit app's target id equals its repo name,
+   * and such a repo renders as a single merged row from the app template.
    */
   get(ns: string, name: string, owner: string): IndicatorValue | undefined {
     return (
-      this.providers.get(providerKey(ns, name, "subapp"))?.owners.get(owner)?.value ??
-      this.providers.get(providerKey(ns, name, "app"))?.owners.get(owner)?.value
+      this.providers.get(providerKey(ns, name, "app"))?.owners.get(owner)?.value ??
+      this.providers.get(providerKey(ns, name, "repo"))?.owners.get(owner)?.value
     );
   }
 
@@ -228,7 +228,7 @@ class Registry implements IndicatorRegistry {
 
   /** Adds or replaces a provider definition without touching cached values. */
   private upsert(reg: IndicatorRegistration): ProviderEntry {
-    const scope = reg.def.scope ?? "subapp";
+    const scope = reg.def.scope ?? "app";
     const key = providerKey(reg.ns, reg.name, scope);
     const update = resolveUpdate(reg.def, `${reg.ns}@${reg.name}`, this.logger);
     if (reg.def.value === undefined && reg.def.subscribe === undefined) {
@@ -264,7 +264,7 @@ class Registry implements IndicatorRegistry {
   /** Config-declared `x@` providers follow the workspace, not the plugin host. */
   private syncCustomProviders(): void {
     const wanted = customIndicators(this.deps.workspace.current().indicators);
-    const keep = new Set(wanted.map((r) => providerKey(r.ns, r.name, r.def.scope ?? "subapp")));
+    const keep = new Set(wanted.map((r) => providerKey(r.ns, r.name, r.def.scope ?? "app")));
     for (const [key, entry] of [...this.providers]) {
       if (entry.ns !== CUSTOM_NAMESPACE || keep.has(key)) continue;
       for (const state of entry.owners.values()) {
@@ -473,7 +473,7 @@ class Registry implements IndicatorRegistry {
     const scoped =
       pending === "all"
         ? undefined
-        : { targets: pending, apps: appOwnersOf(this.deps.workspace.current(), pending) };
+        : { targets: pending, repos: repoOwnersOf(this.deps.workspace.current(), pending) };
 
     for (const entry of this.providers.values()) {
       if (entry.update.mode === "static" || entry.def.value === undefined || usesSubscription(entry)) {
@@ -481,7 +481,7 @@ class Registry implements IndicatorRegistry {
       }
       for (const state of entry.owners.values()) {
         if (scoped) {
-          const owners = entry.scope === "app" ? scoped.apps : scoped.targets;
+          const owners = entry.scope === "repo" ? scoped.repos : scoped.targets;
           if (!owners.has(state.owner)) continue;
         }
         this.detach(this.evaluate(entry, state, true));
@@ -545,33 +545,33 @@ class Registry implements IndicatorRegistry {
     const workspace = { id: ws.id, name: ws.name, rootDir: ws.rootDir, configPath: ws.configPath };
     const store = this.storeFor(entry.ns);
 
-    if (entry.scope === "app") {
-      const app = ws.apps.find((a) => a.name === owner);
-      if (!app) return undefined;
+    if (entry.scope === "repo") {
+      const repo = ws.repos.find((r) => r.name === owner);
+      if (!repo) return undefined;
       return {
         workspace,
         logger: entry.logger,
-        exec: execIn(app.path, {}, signal),
+        exec: execIn(repo.path, {}, signal),
         store,
-        scope: "app",
-        app: { name: app.name, path: app.path },
-        cwd: app.path,
+        scope: "repo",
+        repo: { name: repo.name, path: repo.path },
+        cwd: repo.path,
       };
     }
 
-    const subapp = ws.subapps.find((s) => s.id === owner);
-    if (!subapp) return undefined;
-    const app = ws.apps.find((a) => a.name === subapp.appName);
+    const app = ws.apps.find((a) => a.id === owner);
+    if (!app) return undefined;
+    const repo = ws.repos.find((r) => r.name === app.repoName);
     return {
       workspace,
       logger: entry.logger,
-      exec: execIn(subapp.cwd, subapp.env, signal),
+      exec: execIn(app.cwd, app.env, signal),
       store,
-      scope: "subapp",
-      app: { name: subapp.appName, path: app?.path ?? subapp.cwd },
-      target: toTargetInfo(subapp),
-      cwd: subapp.cwd,
-      service: this.deps.services.state(subapp.id),
+      scope: "app",
+      repo: { name: app.repoName, path: repo?.path ?? app.cwd },
+      target: toTargetInfo(app),
+      cwd: app.cwd,
+      service: this.deps.services.state(app.id),
     };
   }
 
@@ -590,8 +590,9 @@ class Registry implements IndicatorRegistry {
 // ---------------------------------------------------------------------------
 
 /**
- * Scope is part of the key: `app@name` exists at both scopes, because the app
- * header row and the subapp row are written with the same token.
+ * Scope is part of the key: a plugin may register one name at both scopes — a
+ * per-repo and a per-app reading of the same thing — and neither may overwrite
+ * the other.
  */
 function providerKey(ns: string, name: string, scope: IndicatorScope): string {
   return `${ns}@${name}#${scope}`;
@@ -603,27 +604,27 @@ function cellKey(entry: ProviderEntry, owner: string): string {
 }
 
 function ownersFor(ws: NormalizedWorkspace, scope: IndicatorScope): string[] {
-  return scope === "app" ? ws.apps.map((a) => a.name) : ws.subapps.map((s) => s.id);
+  return scope === "repo" ? ws.repos.map((r) => r.name) : ws.apps.map((a) => a.id);
 }
 
-/** Apps owning any of these targets — an app row refreshes with its children. */
-function appOwnersOf(ws: NormalizedWorkspace, ids: ReadonlySet<TargetId>): Set<string> {
+/** Repos owning any of these targets — a repo row refreshes with its children. */
+function repoOwnersOf(ws: NormalizedWorkspace, ids: ReadonlySet<TargetId>): Set<string> {
   const out = new Set<string>();
-  for (const subapp of ws.subapps) if (ids.has(subapp.id)) out.add(subapp.appName);
+  for (const app of ws.apps) if (ids.has(app.id)) out.add(app.repoName);
   return out;
 }
 
-function toTargetInfo(subapp: NormalizedSubapp): TargetInfo {
+function toTargetInfo(app: NormalizedApp): TargetInfo {
   return {
-    id: subapp.id,
-    appName: subapp.appName,
-    name: subapp.name,
-    implicit: subapp.implicit,
-    cwd: subapp.cwd,
-    scripts: { ...subapp.scripts },
-    env: { ...subapp.env },
-    dependsOn: [...subapp.dependsOn],
-    hasHealth: subapp.health !== undefined,
+    id: app.id,
+    repoName: app.repoName,
+    name: app.name,
+    implicit: app.implicit,
+    cwd: app.cwd,
+    scripts: { ...app.scripts },
+    env: { ...app.env },
+    dependsOn: [...app.dependsOn],
+    hasHealth: app.health !== undefined,
   };
 }
 

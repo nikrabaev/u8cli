@@ -16,10 +16,10 @@ Progress convention: mark tasks `[x]` as they land; one commit per task or coher
 
 ## Phase 1 — Config layer (`src/config/`)
 
-- [ ] 1.1 zod schema for the full config surface (§2, §10): apps/subapps, profiles, commands (+`kind`, shared script, `targets` map with `null` = skip), workspace `indicators`, `templates`, `plugins`, hook strings, limits (log caps, stop timeout).
+- [ ] 1.1 zod schema for the full config surface (§2, §10): repos/apps, profiles, commands (+`kind`, shared script, `targets` map with `null` = skip), workspace `indicators`, `templates`, `plugins`, hook strings, limits (log caps, stop timeout).
 - [ ] 1.2 JSONC loading (`jsonc-parser`) + upward discovery of `u8.jsonc` from cwd; friendly validation errors (path + message).
-- [ ] 1.3 Normalization pass → internal model: implicit subapp for subapp-less apps; `~` and relative path resolution; target-ID canonicalization (`app`, `app.subapp`); reserved-namespace rejection for user command names; `dependsOn` cycle detection; profile default uniqueness.
-- [ ] 1.4 Target resolution helpers: profile → subapp list; target string → subapps; command → per-target script resolution (shared/override/null-skip/absent-skip).
+- [ ] 1.3 Normalization pass → internal model: implicit app for app-less repos; `~` and relative path resolution; target-ID canonicalization (`repo`, `repo.app`); reserved-namespace rejection for user command names; `dependsOn` cycle detection; profile default uniqueness.
+- [ ] 1.4 Target resolution helpers: profile → app list; target string → apps; command → per-target script resolution (shared/override/null-skip/absent-skip).
 - [ ] 1.5 Workspace identity (real-path hash) + state-dir paths module (`~/.u8/<hash>/…`).
 - [ ] 1.6 `u8 init` — write commented skeleton `u8.jsonc` (refuse to overwrite).
 - [ ] 1.7 Generate `schema.json` from the zod schema at build time (zod v4 native JSON-schema conversion).
@@ -46,7 +46,7 @@ Independent of everything else; pure functions.
 
 ## Phase 4 — Process layer (`src/process/`)
 
-- [ ] 4.1 Spawn via `$SHELL -c` in target cwd, own process group; env merge (daemon env → workspace → app → subapp).
+- [ ] 4.1 Spawn via `$SHELL -c` in target cwd, own process group; env merge (daemon env → workspace → repo → app).
 - [ ] 4.2 Stop: SIGTERM to group → SIGKILL after timeout (default 10 s, configurable); reliable exit detection with exit code/signal.
 - [ ] 4.3 Log capture: stdout+stderr → per-target file; rotation at 10 MB keep 3; task-run logs (per run+target) pruned after 20 runs; tail/read API.
 
@@ -63,7 +63,7 @@ Independent of everything else; pure functions.
 
 ## Phase 6 — Indicators (`src/indicators/`)
 
-- [ ] 6.1 Provider registry: `scope: app|subapp`, update mode `event|poll|static`; per-target value cache; poll scheduler (per-provider interval, no overlapping runs).
+- [ ] 6.1 Provider registry: `scope: repo|app`, update mode `event|poll|static`; per-target value cache; poll scheduler (per-provider interval, no overlapping runs).
 - [ ] 6.2 Delta push over IPC (`indicator.changed` notifications); full snapshot on client attach; `status --json` reads the same cache.
 - [ ] 6.3 Core `app@` providers: name, dirname, path (static), status, pid, uptime, exitcode (event-driven from supervisor).
 - [ ] 6.4 Config-defined `x@` indicators: shell cmd per target in target cwd, trimmed stdout, poll interval; failures render empty + log warning.
@@ -90,7 +90,7 @@ Independent of everything else; pure functions.
 ## Phase 9 — Built-in plugins
 
 - [ ] 9.1 `git`: indicators branch/dirty/ahead/behind via `git status --porcelain=v2 --branch`; fs-watch on `.git/HEAD` + index with debounce + 30 s fallback poll; non-git dirs → empty values.
-- [ ] 9.2 `git` commands: `git:fetch`, `git:pull` — task kind, deduped once per app across the profile.
+- [ ] 9.2 `git` commands: `git:fetch`, `git:pull` — task kind, deduped once per repo across the profile.
 - [ ] 9.3 `health`: http + cmd probes (interval 5 s, timeout 2 s, threshold 2), `health@status` (healthy|unhealthy|starting|n/a), probes only while running; registers the readiness predicate for 7.4.
 - [ ] 9.4 Disable switches in config for built-ins.
 
@@ -106,7 +106,7 @@ Independent of everything else; pure functions.
 
 ## Phase 11 — TUI (`src/tui/`)
 
-- [ ] 11.1 Ink app shell: connect/attach, header (workspace, profile, daemon state, config-error banner), main list from indicator snapshot + deltas (app header rows + subapp rows via templates, merged row for single-subapp apps).
+- [ ] 11.1 Ink app shell: connect/attach, header (workspace, profile, daemon state, config-error banner), main list from indicator snapshot + deltas (repo header rows + app rows via templates, merged row for single-app repos).
 - [ ] 11.2 Selection + lifecycle keys (`s/x/r` target, `S/X/R` profile) with task/inline progress display.
 - [ ] 11.3 Log view: Enter → follow + scrollback (file backfill + live stream), Esc back.
 - [ ] 11.4 Command palette (`:`/`p`): run any command on selection or profile; result summary. Profile switcher (`P`).

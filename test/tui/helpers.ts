@@ -27,7 +27,7 @@ import type {
   ServiceState,
   ServiceStatus,
   Snapshot,
-  SnapshotSubapp,
+  SnapshotApp,
 } from "../../src/ipc/protocol.js";
 import type { Scheduler } from "../../src/tui/controller.js";
 import type { DashboardClient, Unsubscribe } from "../../src/tui/types.js";
@@ -36,25 +36,25 @@ import type { DashboardClient, Unsubscribe } from "../../src/tui/types.js";
 // Snapshot fixtures
 // ---------------------------------------------------------------------------
 
-/** The workspace the CLI tests use: one merged-row app, one two-subapp app. */
+/** The workspace the CLI tests use: one merged-row repo, one two-app repo. */
 export function fixtureSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
-  const api = subapp("api");
-  const web = subapp("platform", "web");
-  const admin = subapp("platform", "admin");
+  const api = app("api");
+  const web = app("platform", "web");
+  const admin = app("platform", "admin");
   const ids = [api.id, web.id, admin.id];
 
   return {
     protocolVersion: PROTOCOL_VERSION,
     daemonVersion: "0.1.0",
     workspace: { id: "wsid", name: "fixture", rootDir: "/ws", configPath: "/ws/u8.jsonc" },
-    templates: { app: "APP {app@name}", subapp: "SUB {app@name} {app@status}" },
-    apps: [
-      { name: "api", path: "/ws/api", subapps: [api] },
-      { name: "platform", path: "/ws/platform", subapps: [web, admin] },
+    templates: { repo: "REPO {repo@name}", app: "APP {app@name} {app@status}" },
+    repos: [
+      { name: "api", path: "/ws/api", apps: [api] },
+      { name: "platform", path: "/ws/platform", apps: [web, admin] },
     ],
     profiles: [
-      { name: "all", isDefault: true, subappIds: ids },
-      { name: "frontend", isDefault: false, subappIds: [web.id] },
+      { name: "all", isDefault: true, appIds: ids },
+      { name: "frontend", isDefault: false, appIds: [web.id] },
     ],
     activeProfile: "all",
     commands: [
@@ -65,25 +65,25 @@ export function fixtureSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     services: ids.map((id) => serviceState(id, "stopped")),
     indicators: [
       ...ids.flatMap((id) => [
-        indicator({ ns: "app", name: "name", scope: "subapp", owner: id, value: id.split(".").at(-1) ?? id }),
+        indicator({ ns: "app", name: "name", scope: "app", owner: id, value: id.split(".").at(-1) ?? id }),
         statusIndicator(id, "stopped"),
       ]),
-      indicator({ ns: "app", name: "name", scope: "app", owner: "api", value: "api" }),
-      indicator({ ns: "app", name: "name", scope: "app", owner: "platform", value: "platform" }),
+      indicator({ ns: "repo", name: "name", scope: "repo", owner: "api", value: "api" }),
+      indicator({ ns: "repo", name: "name", scope: "repo", owner: "platform", value: "platform" }),
     ],
     plugins: [{ name: "git", spec: "git", ok: true }],
     ...overrides,
   };
 }
 
-export function subapp(appName: string, name?: string): SnapshotSubapp {
+export function app(repoName: string, name?: string): SnapshotApp {
   const implicit = name === undefined;
   return {
-    id: implicit ? appName : `${appName}.${name}`,
-    appName,
-    name: name ?? appName,
+    id: implicit ? repoName : `${repoName}.${name}`,
+    repoName,
+    name: name ?? repoName,
     implicit,
-    cwd: `/ws/${appName}${implicit ? "" : `/${name}`}`,
+    cwd: `/ws/${repoName}${implicit ? "" : `/${name}`}`,
     hasHealth: false,
     dependsOn: [],
     scripts: ["start"],
@@ -97,7 +97,7 @@ export function serviceState(targetId: TargetId, status: ServiceStatus): Service
 export function indicator(value: {
   ns: string;
   name: string;
-  scope: "app" | "subapp";
+  scope: "repo" | "app";
   owner: string;
   value: string;
   display?: string;
@@ -109,7 +109,7 @@ export function indicator(value: {
 /** `app@status` as the daemon publishes it: a glyph whose meaning is its tone. */
 export function statusIndicator(owner: TargetId, status: string): IndicatorValue {
   const tone: IndicatorTone = status === "running" ? "ok" : status === "crashed" ? "error" : "muted";
-  return { ns: "app", name: "status", scope: "subapp", owner, value: status, display: "●", tone };
+  return { ns: "app", name: "status", scope: "app", owner, value: status, display: "●", tone };
 }
 
 export function logLine(targetId: TargetId, text: string, ts = 0): LogLine {

@@ -81,7 +81,7 @@ export interface Supervisor {
    * code — must await this instead of reading what `start` returned.
    */
   waitForSettled(id: TargetId): Promise<ServiceState>;
-  /** Runs a custom stop script if the subapp declares one, else signals the group. */
+  /** Runs a custom stop script if the app declares one, else signals the group. */
   stop(id: TargetId, opts?: StopOptions): Promise<ServiceState>;
   restart(id: TargetId): Promise<ServiceState>;
   stopAll(opts?: StopOptions): Promise<void>;
@@ -230,7 +230,7 @@ export interface DaemonContext {
   setActiveProfile(name: string): void;
 }
 
-/** Converts a normalized subapp into the shape handed to plugin callbacks. */
+/** Converts a normalized app into the shape handed to plugin callbacks. */
 export interface TargetInfoResolver {
   targetInfo(id: TargetId): TargetInfo | undefined;
 }

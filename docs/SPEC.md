@@ -3,7 +3,7 @@
 **Status**: approved design, v1 scope
 **Date**: 2026-08-14
 
-u8cli (`u8`) is a workspace-scoped orchestrator for long-running microservice apps spread across the disk. It provides a live TUI dashboard of a profile's apps/subapps, daemon-managed processes that survive the terminal, a configurable command system with hooks, and a plugin system that contributes indicators, commands, and hook bindings.
+u8cli (`u8`) is a workspace-scoped orchestrator for long-running microservice apps spread across the disk. It provides a live TUI dashboard of a profile's repos/apps, daemon-managed processes that survive the terminal, a configurable command system with hooks, and a plugin system that contributes indicators, commands, and hook bindings.
 
 ---
 
@@ -47,23 +47,23 @@ A directory containing `u8.jsonc`. Discovered by walking upward from cwd (git-st
 - Workspace identity: hash of the config file's real (symlink-resolved) path.
 - State dir: `~/.u8/<workspace-hash>/` — daemon socket, daemon log, pid file, process logs, local state (active profile).
 
-### 2.2 App
+### 2.2 Repo
 
-A high-level repo, located anywhere on disk (`path` absolute or relative to the workspace). Apps are grouping + app-scoped indicator surface (e.g. git). Apps are **not** runnable.
+A source checkout, located anywhere on disk (`path` absolute or relative to the workspace). Repos are grouping + repo-scoped indicator surface (e.g. git). Repos are **not** runnable.
 
-### 2.3 Subapp — the runnable unit
+### 2.3 App — the runnable unit
 
-The engine only knows subapps. Every process, log stream, status, health probe, and command target is a subapp.
+The engine only knows apps. Every process, log stream, status, health probe, and command target is an app.
 
-- An app with no `subapps` is normalized at config-load into an app with one **implicit subapp** (same path, scripts taken from the app entry). Single code path downstream.
-- Fields: `path` (cwd relative to the app's path), `scripts` (map of name → shell string), `env`, `dependsOn`, `health`, `restart`, `template` override.
-- Scripts are **arbitrary shell strings**, executed via the user's `$SHELL` in the subapp's cwd. No package-manager assumptions.
+- A repo with no `apps` is normalized at config-load into a repo with one **implicit app** (same path, scripts taken from the repo entry). Single code path downstream.
+- Fields: `path` (cwd relative to the repo's path), `scripts` (map of name → shell string), `env`, `dependsOn`, `health`, `restart`, `template` override.
+- Scripts are **arbitrary shell strings**, executed via the user's `$SHELL` in the app's cwd. No package-manager assumptions.
 
-Target addressing: `appName` (all its subapps, or its implicit one) or `appName.subappName`.
+Target addressing: `repoName` (all its apps, or its implicit one) or `repoName.appName`.
 
 ### 2.4 Profile
 
-A named list of targets (apps and/or specific subapps). Pure selection — no overrides in v1.
+A named list of targets (repos and/or specific apps). Pure selection — no overrides in v1.
 
 - Exactly one profile may be marked `default: true`.
 - Active profile is switched with `u8 profile use <name>` (or the TUI switcher) and persisted in the **state dir**, not the shared config.
@@ -76,7 +76,7 @@ A named unit of work runnable against targets.
   - **service**: spawned process is registered with the supervisor — status, restart, log tracking. "Done" = running.
   - **task**: runs to completion; success = exit 0; output captured to a per-run log.
 - Script resolution (many-to-one): optional shared `script` run in each target's cwd, plus a `targets` map of target → script overriding the shared one. A target matching neither is **skipped**.
-- Built-in commands: `app:start`, `app:stop`, `app:restart` (service semantics). Their per-target script defaults from the subapp's `scripts.start`; overridable like any command.
+- Built-in commands: `app:start`, `app:stop`, `app:restart` (service semantics). Their per-target script defaults from the app's `scripts.start`; overridable like any command.
 - Task execution across targets: **parallel with a concurrency cap** (default 4; per-command `concurrency`; `--serial` flag). Per-target output capture; pass/fail summary table at the end; per-target progress in the TUI.
 
 ### 2.6 Hooks
@@ -90,7 +90,7 @@ Per `(command, target)` pair: `pre` → script → `post`.
 
 ### 2.7 Indicator
 
-A named, per-target (or per-app) value rendered in templates as `{ns@name}`.
+A named, per-target (or per-repo) value rendered in templates as `{ns@name}`.
 
 - Providers live **in the daemon** (from core, plugins, or config). Each declares its update mode:
   - **event** — pushed by the engine (e.g. process status),
@@ -108,10 +108,10 @@ An npm package (resolved from the workspace's `node_modules`) or a relative path
 ## 3. Naming conventions
 
 - **Commands**: `ns:name`. Reserved namespaces: `app` (core) and every loaded plugin's name (e.g. `git:pull`). User commands in config are **bare names** (`test`, `deploy`); a bare name using a reserved prefix is rejected at validation.
-- **Indicators**: `{ns@name}`. `app@…` core, `<plugin>@…` plugin, `x@…` config-defined.
+- **Indicators**: `{ns@name}`. `app@…` and `repo@…` core, `<plugin>@…` plugin, `x@…` config-defined.
 - Collisions inside a namespace are validation errors.
 
-Core indicators (v1): `app@name`, `app@dirname`, `app@path`, `app@status`, `app@pid`, `app@uptime`, `app@exitcode`.
+Core indicators (v1): per app `app@name`, `app@dirname`, `app@path`, `app@status`, `app@pid`, `app@uptime`, `app@exitcode`; per repo `repo@name`, `repo@dirname`, `repo@path`, `repo@status` (the worst state among its apps).
 
 `app@status` values: `stopped | starting | running | crashed | stopping | stale`. (`stale` = running with a spawn-time definition that no longer matches config; see §8.)
 
@@ -128,7 +128,8 @@ Row templates are strings of literal text + tokens with optional colon-chained m
 - Grammar: `{ns@indicator(:modifier(args))*}`.
 - Modifiers (v1): `pad(n)` (right-pad/align to width), `max(n)` (truncate with `…`), `color(name)`, `dim`, `bold`. Indicators may carry a semantic default rendering (e.g. `app@status` renders `●` colored by state); modifiers override it.
 - **No conditionals or expressions.** Anything conditional belongs in a custom indicator.
-- Configuration: workspace-level `templates.app` (app header row) and `templates.subapp` (child row); any app or subapp may override with its own `template`. Single-subapp apps render as **one merged row** using the subapp template.
+- Configuration: workspace-level `templates.repo` (repo header row) and `templates.app` (child row); any repo or app may override with its own `template`. Single-app repos render as **one merged row** using the app template.
+- An app row falls back to its repo's cells (`{git@branch}`, `{repo@dirname}`); a header row does not fall back to an app's, so `app@…` there is an unknown token.
 - Unknown token → rendered as `{ns@name!}` in red (not a crash); validation warns at load.
 
 ---
@@ -150,8 +151,8 @@ Row templates are strings of literal text + tokens with optional colon-chained m
 ### 5.3 Process management
 
 - Services spawn via `$SHELL -c <script>` in the target cwd, in their **own process group**; stop = SIGTERM to the group, SIGKILL after a timeout (default 10 s, configurable).
-- Env: processes inherit the daemon's environment, merged with `env` maps in order **workspace → app → subapp**. u8 does **not** parse `.env` files; repos keep their own env story.
-- Crash policy: default **no auto-restart** — status flips to `crashed` (exit code surfaced), logs preserved, one-key restart in the TUI. Per-subapp opt-in `restart: "on-crash"` with capped exponential backoff (1s → 2s → 4s … max 30s; give up after 10 consecutive failures → `crashed`).
+- Env: processes inherit the daemon's environment, merged with `env` maps in order **workspace → repo → app**. u8 does **not** parse `.env` files; repos keep their own env story.
+- Crash policy: default **no auto-restart** — status flips to `crashed` (exit code surfaced), logs preserved, one-key restart in the TUI. Per-app opt-in `restart: "on-crash"` with capped exponential backoff (1s → 2s → 4s … max 30s; give up after 10 consecutive failures → `crashed`).
 
 ### 5.4 Startup ordering
 
@@ -160,11 +161,11 @@ Row templates are strings of literal text + tokens with optional colon-chained m
 - has a healthcheck → ready = `healthy`;
 - no healthcheck → ready = `running`.
 
-Readiness wait has a timeout (default 60 s, per-subapp override); on timeout the dependent is not started and is marked with an error status.
+Readiness wait has a timeout (default 60 s, per-app override); on timeout the dependent is not started and is marked with an error status.
 
 ### 5.5 Logs
 
-- Services: one current log file per subapp, rotated at 10 MB keeping 3 files.
+- Services: one current log file per app, rotated at 10 MB keeping 3 files.
 - Tasks: one log file per (run, target), pruned after 20 runs per command.
 - Caps configurable in workspace config. `u8 logs <target>` tails/follows; TUI log view reads the same files plus the live push stream.
 
@@ -180,9 +181,9 @@ export default definePlugin({
   indicators: {
     // {example@thing}
     thing: {
-      scope: "subapp",            // "subapp" | "app"
+      scope: "app",            // "app" | "repo"
       update: { poll: 5000 },      // or { event: true } / { static: true }
-      async value(ctx) {           // ctx: { target, app, cwd, exec, logger, store }
+      async value(ctx) {           // ctx: { target, repo, cwd, exec, logger, store }
         return "42";
       },
     },
@@ -214,14 +215,14 @@ export default definePlugin({
 
 ### 7.1 `git`
 
-- **Indicators** (scope: app): `git@branch`, `git@dirty` (changed-file count, empty when clean), `git@ahead`, `git@behind` (vs upstream).
+- **Indicators** (scope: repo): `git@branch`, `git@dirty` (changed-file count, empty when clean), `git@ahead`, `git@behind` (vs upstream).
 - Updated via `git status --porcelain=v2 --branch`, triggered by fs-watch on `.git/HEAD` + index with debounce, plus a slow fallback poll (30 s).
-- **Commands**: `git:fetch`, `git:pull` (task kind, run across the active profile's apps — dedup: once per app, not per subapp). Read-only chores only; no checkout/mutation commands in v1.
-- Non-git app dirs: indicators render empty; commands skip the app.
+- **Commands**: `git:fetch`, `git:pull` (task kind, run across the active profile's repos — dedup: once per repo, not per app). Read-only chores only; no checkout/mutation commands in v1.
+- Non-git repo dirs: indicators render empty; commands skip the repo.
 
 ### 7.2 `health`
 
-- Per-subapp opt-in:
+- Per-app opt-in:
 
 ```jsonc
 "health": { "http": "http://localhost:3001/healthz" }
@@ -232,7 +233,7 @@ export default definePlugin({
 - Defaults: interval 5 s, timeout 2 s, threshold 2 consecutive failures → `unhealthy`.
 - **Indicator**: `health@status` ∈ `healthy | unhealthy | starting | n/a` (n/a when no healthcheck or process not running; `starting` between spawn and first success).
 - Provides the **readiness signal** consumed by `dependsOn` gating (§5.4).
-- Probes only run while the subapp's process is running.
+- Probes only run while the app's process is running.
 
 ---
 
@@ -250,7 +251,7 @@ The daemon watches `u8.jsonc`:
 
 ### 9.1 TUI (`u8` with no args)
 
-- Main screen: list of the active profile's apps (header rows) with subapp rows beneath, rendered from templates. Cursor selection.
+- Main screen: list of the active profile's repos (header rows) with app rows beneath, rendered from templates. Cursor selection.
 - Keys (defaults): `s` start / `x` stop / `r` restart selection; `S`/`X`/`R` whole profile; `Enter` log view (follow + scrollback, `Esc` back); `:` or `p` command palette (run any defined command on selection or profile); `P` profile switcher; `q` quit (daemon and processes keep running).
 - Header shows workspace name, active profile, daemon state, config-error banner when applicable.
 - Task runs show inline per-target progress and a result summary.
@@ -279,8 +280,8 @@ u8 daemon status|stop|logs
   "$schema": "https://unpkg.com/u8cli/schema.json",
 
   "templates": {
-    "app": "{app@name:pad(24)} {app@dirname:dim} {git@branch:color(yellow):max(20)} {git@dirty:color(red)}",
-    "subapp": "  {app@status} {app@name:pad(22)} {health@status} {x@version:dim}"
+    "repo": "{repo@name:pad(24)} {repo@dirname:dim} {git@branch:color(yellow):max(20)} {git@dirty:color(red)}",
+    "app": "  {app@status} {app@name:pad(22)} {health@status} {x@version:dim}"
   },
 
   "plugins": ["./plugins/deploy.ts"],          // git + health are built-in
@@ -289,15 +290,15 @@ u8 daemon status|stop|logs
     "version": { "cmd": "jq -r .version package.json", "interval": 60000 }  // {x@version}
   },
 
-  "apps": {
+  "repos": {
     "gateway": {
-      "path": "~/Work/proj/gateway",           // no subapps → implicit subapp
+      "path": "~/Work/proj/gateway",           // no apps → implicit app
       "scripts": { "start": "pnpm dev" },
       "health": { "http": "http://localhost:3000/healthz" }
     },
     "platform": {
       "path": "~/Work/proj/platform-monorepo",
-      "subapps": {
+      "apps": {
         "shell":    { "path": "apps/shell",    "scripts": { "start": "pnpm dev --port 3100" } },
         "auth-mfe": { "path": "apps/auth-mfe", "scripts": { "start": "pnpm dev --port 3101" },
                       "dependsOn": ["gateway"] }
@@ -342,6 +343,6 @@ u8 daemon status|stop|logs
 
 ## 12. Testing strategy
 
-- Unit: template parser/renderer, config normalization (implicit subapps, target resolution), command script resolution, dependsOn DAG ordering, hook ordering/abort semantics.
+- Unit: template parser/renderer, config normalization (implicit apps, target resolution), command script resolution, dependsOn DAG ordering, hook ordering/abort semantics.
 - Integration: spawn a real daemon against fixture workspaces (tiny shell-script "services"), drive it over the socket — lifecycle, crash detection, restart backoff, health gating, log rotation, config reload staleness.
 - TUI: ink-testing-library for list rendering from indicator snapshots; keep TUI logic thin over the client API.

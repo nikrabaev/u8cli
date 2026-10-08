@@ -19,7 +19,7 @@ export interface BaseContextInput {
   logger: Logger;
   /** The plugin's own store; the same Map at every callsite (see `withStore`). */
   store: Map<string, unknown>;
-  /** Default cwd for `exec`: the workspace root, an app path or a subapp cwd. */
+  /** Default cwd for `exec`: the workspace root, a repo path or an app cwd. */
   cwd: string;
   /** Env of the callsite, layered over the daemon's own by `exec`. */
   env?: Record<string, string>;

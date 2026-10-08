@@ -19,8 +19,8 @@
 import {
   commandTargets,
   coreStartScript,
+  findApp,
   findProfile,
-  findSubapp,
   type NormalizedCommand,
   type NormalizedWorkspace,
   type TargetId,
@@ -34,7 +34,7 @@ import {
   type Snapshot,
   type SnapshotApp,
   type SnapshotCommand,
-  type SnapshotSubapp,
+  type SnapshotRepo,
 } from "../ipc/protocol.js";
 import { errorMessage, U8Error } from "../util/errors.js";
 import type { BoundCommand, DaemonContext, RunHandle } from "./contracts.js";
@@ -242,11 +242,11 @@ export function buildSnapshot(deps: HandlerDeps): Snapshot {
     daemonVersion: deps.version,
     workspace: { id: ws.id, name: ws.name, rootDir: ws.rootDir, configPath: ws.configPath },
     templates: { ...ws.templates },
-    apps: ws.apps.map(toSnapshotApp),
+    repos: ws.repos.map(toSnapshotRepo),
     profiles: ws.profiles.map((p) => ({
       name: p.name,
       isDefault: p.isDefault,
-      subappIds: [...p.subappIds],
+      appIds: [...p.appIds],
     })),
     activeProfile: deps.activeProfile(),
     commands: snapshotCommands(deps, ws),
@@ -257,15 +257,15 @@ export function buildSnapshot(deps: HandlerDeps): Snapshot {
   };
 }
 
-function toSnapshotApp(app: NormalizedWorkspace["apps"][number]): SnapshotApp {
+function toSnapshotRepo(repo: NormalizedWorkspace["repos"][number]): SnapshotRepo {
   return {
-    name: app.name,
-    path: app.path,
-    template: app.template,
-    subapps: app.subapps.map(
-      (s): SnapshotSubapp => ({
+    name: repo.name,
+    path: repo.path,
+    template: repo.template,
+    apps: repo.apps.map(
+      (s): SnapshotApp => ({
         id: s.id,
-        appName: s.appName,
+        repoName: s.repoName,
         name: s.name,
         implicit: s.implicit,
         cwd: s.cwd,
@@ -279,7 +279,7 @@ function toSnapshotApp(app: NormalizedWorkspace["apps"][number]): SnapshotApp {
 }
 
 function snapshotCommands(deps: HandlerDeps, ws: NormalizedWorkspace): SnapshotCommand[] {
-  const ids = ws.subapps.map((s) => s.id);
+  const ids = ws.apps.map((a) => a.id);
   const configured = ws.commands.map(
     (cmd): SnapshotCommand => ({
       name: cmd.name,
@@ -297,7 +297,7 @@ function snapshotCommands(deps: HandlerDeps, ws: NormalizedWorkspace): SnapshotC
       kind: bound.def.kind ?? "task",
       source: "plugin",
       description: bound.def.description,
-      appliesTo: ws.subapps.filter((s) => pluginApplies(deps, bound, s)).map((s) => s.id),
+      appliesTo: ws.apps.filter((a) => pluginApplies(deps, bound, a)).map((a) => a.id),
     }),
   );
   return [...configured, ...contributed];
@@ -319,12 +319,12 @@ function appliesTo(ws: NormalizedWorkspace, cmd: NormalizedCommand, ids: readonl
   return commandTargets(ws, cmd, ids).map((t) => t.targetId);
 }
 
-function pluginApplies(deps: HandlerDeps, bound: BoundCommand, subapp: NormalizedWorkspace["subapps"][number]): boolean {
+function pluginApplies(deps: HandlerDeps, bound: BoundCommand, app: NormalizedWorkspace["apps"][number]): boolean {
   if (!bound.def.appliesTo) return true;
   try {
-    return bound.def.appliesTo(toTargetInfo(subapp)) !== false;
+    return bound.def.appliesTo(toTargetInfo(app)) !== false;
   } catch (err) {
-    deps.logger.warn(`appliesTo of "${bound.name}" threw for ${subapp.id}: ${errorMessage(err)}`);
+    deps.logger.warn(`appliesTo of "${bound.name}" threw for ${app.id}: ${errorMessage(err)}`);
     return false;
   }
 }
@@ -374,7 +374,7 @@ function requireTarget(deps: HandlerDeps, params: unknown): TargetId {
   if (targetId === undefined || targetId.length === 0) {
     throw new U8Error("UNKNOWN_TARGET", 'a "targetId" is required');
   }
-  if (findSubapp(deps.workspace.current(), targetId)) return targetId;
+  if (findApp(deps.workspace.current(), targetId)) return targetId;
   if (deps.supervisor.states().some((s) => s.targetId === targetId)) return targetId;
   throw new U8Error("UNKNOWN_TARGET", `unknown target "${targetId}"`, { target: targetId });
 }
