@@ -175,38 +175,86 @@ export function builtinPath(name: BuiltinName): string {
  * the package.json fallback covers ESM-only packages, which resolve fine for a
  * real `import` but not for the CJS resolver we have to borrow to aim at a
  * directory of our choosing.
+ *
+ * The package is located on the node_modules chain *first*, and Node's answer
+ * is only accepted from inside that directory. Left to itself the CJS resolver
+ * also searches `NODE_PATH` and the `~/.node_modules` folders, and a package
+ * manager's bin shim points `NODE_PATH` at the launched tool's own dependency
+ * tree — so a plugin the workspace never installed would quietly resolve to
+ * whatever u8cli happens to depend on.
  */
 function resolvePackage(spec: string, rootDir: string): string {
+  const home = installedPackageDir(spec, rootDir);
+  if (home === undefined) {
+    throw unresolved(spec, rootDir, "no node_modules directory from there up contains it");
+  }
+
   // The path never has to exist: `createRequire` only uses it to know which
   // node_modules chain to walk.
   const require = createRequire(path.join(rootDir, "__u8_plugin_host__.cjs"));
+  let reason: string;
   try {
-    return require.resolve(spec);
+    const file = require.resolve(spec);
+    if (isInside(file, home)) return file;
+    reason = `${home} has no usable entry point`;
   } catch (err) {
-    const entry = entryFromPackageJson(spec, rootDir, require);
-    if (entry !== undefined) return entry;
-    throw new U8Error(
-      "PLUGIN_LOAD",
-      `cannot resolve plugin package "${spec}" from ${rootDir}: ${errorMessage(err)} — ` +
-        `plugins are resolved from the workspace's own node_modules, so install it there`,
-      { spec, rootDir },
-    );
+    reason = errorMessage(err);
+  }
+  const entry = entryFromPackageJson(spec, home);
+  if (entry !== undefined) return entry;
+  throw unresolved(spec, rootDir, reason);
+}
+
+function unresolved(spec: string, rootDir: string, reason: string): U8Error {
+  return new U8Error(
+    "PLUGIN_LOAD",
+    `cannot resolve plugin package "${spec}" from ${rootDir}: ${reason} — ` +
+      `plugins are resolved from the workspace's own node_modules, so install it there`,
+    { spec, rootDir },
+  );
+}
+
+/** `@scope/name/sub` → `@scope/name`, `name/sub` → `name`. */
+function packageName(spec: string): string {
+  const [first = spec, second] = spec.split("/");
+  return first.startsWith("@") && second !== undefined ? `${first}/${second}` : first;
+}
+
+/**
+ * Where `spec`'s package sits on the node_modules chain above `rootDir` — the
+ * walk Node itself does, stopping where Node would go on to its global folders.
+ */
+function installedPackageDir(spec: string, rootDir: string): string | undefined {
+  const name = packageName(spec);
+  for (let dir = path.resolve(rootDir); ; dir = path.dirname(dir)) {
+    // Node never looks in `node_modules/node_modules` either.
+    if (path.basename(dir) !== "node_modules") {
+      const candidate = path.join(dir, "node_modules", name);
+      if (isDirectory(candidate)) return candidate;
+    }
+    if (path.dirname(dir) === dir) return undefined;
   }
 }
 
-function entryFromPackageJson(
-  spec: string,
-  rootDir: string,
-  require: ReturnType<typeof createRequire>,
-): string | undefined {
-  let manifest: string | undefined;
+/**
+ * Whether `file` belongs to the package at `dir`. Compared against the real
+ * path too: Node reports a resolved file by its real path, and a linked or
+ * pnpm-installed package is a symlink out of `node_modules`.
+ */
+function isInside(file: string, dir: string): boolean {
+  const roots = [dir];
   try {
-    manifest = require.resolve(`${spec}/package.json`);
+    roots.push(fs.realpathSync(dir));
   } catch {
-    const guess = path.join(rootDir, "node_modules", spec, "package.json");
-    manifest = fs.existsSync(guess) ? guess : undefined;
+    // A directory that vanished mid-resolve simply owns nothing.
   }
-  if (manifest === undefined) return undefined;
+  return roots.some((root) => file.startsWith(root + path.sep));
+}
+
+function entryFromPackageJson(spec: string, home: string): string | undefined {
+  // A subpath spec (`pkg/plugin`) names a nested package directory, if anything.
+  const manifest = path.join(home, spec.slice(packageName(spec).length), "package.json");
+  if (!isFile(manifest)) return undefined;
 
   let pkg: Record<string, unknown>;
   try {
@@ -246,6 +294,14 @@ function existingFile(base: string): string | undefined {
 function isFile(p: string): boolean {
   try {
     return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isDirectory(p: string): boolean {
+  try {
+    return fs.statSync(p).isDirectory();
   } catch {
     return false;
   }

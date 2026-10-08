@@ -2,16 +2,51 @@
  * Loading: where a plugin comes from, what shapes are accepted, and what
  * happens to the ones that are broken (SPEC §2.8, §6 isolation-lite).
  */
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { NormalizedWorkspace } from "../../src/config/types.js";
 import type { SnapshotPlugin } from "../../src/ipc/protocol.js";
 import { builtinAvailable, BUILTIN_SPEC_PREFIX, pluginSources } from "../../src/plugins/index.js";
-import { cleanupPlugins, createFixture, installPackage, PLUGIN_SDK } from "./helpers.js";
+import { cleanupPlugins, createFixture, installPackage, PLUGIN_SDK, type Fixture } from "./helpers.js";
 
 afterEach(async () => {
   await cleanupPlugins();
 });
+
+/**
+ * Resolves package specs in a child `node` started with `NODE_PATH` set.
+ *
+ * Node reads `NODE_PATH` once, at startup, so nothing done inside this process
+ * can stand in for it — and a real child is also exactly how the leak happens:
+ * a package manager's bin shim exports `NODE_PATH` before it execs u8.
+ */
+function resolveUnderNodePath(fixture: Fixture, nodePath: string, specs: string[]): Array<{ file?: string; error?: string }> {
+  const require = createRequire(import.meta.url);
+  const register = path.join(path.dirname(require.resolve("jiti/package.json")), "lib", "jiti-register.mjs");
+  const loadModule = new URL("../../src/plugins/load.ts", import.meta.url).href;
+  const script = `
+    // jiti hands a TypeScript module to a plain importer under \`default\`.
+    const { resolveSourceFile } = (await import(${JSON.stringify(loadModule)})).default;
+    const [rootDir, ...specs] = process.argv.slice(1);
+    const out = specs.map((spec) => {
+      try { return { file: resolveSourceFile({ spec, kind: "package" }, rootDir) }; }
+      catch (err) { return { error: err.message }; }
+    });
+    process.stdout.write(JSON.stringify(out));
+  `;
+  const child = spawnSync(
+    process.execPath,
+    ["--import", register, "--input-type=module", "-e", script, fixture.dir, ...specs],
+    { cwd: path.dirname(fileURLToPath(import.meta.url)), env: { ...process.env, NODE_PATH: nodePath }, encoding: "utf8" },
+  );
+  if (child.status !== 0) throw new Error(`resolver child failed: ${child.stderr}`);
+  return JSON.parse(child.stdout) as Array<{ file?: string; error?: string }>;
+}
 
 function record(list: SnapshotPlugin[], spec: string): SnapshotPlugin {
   const found = list.find((p) => p.spec === spec);
@@ -140,6 +175,26 @@ describe("plugin sources", () => {
     expect(entry.ok).toBe(false);
     expect(entry.error).toContain("cannot resolve plugin package");
     expect(entry.error).toContain("node_modules");
+  });
+
+  it("ignores NODE_PATH, which a launcher points at u8cli's own dependency tree", () => {
+    const fixture = createFixture();
+    installPackage(fixture, "u8-installed-plugin", `export default { name: "installed" };`);
+    // A directory the way NODE_PATH names one: packages directly inside it, and
+    // nowhere on the node_modules chain above the workspace.
+    const elsewhere = fixture.file("elsewhere");
+    for (const name of ["u8-stray-plugin", "u8-installed-plugin"]) {
+      fs.mkdirSync(path.join(elsewhere, name), { recursive: true });
+      fs.writeFileSync(path.join(elsewhere, name, "index.js"), `module.exports = { name: "stray" };`);
+    }
+
+    const [stray, installed] = resolveUnderNodePath(fixture, elsewhere, ["u8-stray-plugin", "u8-installed-plugin"]);
+
+    // Reachable only through NODE_PATH: not installed, whatever Node would say.
+    expect(stray?.file).toBeUndefined();
+    expect(stray?.error).toContain('cannot resolve plugin package "u8-stray-plugin"');
+    // Installed in the workspace: its own copy, not the one NODE_PATH offers.
+    expect(installed?.file).toBe(fixture.file("node_modules/u8-installed-plugin/index.js"));
   });
 
   it("names the file it looked for when a local spec does not exist", async () => {

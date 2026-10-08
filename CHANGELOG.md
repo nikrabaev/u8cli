@@ -20,6 +20,10 @@ Notable changes to u8cli. Format follows [Keep a Changelog](https://keepachangel
 
   A config still written with the old keys is rejected with one message naming every rename, and an `{app@…}` token left on a repo header row is reported as a config warning. `repo` joins `app` and `x` as a name a plugin may not take. The wire protocol is now v2, so a daemon left running by an older build has to be stopped with `u8 daemon stop` before the new client will talk to it.
 
+### Fixed
+
+- **Plugin packages resolve only from the workspace's `node_modules`.** The resolver also honoured `NODE_PATH`, which a package manager's bin shim points at the launched tool's own dependency tree — so with u8 started through pnpm, a plugin the workspace had not installed could load a copy from inside u8cli's dependencies instead of being reported as missing.
+
 ## [0.1.0-rc.1] — 2026-08-14
 
 First release candidate. Everything in the v1 design is implemented and covered by 785 tests.
