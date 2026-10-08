@@ -15,6 +15,7 @@ describe("jsonSchema", () => {
       "builtins",
       "commands",
       "env",
+      "hooks",
       "indicators",
       "instances",
       "limits",
@@ -25,6 +26,18 @@ describe("jsonSchema", () => {
       "templates",
       "vars",
     ]);
+  });
+
+  it("gives the top-level hooks map the shape a command's own hooks have", () => {
+    const props = (jsonSchema() as Record<string, Record<string, unknown>>)["properties"] ?? {};
+    const entry = (props["hooks"] as Record<string, Record<string, unknown>>)["additionalProperties"] ?? {};
+    const own = (props["commands"] as Record<string, Record<string, Record<string, unknown>>>)[
+      "additionalProperties"
+    ]?.["properties"] as Record<string, unknown>;
+
+    expect(entry["additionalProperties"]).toBe(false);
+    expect(Object.keys((entry["properties"] ?? {}) as object).sort()).toEqual(["post", "pre"]);
+    expect(entry).toEqual(own["hooks"]);
   });
 
   it("constrains repo names so target ids stay unambiguous", () => {

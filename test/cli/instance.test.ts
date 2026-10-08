@@ -134,6 +134,22 @@ describe("u8 instance", () => {
     expect(fs.existsSync(ws.file(".u8/worktrees/feat-x"))).toBe(false);
   });
 
+  it("runs the config's hooks around an instance's lifecycle steps", async () => {
+    // Four levels up from `.u8/worktrees/feat-x/api` is the workspace root —
+    // somewhere that outlives the worktree the hooks run in.
+    const record = 'printf "%s %s %s\\n" "$U8_COMMAND" "$U8_TARGET" "$U8_STATUS" >> ../../../../hooks.txt';
+    const { ws } = fixture(() => ({
+      hooks: { "instance:init": { post: record }, "instance:teardown": { post: record } },
+    }));
+
+    expect((await cli(["instance", "create", "feat-x", "api"], { cwd: ws.dir })).code).toBe(0);
+    expect((await cli(["instance", "destroy", "feat-x"], { cwd: ws.dir })).code).toBe(0);
+
+    expect(fs.readFileSync(ws.file("hooks.txt"), "utf8")).toBe(
+      "instance:init api@feat-x ok\ninstance:teardown api@feat-x ok\n",
+    );
+  });
+
   it("explains a bad --path or --set instead of passing it on", async () => {
     const { ws } = fixture();
     const bad = await cli(["instance", "create", "x", "--set", "novalue"], { cwd: ws.dir });

@@ -782,6 +782,44 @@ describe("config warnings", () => {
     }
   });
 
+  /**
+   * A `hooks` key in a plugin's namespace cannot be judged when the config is
+   * read — the plugin's commands exist only once it has loaded — so it is the
+   * daemon that says a name matched nothing, each time the answer could have
+   * changed. A name the config layer *can* judge is an error instead, and a
+   * reload that introduces one keeps the last-good config.
+   */
+  it("warns about a hooks entry no loaded command answers to, and rejects a certain typo", async () => {
+    const ws = hotWorkspace({ hooks: { "git:pull": { pre: "true" }, "app:stop": { post: "true" } } });
+    track(ws);
+    const logger = recordingLogger("daemon");
+    const daemon = createDaemon({ configPath: ws.configPath, logger, idleMs: 0 });
+    await daemon.start();
+    const unbound = (): string[] => logger.warnings.filter((w) => w.includes("config: hooks."));
+
+    try {
+      // `builtins.git` is off in this fixture, so nothing provides `git:pull`.
+      expect(unbound()).toHaveLength(1);
+      expect(unbound()[0]).toContain('hooks.git:pull: no command "git:pull" is loaded');
+      expect(unbound()[0]).toContain('no loaded plugin is called "git"');
+
+      const client = createRpcClient({ socketPath: ws.paths.socket, timeoutMs: 5_000 });
+      await client.connect();
+      ws.rewrite(baseConfig({ hooks: { hello: { pre: "true" }, "app:stop": { post: "true" } } }));
+      expect(await client.request("workspace.reload", {})).toEqual({ ok: true });
+      expect(unbound()).toHaveLength(1);
+
+      ws.rewrite(baseConfig({ hooks: { helo: { pre: "true" } } }));
+      const rejected = await client.request("workspace.reload", {});
+      await client.close();
+      expect(rejected.ok).toBe(false);
+      expect(rejected.error).toContain('hooks.helo: unknown command "helo"');
+      expect(daemon.snapshot().configError).toContain("hooks.helo");
+    } finally {
+      await daemon.shutdown("test over");
+    }
+  });
+
   it("stays quiet for a config whose templates are clean", async () => {
     const ws = hotWorkspace();
     track(ws);

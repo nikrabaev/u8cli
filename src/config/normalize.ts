@@ -44,7 +44,9 @@ import {
 import {
   BASE_INSTANCE,
   type BuiltinFlags,
+  type CommandHooks,
   CORE_COMMAND_NAMESPACE,
+  CORE_COMMANDS,
   type CustomIndicatorDef,
   DEFAULT_HEALTH,
   DEFAULT_INSTANCES_DIR,
@@ -238,6 +240,7 @@ export function normalizeWorkspace(
     });
   }
   commands.push(...coreCommands(apps));
+  const hooks = normalizeHooks(raw.hooks, commands, issues);
 
   // --- indicators -----------------------------------------------------------
   const indicators: CustomIndicatorDef[] = [];
@@ -280,6 +283,7 @@ export function normalizeWorkspace(
     profiles,
     defaultProfile,
     commands,
+    hooks,
     indicators,
     plugins,
     builtins,
@@ -799,6 +803,58 @@ function coreCommands(apps: readonly NormalizedApp[]): NormalizedCommand[] {
     make("app:stop", "Stop the selected services", "stop"),
     make("app:restart", "Restart the selected services", null),
   ];
+}
+
+/**
+ * The top-level `hooks` map: shell hooks for a command by name, whatever
+ * declared the command.
+ *
+ * A key is checked as far as this layer can know the answer. A bare name can
+ * only be a config command and the `app` namespace is closed, so a miss on
+ * either is a certain typo and an error. Any other namespace belongs to a
+ * plugin, whose commands exist only once the daemon has loaded it — and a
+ * plugin that fails to load must not make the config invalid — so those keys
+ * pass here and the daemon warns about the ones nothing provides.
+ */
+function normalizeHooks(
+  raw: RawWorkspaceConfig["hooks"],
+  commands: readonly NormalizedCommand[],
+  issues: ConfigIssue[],
+): Record<string, CommandHooks> {
+  const declared = commands.filter((c) => c.source === "config").map((c) => c.name);
+  const out: Record<string, CommandHooks> = {};
+  for (const [name, entry] of Object.entries(raw ?? {})) {
+    const problem = hookCommandProblem(name, declared);
+    if (problem !== undefined) {
+      issues.push({ path: `hooks.${name}`, message: problem });
+      continue;
+    }
+    out[name] = { pre: toArray(entry.pre), post: toArray(entry.post) };
+  }
+  return out;
+}
+
+/** Why `name` cannot key a `hooks` entry, or `undefined` when it may. */
+function hookCommandProblem(name: string, declared: readonly string[]): string | undefined {
+  const segments = name.split(":");
+  if (!segments.every((segment) => BARE_NAME_PATTERN.test(segment))) {
+    return (
+      `invalid command name "${name}": a hooks entry is keyed by the name of one command — ` +
+      `"test", "app:stop", "git:pull"`
+    );
+  }
+  if (segments.length === 1) {
+    if (declared.includes(name)) return undefined;
+    const known = declared.length === 0 ? "none are declared" : `expected ${quotedList(declared)}`;
+    return (
+      `unknown command "${name}" — a bare name is a command declared under "commands" (${known}); ` +
+      `core and plugin commands carry their namespace: "app:stop", "git:pull"`
+    );
+  }
+  if (segments[0] === CORE_COMMAND_NAMESPACE && !CORE_COMMANDS.some((core) => core === name)) {
+    return `unknown core command "${name}" — expected ${quotedList(CORE_COMMANDS)}`;
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------

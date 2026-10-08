@@ -171,6 +171,12 @@ const hookScripts = z.union([z.string(), z.array(z.string())], {
   error: "expected a shell command string, or an array of them",
 });
 
+/** Shell hooks around one command: the same shape on a command and in the top-level `hooks` map. */
+export const hooksSchema = z.strictObject({
+  pre: hookScripts.optional(),
+  post: hookScripts.optional(),
+});
+
 export const commandSchema = z.strictObject({
   kind: z.enum(["service", "task"]).optional(),
   description: z.string().optional(),
@@ -179,12 +185,7 @@ export const commandSchema = z.strictObject({
   /** Per-target override; `null` skips the target. */
   targets: z.record(targetRef, targetScript).optional(),
   concurrency: posInt.optional(),
-  hooks: z
-    .strictObject({
-      pre: hookScripts.optional(),
-      post: hookScripts.optional(),
-    })
-    .optional(),
+  hooks: hooksSchema.optional(),
 });
 
 export const profileSchema = z.strictObject({
@@ -316,6 +317,13 @@ export const workspaceConfigSchema = z.strictObject({
   repos: z.record(nameKey("repo"), repoSchema),
   profiles: z.record(nameKey("profile"), profileSchema).optional(),
   commands: z.record(z.string().min(1), commandSchema).optional(),
+  /**
+   * Shell hooks keyed by command name — any command, including the core
+   * `app:*` ones and a plugin's. Keys are checked in `normalize.ts`, and the
+   * plugin-namespaced ones again by the daemon once plugins have loaded: only
+   * it knows which commands they turned out to contribute.
+   */
+  hooks: z.record(z.string().min(1), hooksSchema).optional(),
 });
 
 export type RawWorkspaceConfig = z.infer<typeof workspaceConfigSchema>;
@@ -325,6 +333,7 @@ export type RawProtosOptions = z.infer<typeof protosOptionsSchema>;
 export type RawRepo = z.infer<typeof repoSchema>;
 export type RawApp = z.infer<typeof appSchema>;
 export type RawCommand = z.infer<typeof commandSchema>;
+export type RawHooks = z.infer<typeof hooksSchema>;
 export type RawProfile = z.infer<typeof profileSchema>;
 export type RawHealth = z.infer<typeof healthSchema>;
 export type RawLimits = z.infer<typeof limitsSchema>;

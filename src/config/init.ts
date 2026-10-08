@@ -126,6 +126,13 @@ export function skeletonConfig(name: string): string {
   //     "targets": { "example": "./scripts/deploy.sh" },
   //     "hooks": { "pre": "git diff --quiet || exit 1", "post": "echo deployed" }
   //   }
+  // },
+
+  // Hooks for any command by name, core and plugin ones included. A post hook
+  // reads the outcome from its environment: U8_STATUS is ok, failed or aborted.
+  // "hooks": {
+  //   "app:restart": { "pre": "pnpm build" },
+  //   "app:stop": { "post": "echo \"$U8_TARGET: $U8_STATUS\"" }
   // }
 }
 `;

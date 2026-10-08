@@ -90,7 +90,8 @@ Per `(command, target)` pair: `pre` → script → `post`.
 - A failing `pre` **aborts that target only**; other targets proceed.
 - `post` **always runs**, receiving the result (exit code / final status).
 - Multiple bindings run in registration order: config-defined hooks first, then plugins in load order.
-- In config, a hook is a shell string (run in the target's cwd; non-zero exit in `pre` = abort). In plugins, a hook is an async function (see §6); a thrown error in `pre` = abort.
+- In config, a hook is a shell string (run in the target's cwd; non-zero exit in `pre` = abort), written on a config command or — for any command by name, core and plugin commands included — in the top-level `hooks` map; a command's own run before the map's. A `post` shell hook receives the result as `U8_*` environment variables. In plugins, a hook is an async function (see §6); a thrown error in `pre` = abort.
+- A `hooks` key is validated against the loaded command names: at config load where the name is knowable without plugins (a bare name, the `app` namespace), and by the daemon once plugins are loaded for the rest — there as a warning, since a plugin that failed to load must not invalidate the config.
 
 ### 2.7 Indicator
 

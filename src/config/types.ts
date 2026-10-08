@@ -220,6 +220,12 @@ export interface NormalizedProfile {
   appIds: TargetId[];
 }
 
+/** Shell hooks around one command, in the order they run. */
+export interface CommandHooks {
+  pre: string[];
+  post: string[];
+}
+
 export interface NormalizedCommand {
   /** Canonical name: `app:start`, `git:pull`, or a bare user name like `test`. */
   name: string;
@@ -234,8 +240,12 @@ export interface NormalizedCommand {
   targetScripts: Record<TargetId, string | null>;
   /** Overrides the workspace-level task concurrency cap. */
   concurrency?: number;
-  /** Shell hooks declared in config; plugin hooks are registered separately. */
-  hooks: { pre: string[]; post: string[] };
+  /**
+   * Shell hooks declared on the command's own entry; plugin hooks are
+   * registered separately. The top-level `hooks` map may add more for the same
+   * name — read both through {@link configHooks}.
+   */
+  hooks: CommandHooks;
 }
 
 /** An indicator declared in config, rendered as a bare `{name}`: a shell command polled per target. */
@@ -323,6 +333,14 @@ export interface NormalizedWorkspace {
   defaultProfile: string;
   /** Config-declared commands plus the three core `app:*` commands. */
   commands: NormalizedCommand[];
+  /**
+   * The top-level `hooks` map, keyed by command name. It is how a command that
+   * has no entry under `commands` gets shell hooks at all — the core `app:*`
+   * ones, the `instance:*` lifecycle runs, and whatever a plugin contributes.
+   * A plugin command's name is taken on trust here: plugins load in the daemon,
+   * which checks those keys itself (see `unboundHookCommands`).
+   */
+  hooks: Record<string, CommandHooks>;
   indicators: CustomIndicatorDef[];
   plugins: PluginRef[];
   builtins: BuiltinFlags;
@@ -381,6 +399,12 @@ export const REPO_NAMESPACE = "repo";
 
 export const CORE_COMMANDS = ["app:start", "app:stop", "app:restart"] as const;
 
+/**
+ * The runs an instance's lifecycle steps travel as. Nothing can invoke them by
+ * name, but they are runs like any other and hooks bind to them the same way.
+ */
+export const LIFECYCLE_COMMANDS = ["instance:init", "instance:teardown"] as const;
+
 // ---------------------------------------------------------------------------
 // Lookup helpers — pure functions over the normalized model.
 // ---------------------------------------------------------------------------
@@ -403,4 +427,20 @@ export function findProfile(ws: NormalizedWorkspace, name: string): NormalizedPr
 
 export function findCommand(ws: NormalizedWorkspace, name: string): NormalizedCommand | undefined {
   return ws.commands.find((c) => c.name === name);
+}
+
+/**
+ * Every shell hook the config declares for a command, in the order they run:
+ * the ones on the command's own entry, then the top-level `hooks` entry for its
+ * name. Empty for a command the config says nothing about.
+ */
+export function configHooks(ws: NormalizedWorkspace, command: string): CommandHooks {
+  const own = findCommand(ws, command)?.hooks;
+  // `hooks` is keyed by user input: an own-property check keeps `toString`
+  // from resolving to something that is not a hook list.
+  const shared = Object.prototype.hasOwnProperty.call(ws.hooks, command) ? ws.hooks[command] : undefined;
+  return {
+    pre: [...(own?.pre ?? []), ...(shared?.pre ?? [])],
+    post: [...(own?.post ?? []), ...(shared?.post ?? [])],
+  };
 }

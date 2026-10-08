@@ -14,6 +14,7 @@ import {
   findInstance,
   findProfile,
   INSTANCE_SEPARATOR,
+  LIFECYCLE_COMMANDS,
   type NormalizedCommand,
   type NormalizedWorkspace,
   qualify,
@@ -152,6 +153,33 @@ export function commandTargets(
     const script = override ?? cmd.script;
     if (script === undefined) continue;
     out.push({ targetId: id, script });
+  }
+  return out;
+}
+
+/**
+ * Load diagnostics for the entries of the top-level `hooks` map that name no
+ * command, as `path: message` lines like {@link NormalizedWorkspace.warnings}.
+ *
+ * `pluginCommands` is what the loaded plugins contribute, which is why this is
+ * asked by the daemon and not answered at normalization: a plugin's commands
+ * exist only once it has loaded. A miss is a warning rather than an error for
+ * the same reason — a plugin that failed to load is disabled and reported, and
+ * must not also turn the hooks written for it into an invalid config.
+ */
+export function unboundHookWarnings(ws: NormalizedWorkspace, pluginCommands: readonly string[]): string[] {
+  const runs = [...LIFECYCLE_COMMANDS, ...pluginCommands];
+  const known = new Set<string>([...ws.commands.map((c) => c.name), ...runs]);
+  const out: string[] = [];
+  for (const name of Object.keys(ws.hooks)) {
+    if (known.has(name)) continue;
+    const ns = name.slice(0, name.indexOf(":"));
+    const siblings = runs.filter((candidate) => candidate.startsWith(`${ns}:`));
+    const why =
+      siblings.length > 0
+        ? `"${ns}" has no command by that name — expected one of: ${siblings.join(", ")}`
+        : `no loaded plugin is called "${ns}"`;
+    out.push(`hooks.${name}: no command "${name}" is loaded, so these hooks never run (${why})`);
   }
   return out;
 }

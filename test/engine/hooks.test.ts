@@ -247,3 +247,131 @@ describe("plugin hooks", () => {
     expect(seen[1]).toEqual({ phase: "post", store: true });
   });
 });
+
+/**
+ * The top-level `hooks` map: the same shell hooks, for commands that have no
+ * entry under `commands` to carry them — the core `app:*` ones and a plugin's.
+ */
+describe("top-level hooks", () => {
+  /** One service, plus whatever the map says about its commands. */
+  function service(hooks: Record<string, unknown>, extra: Record<string, unknown> = {}): Harness {
+    return createHarness({
+      dirs: ["api"],
+      config: { repos: { api: { path: "api", scripts: { start: "sleep 30" } } }, hooks, ...extra },
+    });
+  }
+
+  const POST = 'printf "post %s|%s|%s\\n" "$U8_COMMAND" "$U8_STATUS" "$U8_OK" >> trace.txt';
+
+  it("runs around a core command, and tells post how it went", async () => {
+    const h = service({ "app:stop": { pre: "echo pre >> trace.txt", post: POST } });
+
+    const stopped = await settled(h.engine.runCommand({ command: "app:stop" }));
+    expect(stopped.ok).toBe(true);
+    expect(h.supervisor.stopOrder).toEqual(["api"]);
+
+    h.supervisor.failStop.add("api");
+    const refused = await settled(h.engine.runCommand({ command: "app:stop" }));
+    expect(statesByTarget(refused)).toEqual({ api: "failed" });
+
+    expect(h.read("api/trace.txt")).toBe("pre\npost app:stop|ok|1\npre\npost app:stop|failed|0\n");
+  });
+
+  it("gates a core command on its pre hook", async () => {
+    const h = service({ "app:start": { pre: "test -f allowed", post: POST } });
+
+    const result = await settled(h.engine.runCommand({ command: "app:start" }));
+
+    expect(statesByTarget(result)).toEqual({ api: "aborted" });
+    expect(resultFor(result, "api").error).toMatch(/pre hook exited with code 1: test -f allowed/);
+    // Nothing was ever handed to the supervisor, and post still heard about it.
+    expect(h.supervisor.startOrder).toEqual([]);
+    expect(h.read("api/trace.txt")).toBe("post app:start|aborted|0\n");
+  });
+
+  it("binds to app:restart by its own name, not to the start it ends with", async () => {
+    const h = service({
+      "app:restart": { pre: "echo restart-pre >> trace.txt", post: POST },
+      "app:start": { pre: "echo start-pre >> trace.txt" },
+    });
+
+    const result = await settled(h.engine.runCommand({ command: "app:restart" }));
+
+    expect(result.ok).toBe(true);
+    expect(h.supervisor.startOrder).toEqual(["api"]);
+    expect(h.read("api/trace.txt")).toBe("restart-pre\npost app:restart|ok|1\n");
+  });
+
+  it("runs around a plugin command, sub-commands included, ahead of plugin hooks", async () => {
+    const h = service({
+      "protos:link": { pre: "echo config-pre >> trace.txt", post: POST },
+      "protos:unlink:api": { post: POST },
+    });
+    const trace = (text: string): void => {
+      fs.appendFileSync(h.file("api/trace.txt"), `${text}\n`);
+    };
+    h.plugins.addCommand("protos", "protos:link", { run: () => trace("link") });
+    h.plugins.addCommand("protos", "protos:unlink:api", { run: () => 3 });
+    h.plugins.addHook("audit", "protos:link", {
+      pre: () => trace("plugin-pre"),
+      post: () => trace("plugin-post"),
+    });
+
+    const linked = await settled(h.engine.runCommand({ command: "protos:link" }));
+    expect(linked.ok).toBe(true);
+    expect(h.read("api/trace.txt").trim().split("\n")).toEqual([
+      "config-pre",
+      "plugin-pre",
+      "link",
+      "post protos:link|ok|1",
+      "plugin-post",
+    ]);
+
+    fs.rmSync(h.file("api/trace.txt"));
+    const unlinked = await settled(h.engine.runCommand({ command: "protos:unlink:api" }));
+    expect(statesByTarget(unlinked)).toEqual({ api: "failed" });
+    expect(h.read("api/trace.txt")).toBe("post protos:unlink:api|failed|0\n");
+  });
+
+  it("runs a config command's own hooks first, then the map's, then a plugin's", async () => {
+    const h = service(
+      { probe: { pre: "echo map-pre >> trace.txt", post: "echo map-post >> trace.txt" } },
+      {
+        commands: {
+          probe: {
+            script: "echo script >> trace.txt",
+            hooks: { pre: "echo own-pre >> trace.txt", post: "echo own-post >> trace.txt" },
+          },
+        },
+      },
+    );
+    h.plugins.addHook("audit", "probe", {
+      pre: () => fs.appendFileSync(h.file("api/trace.txt"), "plugin-pre\n"),
+    });
+
+    await settled(h.engine.runCommand({ command: "probe" }));
+
+    expect(h.read("api/trace.txt").trim().split("\n")).toEqual([
+      "own-pre",
+      "map-pre",
+      "plugin-pre",
+      "script",
+      "own-post",
+      "map-post",
+    ]);
+  });
+
+  it("picks up an edited map on the next run after a reload", async () => {
+    const h = service({});
+    await settled(h.engine.runCommand({ command: "app:stop" }));
+    expect(h.read("api/trace.txt")).toBe("");
+
+    h.reload({
+      repos: { api: { path: "api", scripts: { start: "sleep 30" } } },
+      hooks: { "app:stop": { post: POST } },
+    });
+    await settled(h.engine.runCommand({ command: "app:stop" }));
+
+    expect(h.read("api/trace.txt")).toBe("post app:stop|ok|1\n");
+  });
+});

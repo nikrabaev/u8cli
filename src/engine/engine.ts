@@ -29,6 +29,7 @@ import { cp, mkdir } from "node:fs/promises";
 import path from "node:path";
 import {
   commandTargets,
+  configHooks,
   coreStartScript,
   coreStopScript,
   BASE_INSTANCE,
@@ -45,6 +46,7 @@ import {
   splitQualified,
   topoWaves,
   unknownTargetMessage,
+  type CommandHooks,
   type NormalizedApp,
   type NormalizedCommand,
   type NormalizedRepo,
@@ -400,7 +402,7 @@ export function createEngine(deps: EngineDeps): Engine {
   async function runPipeline(
     rec: RunRecord,
     pt: PipelineTarget,
-    hooks: { config: { pre: string[]; post: string[] }; bound: readonly BoundHook[] },
+    hooks: { config: CommandHooks; bound: readonly BoundHook[] },
     work: Work,
   ): Promise<TaskTargetState> {
     if (rec.controller.signal.aborted) {
@@ -565,15 +567,16 @@ export function createEngine(deps: EngineDeps): Engine {
     return { id: app.id, app, repo, cwd: cwd ?? app.cwd };
   }
 
+  /**
+   * Keyed by name alone, so the config's shell hooks reach every kind of run
+   * the same way a plugin's do: a config command, a core `app:*` one, a plugin
+   * command, an instance's lifecycle.
+   */
   function hooksOf(ws: NormalizedWorkspace, command: string): {
-    config: { pre: string[]; post: string[] };
+    config: CommandHooks;
     bound: BoundHook[];
   } {
-    const declared = findCommand(ws, command)?.hooks;
-    return {
-      config: { pre: [...(declared?.pre ?? [])], post: [...(declared?.post ?? [])] },
-      bound: plugins.hooksFor(command),
-    };
+    return { config: configHooks(ws, command), bound: plugins.hooksFor(command) };
   }
 
   // -------------------------------------------------------------------------

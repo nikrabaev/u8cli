@@ -34,7 +34,8 @@ rejected everywhere, so a typo is an error at load rather than a setting that si
 | `indicators` | `{ [name: string]: IndicatorDef }` | `{}` | Your own [indicators](#indicators), rendered as `{name}`. |
 | `repos` | `{ [name: string]: Repo }` | **required** | The repos u8 manages. |
 | `profiles` | `{ [name: string]: Profile }` | a synthesized `all` | Named selections of targets. |
-| `commands` | `{ [name: string]: Command }` | `{}` | Extra commands, plus hooks. |
+| `commands` | `{ [name: string]: Command }` | `{}` | Extra commands, each with its own hooks. |
+| `hooks` | `{ [command: string]: { pre?, post? } }` | `{}` | Shell [hooks](#hooks) for any command by name — core and plugin commands included. |
 
 Repo, app and profile names must match `^[A-Za-z0-9][A-Za-z0-9_-]*$` — no `.`, `:` or `@`, because
 those are the separators for target ids (`repo.app`, `repo.app@instance`), command namespaces
@@ -331,8 +332,8 @@ A config command name containing `:` or `@` is a validation error. Write `test`,
 `db.migrate`.
 
 The three core commands always exist. Their per-target script comes from the app's
-`scripts.start` / `scripts.stop`, and they can be given hooks by a plugin (config `hooks` live on
-config commands only).
+`scripts.start` / `scripts.stop`. They have no entry under `commands` to carry hooks, so theirs are
+written in the top-level [`hooks` map](#hooks-for-any-command).
 
 ### Hooks
 
@@ -340,15 +341,18 @@ A hook is a shell string — or an array of them — run in the target's working
 target's environment, per `(command, target)` pair:
 
 ```text
-pre …  →  the command's script  →  post …
+pre …  →  the command's work  →  post …
 ```
 
 - A failing `pre` (non-zero exit) **aborts that target only**; every other target proceeds. Its
   reason lands in the target's run log and the result table.
-- `post` **always runs**, including after a failure or an abort, and a failing `post` is reported but
-  does not change the target's verdict.
+- `post` **always runs**, including after a failure or an abort, and is [told how it
+  went](#what-a-post-hook-is-told). A failing `post` is reported and fails a target that had
+  otherwise succeeded; one that was already failing keeps its own reason.
 - Order is: config hooks in the order written, then plugin hooks in plugin load order (built-ins
   first, then `plugins` in config order).
+
+A config command carries its own:
 
 ```jsonc
 "deploy": {
@@ -359,6 +363,56 @@ pre …  →  the command's script  →  post …
   }
 }
 ```
+
+#### Hooks for any command
+
+The top-level `hooks` map attaches the same hooks to a command **by name**, whatever declared it —
+which is how a command with no entry under `commands` gets any:
+
+```jsonc
+"hooks": {
+  "app:restart": { "pre": "pnpm build" },
+  "app:stop": { "post": "[ \"$U8_STATUS\" = ok ] || ./scripts/notify.sh \"$U8_TARGET did not stop\"" },
+  "protos:link": { "post": "pnpm codegen" },
+  "protos:unlink:react-query": { "pre": "git diff --quiet package.json" }
+}
+```
+
+A key is one command's name:
+
+| Key | Names |
+| --- | --- |
+| a bare name — `test` | a command declared under `commands`. Its own `hooks` run first, then these. |
+| `app:start`, `app:stop`, `app:restart` | a core command |
+| `<plugin>:<command>` — `git:pull`, `protos:link:<alias>` | a command a loaded plugin contributes |
+| `instance:init`, `instance:teardown` | the runs an [instance's lifecycle steps](#lifecycle-init-and-teardown) travel as |
+
+Names are checked against the commands that are actually loaded, in two steps. A bare name that is
+not under `commands`, an `app:` name that is not one of the three, and a key that is not a command
+name at all (`"*"`) are validation errors. A plugin's commands exist only once the daemon has
+loaded it, so a key in any other namespace is checked then, at start and after every reload: one
+that nothing provides — a typo, a built-in that is switched off, a plugin that failed to load — is a
+warning in `u8 daemon logs`, and its hooks never run. It is a warning rather than an error so that a
+plugin failing to load cannot also make the config invalid.
+
+`app:restart` is one run under its own name: hooks written for `app:start` and `app:stop` do not
+fire on it. Its hooks wrap the start half — by the time `pre` runs the service has already been
+stopped, so a `pre` that fails leaves it down — and a target that could not be stopped fails without
+running either.
+
+#### What a `post` hook is told
+
+A `post` hook reads the outcome from its environment. A `pre` hook gets none of these: nothing has
+happened yet.
+
+| Variable | Value |
+| --- | --- |
+| `U8_STATUS` | `ok`, `failed`, or `aborted` (a `pre` hook refused the target) |
+| `U8_OK` | `1` when the work succeeded, `0` otherwise |
+| `U8_EXIT_CODE` | the work's exit code; empty when nothing ran to exit — an aborted target, a service that failed to stop |
+| `U8_DURATION_MS` | how long the target took, `pre` hooks included |
+| `U8_COMMAND` | the command's name — `app:stop`, `protos:link` |
+| `U8_TARGET` | the target's id — `api`, `platform.shell@feat-x` |
 
 ---
 
@@ -842,8 +896,8 @@ nobody else's — see [Adding and removing apps](#adding-and-removing-apps) for 
 steps come with them.
 
 Steps run as the commands `instance:init` and `instance:teardown`, through the same pipeline as any
-run: per-target logs (`u8 logs <target> --run <id>`), the summary table, and plugin hooks bound to
-those names. An app's steps get the app's resolved `env`; a repo's steps get the daemon's — plus the
+run: per-target logs (`u8 logs <target> --run <id>`), the summary table, and the hooks — a plugin's
+or the config's [`hooks` map](#hooks-for-any-command) — bound to those names. An app's steps get the app's resolved `env`; a repo's steps get the daemon's — plus the
 env of the app, for a repo that is its own app. All of them additionally get:
 
 | Variable | Value |
@@ -1064,6 +1118,12 @@ caught) and re-validates on change.
         "post": "echo deploy finished"         // always runs, even after a failure
       }
     }
+  },
+
+  // Hooks for a command by name — the only way to give them to a core or plugin command.
+  "hooks": {
+    "app:restart": { "pre": "pnpm build" },
+    "app:stop": { "post": "echo \"$U8_TARGET: $U8_STATUS\"" }   // ok | failed | aborted
   }
 }
 ```

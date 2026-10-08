@@ -32,7 +32,7 @@
 import { statSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
 
-import { findProfile, loadWorkspaceFrom } from "../config/index.js";
+import { findProfile, loadWorkspaceFrom, unboundHookWarnings } from "../config/index.js";
 import type { NormalizedWorkspace, TargetId } from "../config/types.js";
 import { createEngine } from "../engine/index.js";
 import { createIndicatorRegistry } from "../indicators/index.js";
@@ -228,6 +228,17 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     indicators: () => host.indicators(),
     readiness: (target, service) => host.readiness(target, service),
     list: () => host.list(),
+  };
+
+  /**
+   * The half of config validation that has to wait for plugins: which keys of
+   * the top-level `hooks` map name a command nothing provides. Said in the same
+   * voice as the load warnings, and at the same two moments — once plugins are
+   * up at cold start, and after every reload has settled its plugin list.
+   */
+  const reportUnboundHooks = (): void => {
+    const loaded = plugins.commands().map((command) => command.name);
+    for (const warning of unboundHookWarnings(ws, loaded)) logger.warn(`config: ${warning}`);
   };
 
   const store = createStateStore({ file: paths.stateFile, logger });
@@ -538,6 +549,7 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       // and serve the new config with whatever re-bound successfully.
       logger.error(`applying the reloaded config failed: ${errorMessage(err)}`);
     }
+    reportUnboundHooks();
     // Every tracked id, so the comparison both sets and clears the flag.
     supervisor.markStale(supervisor.states().map((s) => s.targetId));
 
@@ -796,6 +808,7 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     // next rebind. `load()` swallows a plugin's failure by contract.
     const initial = host;
     if (isLoadable(initial)) await initial.load();
+    reportUnboundHooks();
     for (const registration of initial.indicators()) indicators.register(registration);
     // Core `app@` providers are registered by the registry itself, and the
     // config's own are derived from the workspace on every start/rebind — only

@@ -74,6 +74,7 @@ export {
   qualifyTarget,
   resolveTargetStrings,
   topoWaves,
+  unboundHookWarnings,
   unknownTargetMessage,
   type CommandTarget,
 } from "./resolve.js";
@@ -86,6 +87,7 @@ export {
   type RawApp,
   type RawCommand,
   type RawHealth,
+  type RawHooks,
   type RawProfile,
   type RawRepo,
   type RawWorkspaceConfig,

@@ -389,8 +389,8 @@ hooks: {
 - **`pre` is a gate.** Throwing aborts *that target only* — the command does not run for it, and
   every other target proceeds. The message lands in the target's run log and the result table.
 - **`post` always runs**, including after a failure or an abort, and receives
-  `ctx.result: { ok, exitCode, durationMs, error? }`. A throwing `post` is logged and reported but
-  does not change the target's verdict.
+  `ctx.result: { ok, exitCode, durationMs, error? }`. A throwing `post` is logged and reported, and
+  fails a target that had otherwise succeeded; one that was already failing keeps its own reason.
 - Order per target: config-declared shell hooks first, then plugins in load order. Within one plugin,
   its exact-name binding runs before its `"*"` binding.
 

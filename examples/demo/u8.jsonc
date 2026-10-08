@@ -129,5 +129,11 @@
         "post": "echo deploy finished"
       }
     }
+  },
+
+  // Hooks for a command that has no entry above: a core one, by name. A post
+  // hook reads how it went from its environment.
+  "hooks": {
+    "app:stop": { "post": "echo \"$U8_TARGET stopped: $U8_STATUS\"" }
   }
 }

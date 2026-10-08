@@ -13,6 +13,7 @@ import {
   cleanupStateHome,
   connect,
   createWorkspace,
+  daemonLog,
   delay,
   SERVICE_SCRIPT,
   waitFor,
@@ -68,13 +69,14 @@ export default {
 
 const BROKEN_PLUGIN = `throw new Error("this plugin is broken on purpose");\n`;
 
-function pluginWorkspace(): Workspace {
+function pluginWorkspace(extra: Record<string, unknown> = {}): Workspace {
   const ws = createWorkspace(
     {
       builtins: { git: false, health: false },
       plugins: ["./plugins/demo.js", "./plugins/broken.js"],
       repos: { api: { path: "api", scripts: { start: "sleep 30" } } },
       commands: { hello: { script: "printf 'hello\\n'" } },
+      ...extra,
     },
     ["api", "plugins"],
   );
@@ -148,6 +150,53 @@ describe("plugins in a live daemon", () => {
       "demo:touch api true",
       "hello api true",
     ]);
+  });
+
+  /**
+   * The top-level `hooks` map against real plugins: a name is only knowable
+   * once they have loaded, so this is the one place both halves show — the
+   * shell hook that runs around a plugin's command, and the entry written for
+   * a command nothing ended up providing.
+   */
+  it("runs config hooks around plugin and core commands, and warns about the ones nothing provides", async () => {
+    const record = 'printf "%s %s %s\\n" "$U8_COMMAND" "$U8_TARGET" "$U8_STATUS" >> ../shell-hooks.txt';
+    const ws = pluginWorkspace({
+      hooks: {
+        "demo:touch": { pre: "test ! -f marker.txt", post: record },
+        "app:stop": { post: record },
+        "demo:tuch": { post: record },
+        // Its plugin throws at import: disabled and reported, never fatal —
+        // and the hooks written for it must not be what stops the daemon.
+        "broken:deploy": { post: record },
+      },
+    });
+    const client = await connect(ws);
+    const run = async (command: string): Promise<boolean> => {
+      const { runId } = await client.request("command.run", { command });
+      return (await client.request("run.await", { runId })).ok;
+    };
+
+    expect(await run("demo:touch")).toBe(true);
+    // The pre hook is a gate here too: the marker the first run left refuses the second.
+    expect(await run("demo:touch")).toBe(false);
+    expect(await run("app:start")).toBe(true);
+    expect(await run("app:stop")).toBe(true);
+
+    expect(fs.readFileSync(ws.file("shell-hooks.txt"), "utf8").trim().split("\n")).toEqual([
+      "demo:touch api ok",
+      "demo:touch api aborted",
+      "app:stop api ok",
+    ]);
+
+    const warnings = daemonLog(ws)
+      .split("\n")
+      .filter((line) => line.includes("config: hooks."));
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toContain(
+      'hooks.demo:tuch: no command "demo:tuch" is loaded, so these hooks never run ' +
+        '("demo" has no command by that name — expected one of: demo:touch)',
+    );
+    expect(warnings[1]).toContain('hooks.broken:deploy: no command "broken:deploy" is loaded');
   });
 
   /**

@@ -2,6 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  configHooks,
   DEFAULT_LIMITS,
   DEFAULT_PROTOS_INTERVAL_MS,
   DEFAULT_TEMPLATES,
@@ -397,6 +398,92 @@ describe("profiles", () => {
       loadFixture({ repos: { db: { path: "." } }, profiles: { a: { targets: ["db", "ghost"] } } }),
     );
     expect(e.issues.map((i) => i.path)).toEqual(["profiles.a.targets[1]"]);
+  });
+});
+
+describe("top-level hooks", () => {
+  it("attaches hooks to core, plugin and lifecycle commands by name", () => {
+    const { ws } = loadFixture({
+      repos: { db: { path: "." } },
+      hooks: {
+        "app:stop": { post: "echo stopped" },
+        "app:restart": { pre: ["pnpm build", "pnpm lint"] },
+        "protos:unlink:api": { pre: "git stash" },
+        "instance:teardown": { post: "echo gone" },
+      },
+    });
+
+    expect(ws.hooks).toEqual({
+      "app:stop": { pre: [], post: ["echo stopped"] },
+      "app:restart": { pre: ["pnpm build", "pnpm lint"], post: [] },
+      "protos:unlink:api": { pre: ["git stash"], post: [] },
+      "instance:teardown": { pre: [], post: ["echo gone"] },
+    });
+    expect(configHooks(ws, "app:stop")).toEqual({ pre: [], post: ["echo stopped"] });
+    // The core command's own entry stays what it was: there is nowhere in
+    // config to write hooks *on* it, and the lookup is what joins the two.
+    expect(cmd(ws, "app:stop").hooks).toEqual({ pre: [], post: [] });
+    expect(configHooks(ws, "app:start")).toEqual({ pre: [], post: [] });
+  });
+
+  it("runs a config command's own hooks before the ones the map adds for it", () => {
+    const { ws } = loadFixture({
+      repos: { db: { path: "." } },
+      commands: { test: { script: "pnpm test", hooks: { pre: "echo own", post: "echo own-post" } } },
+      hooks: { test: { pre: "echo shared", post: "echo shared-post" } },
+    });
+
+    expect(configHooks(ws, "test")).toEqual({
+      pre: ["echo own", "echo shared"],
+      post: ["echo own-post", "echo shared-post"],
+    });
+  });
+
+  it("defaults to no hooks at all", () => {
+    const { ws } = loadFixture({ repos: { db: { path: "." } } });
+    expect(ws.hooks).toEqual({});
+    // A name that is also a property of every object must not resolve to one.
+    expect(configHooks(ws, "toString")).toEqual({ pre: [], post: [] });
+  });
+
+  it("rejects a name it can know is wrong, and says what was expected", () => {
+    const e = configErrorFrom(() =>
+      loadFixture({
+        repos: { db: { path: "." } },
+        commands: { test: { script: "pnpm test" }, lint: { script: "pnpm lint" } },
+        hooks: {
+          tset: { pre: "true" },
+          "app:kill": { pre: "true" },
+          "*": { pre: "true" },
+          "git:": { pre: "true" },
+        },
+      }),
+    );
+
+    expect(issueLines(e)).toEqual([
+      'hooks.tset: unknown command "tset" — a bare name is a command declared under "commands" ' +
+        '(expected "test" or "lint"); core and plugin commands carry their namespace: "app:stop", "git:pull"',
+      'hooks.app:kill: unknown core command "app:kill" — expected "app:start", "app:stop" or "app:restart"',
+      'hooks.*: invalid command name "*": a hooks entry is keyed by the name of one command — ' +
+        '"test", "app:stop", "git:pull"',
+      'hooks.git:: invalid command name "git:": a hooks entry is keyed by the name of one command — ' +
+        '"test", "app:stop", "git:pull"',
+    ]);
+  });
+
+  it("says so when a bare name is used and no command is declared", () => {
+    const e = configErrorFrom(() =>
+      loadFixture({ repos: { db: { path: "." } }, hooks: { stop: { post: "true" } } }),
+    );
+    expect(issueLines(e)[0]).toMatch(/^hooks\.stop: unknown command "stop" .*\(none are declared\)/);
+  });
+
+  it("rejects anything but pre and post inside an entry", () => {
+    const e = configErrorFrom(() =>
+      loadFixture({ repos: { db: { path: "." } }, hooks: { "app:stop": { pre: 3, after: "true" } } }),
+    );
+    expect(issueLines(e)).toContain("hooks.app:stop.pre: expected a shell command string, or an array of them");
+    expect(e.issues.some((i) => i.path === "hooks.app:stop" && /after/.test(i.message))).toBe(true);
   });
 });
 
