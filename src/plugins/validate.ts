@@ -9,16 +9,15 @@
  * is all the author gets: the plugin is disabled, not retried.
  */
 import { BARE_NAME_PATTERN, CORE_COMMAND_NAMESPACE, NAME_PATTERN, REPO_NAMESPACE } from "../config/index.js";
-import { CUSTOM_NAMESPACE } from "../indicators/index.js";
 import type { HookDef, IndicatorDef, PluginCommandDef, PluginDefinition } from "../plugin/types.js";
 import { errorMessage, U8Error } from "../util/errors.js";
 
-/** Namespaces a plugin may not claim: `app:start`, `{repo@name}` and `{x@version}` are taken. */
-export const RESERVED_NAMESPACES: ReadonlySet<string> = new Set([
-  CORE_COMMAND_NAMESPACE,
-  REPO_NAMESPACE,
-  CUSTOM_NAMESPACE,
-]);
+/**
+ * Namespaces a plugin may not claim: `app:start` and `{repo@name}` are taken.
+ * Config-declared indicators need no entry here — they are written with no
+ * namespace (`{version}`), and a plugin's name is never empty.
+ */
+export const RESERVED_NAMESPACES: ReadonlySet<string> = new Set([CORE_COMMAND_NAMESPACE, REPO_NAMESPACE]);
 
 /**
  * Named export a plugin may offer instead of a function default export, for a

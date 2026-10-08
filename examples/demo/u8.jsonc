@@ -22,10 +22,10 @@
     "repo": "{repo@name:pad(20)} {repo@dirname:dim} {git@branch:color(yellow):max(18)} {git@dirty:color(red)}",
     // Status and health are padded because without colour they render as words
     // ("running"/"starting") rather than a fixed-width glyph.
-    "app": "  {app@status} {app@name:max(16):pad(16)} {health@status:pad(9)} {app@uptime:dim:pad(5)} {x@port:dim}"
+    "app": "  {app@status} {app@name:max(16):pad(16)} {health@status:pad(9)} {app@uptime:dim:pad(5)} {port:dim}"
   },
 
-  // {x@port} — a config-defined indicator: shell command polled per target.
+  // {port} — a config-defined indicator: shell command polled per target.
   "indicators": {
     "port": {
       "cmd": "node -e \"process.stdout.write(process.env.PORT||'-')\"",

@@ -30,7 +30,7 @@ Progress convention: mark tasks `[x]` as they land; one commit per task or coher
 
 Independent of everything else; pure functions.
 
-- [ ] 2.1 Token parser: `{ns@name(:modifier(args))*}` grammar; parse errors → load-time warnings; unknown-token render as `{ns@name!}` red.
+- [ ] 2.1 Token parser: `{(ns@)?name(:modifier(args))*}` grammar; parse errors → load-time warnings; unknown-token render as `{ns@name!}` red.
 - [ ] 2.2 Modifiers: `pad(n)`, `max(n)`, `color(name)`, `dim`, `bold`; semantic default rendering hook (e.g. status → colored ●), modifiers override.
 - [ ] 2.3 Renderer: `(template, valueLookup) → styled string` (ANSI), plus a plain-text mode for `--json`/tests.
 
@@ -66,9 +66,9 @@ Independent of everything else; pure functions.
 - [ ] 6.1 Provider registry: `scope: repo|app`, update mode `event|poll|static`; per-target value cache; poll scheduler (per-provider interval, no overlapping runs).
 - [ ] 6.2 Delta push over IPC (`indicator.changed` notifications); full snapshot on client attach; `status --json` reads the same cache.
 - [ ] 6.3 Core `app@` providers: name, dirname, path (static), status, pid, uptime, exitcode (event-driven from supervisor).
-- [ ] 6.4 Config-defined `x@` indicators: shell cmd per target in target cwd, trimmed stdout, poll interval; failures render empty + log warning.
+- [ ] 6.4 Config-defined indicators (bare `{name}`, no namespace): shell cmd per target in target cwd, trimmed stdout, poll interval; failures render empty + log warning.
 
-**Done when**: integration test — client sees snapshot then live deltas as a fixture service starts/crashes; `x@` indicator polls and updates.
+**Done when**: integration test — client sees snapshot then live deltas as a fixture service starts/crashes; a config-defined indicator polls and updates.
 
 ## Phase 7 — Engine (`src/engine/`)
 

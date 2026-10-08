@@ -513,9 +513,9 @@ describe("indicators, plugins, limits, templates", () => {
 
   it("rejects a namespaced indicator name", () => {
     const e = configErrorFrom(() =>
-      loadFixture({ repos: { db: { path: "." } }, indicators: { "x@version": { cmd: "echo" } } }),
+      loadFixture({ repos: { db: { path: "." } }, indicators: { "my@version": { cmd: "echo" } } }),
     );
-    expect(e.issues.map((i) => i.path)).toEqual(["indicators.x@version"]);
+    expect(e.issues.map((i) => i.path)).toEqual(["indicators.my@version"]);
   });
 
   it("resolves local plugin specs and leaves package names alone", () => {
@@ -677,7 +677,7 @@ describe("template warnings", () => {
     const { ws } = loadFixture({
       repos: { db: { path: ".", template: "{app@status} {git@branch} {health@status}" } },
       indicators: { version: { cmd: "echo 1" } },
-      templates: { repo: "{repo@name} {repo@status}", app: "{app@name:pad(10)} {x@version:dim}" },
+      templates: { repo: "{repo@name} {repo@status}", app: "{app@name:pad(10)} {version:dim}" },
     });
     expect(ws.warnings).toEqual([]);
   });
@@ -698,7 +698,7 @@ describe("template warnings", () => {
     expect(ws.warnings).toEqual([
       'templates.repo: unterminated token "{repo@name"',
       'templates.app: pad() expects an integer width between 0 and 1000 in "{app@status:pad(x)}"',
-      'repos.platform.template: malformed token "{repo nam}" (expected {ns@indicator})',
+      'repos.platform.template: malformed token "{repo nam}" (expected {indicator} or {ns@indicator})',
       'repos.platform.apps.shell.template: unknown modifier "nope" in "{app@name:nope}"',
     ]);
   });
@@ -724,9 +724,10 @@ describe("template warnings", () => {
       repos: { db: { path: "." } },
       templates: { repo: "{gti@branch}" },
     });
-    expect(ws.warnings).toHaveLength(1);
-    expect(ws.warnings[0]).toContain("templates.repo");
-    expect(ws.warnings[0]).toContain("gti");
+    expect(ws.warnings).toEqual([
+      'templates.repo: {gti@branch} uses unknown namespace "gti" — expected "app", "repo", "git" or "health"; ' +
+        'an indicator declared under "indicators" is written without one',
+    ]);
   });
 
   it("accepts the namespace of a declared plugin and of an enabled built-in", () => {
@@ -750,14 +751,50 @@ describe("template warnings", () => {
     expect(ws.warnings[0]).toContain("{git@branch}");
   });
 
-  it("flags an x@ token that names no declared indicator", () => {
+  it("flags a bare token that names no declared indicator", () => {
+    const { ws } = loadFixture({
+      repos: { db: { path: ".", template: "{port}" } },
+      indicators: { version: { cmd: "echo 1" } },
+      templates: { repo: "{version} {versoin:dim}" },
+    });
+    expect(ws.warnings).toEqual([
+      'templates.repo: {versoin} names no indicator declared under "indicators"',
+      'repos.db.template: {port} names no indicator declared under "indicators"',
+    ]);
+  });
+
+  it("does not take a bare token for a core or plugin one that lost its namespace", () => {
+    // `{status}` is a config indicator called "status", never a shorthand for
+    // `{app@status}` — so with none declared it is a typo like any other.
+    const { ws } = loadFixture({
+      repos: { db: { path: "." } },
+      templates: { app: "{status} {branch}" },
+    });
+    expect(ws.warnings).toEqual([
+      'templates.app: {status} names no indicator declared under "indicators"',
+      'templates.app: {branch} names no indicator declared under "indicators"',
+    ]);
+  });
+
+  it("reserves no namespace for config indicators: one written with a prefix is an unknown namespace", () => {
     const { ws } = loadFixture({
       repos: { db: { path: "." } },
       indicators: { version: { cmd: "echo 1" } },
-      templates: { repo: "{x@version} {x@versoin}" },
+      templates: { app: "{x@version}" },
     });
-    expect(ws.warnings).toHaveLength(1);
-    expect(ws.warnings[0]).toContain("versoin");
+    expect(ws.warnings).toEqual([
+      'templates.app: {x@version} uses unknown namespace "x" — expected "app", "repo", "git" or "health"; ' +
+        'an indicator declared under "indicators" is written without one',
+    ]);
+  });
+
+  it("leaves every namespace to plugins, including a one-letter one", () => {
+    const { ws } = loadFixture({
+      repos: { db: { path: "." } },
+      plugins: ["./plugins/x.ts"],
+      templates: { app: "{x@version}" },
+    });
+    expect(ws.warnings).toEqual([]);
   });
 
   it("never lets a template typo stop a workspace whose config is otherwise fatal", () => {

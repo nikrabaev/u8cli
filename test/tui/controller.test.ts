@@ -110,6 +110,40 @@ describe("rows", () => {
     expect(state().rows[0]?.text).toBe("APP api running");
     expect(state().running).toBe(1);
   });
+
+  it("fills a bare token from the cells that carry no namespace", () => {
+    const base = fixtureSnapshot();
+    const { client, frame, state } = setup({
+      client: createFakeClient({
+        ...base,
+        templates: { repo: "REPO {repo@name} {size}", app: "APP {app@name} {ver} {size} {nope}" },
+        indicators: [
+          ...base.indicators,
+          indicator({ ns: "", name: "ver", scope: "app", owner: "api", value: "1.2.3" }),
+          indicator({ ns: "", name: "ver", scope: "app", owner: "platform.web", value: "2.0" }),
+          indicator({ ns: "", name: "size", scope: "repo", owner: "api", value: "4K" }),
+          indicator({ ns: "", name: "size", scope: "repo", owner: "platform", value: "12M" }),
+          // A plugin may use the same name; its namespace keeps the two apart.
+          indicator({ ns: "meta", name: "ver", scope: "app", owner: "api", value: "plugin" }),
+        ],
+      }),
+    });
+
+    expect(state().rows.map((row) => row.text)).toEqual([
+      // An app row reads its repo's cell for a token the app has none for.
+      "APP api 1.2.3 4K {nope!}",
+      "REPO platform 12M",
+      "APP web 2.0 12M {nope!}",
+      // No cell at all: the marker is spelled the way the token was.
+      "APP admin {ver!} 12M {nope!}",
+    ]);
+
+    client.push("indicator.changed", {
+      values: [indicator({ ns: "", name: "ver", scope: "app", owner: "platform.admin", value: "3.1" })],
+    });
+    frame();
+    expect(state().rows[3]?.text).toBe("APP admin 3.1 12M {nope!}");
+  });
 });
 
 describe("cursor", () => {

@@ -1,6 +1,6 @@
 /**
  * One-shot command execution — the primitive behind health `cmd` probes,
- * config-defined `x@` indicators and the plugin SDK's `exec()`.
+ * config-defined indicators and the plugin SDK's `exec()`.
  *
  * Two decisions worth remembering:
  *  - Commands run **detached**, in their own process group, so a `timeoutMs`

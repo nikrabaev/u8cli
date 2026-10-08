@@ -2,7 +2,7 @@
  * Row-template engine. Pure string in, styled string out — no I/O, no daemon
  * coupling, so the daemon, the CLI and the TUI all render identical rows.
  */
-export { parseTemplate, templateTokens } from "./parse.js";
+export { NO_NAMESPACE, parseTemplate, templateTokens, tokenLabel } from "./parse.js";
 export type { LiteralNode, ParsedTemplate, TemplateNode, TemplateWarning, TokenNode, TokenRef } from "./parse.js";
 
 export { renderTemplate } from "./render.js";

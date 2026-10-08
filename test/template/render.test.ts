@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { displayWidth, parseTemplate, renderTemplate, stripAnsi } from "../../src/template/index.js";
+import {
+  displayWidth,
+  parseTemplate,
+  renderTemplate,
+  stripAnsi,
+  type IndicatorLookup,
+} from "../../src/template/index.js";
 import { emptyLookup, lookupOf } from "./fixtures.js";
 
 const plain = { color: false } as const;
 const colored = { color: true } as const;
 
-const ROW = "{app@status} {app@name:pad(12)}|{git@branch:color(yellow):max(8)}|{x@version:dim}";
+const ROW = "{app@status} {app@name:pad(12)}|{git@branch:color(yellow):max(8)}|{version:dim}";
 
 function row(name: string, branch: string, version = "1.0.0"): string {
   return renderTemplate(
@@ -14,7 +20,7 @@ function row(name: string, branch: string, version = "1.0.0"): string {
       "app@status": { value: "running", display: "●", tone: "ok" },
       "app@name": name,
       "git@branch": branch,
-      "x@version": version,
+      version,
     }),
     colored,
   );
@@ -77,6 +83,31 @@ describe("unknown indicators", () => {
     const out = renderTemplate("{app@name} {nope@thing}", lookupOf({ "app@name": "api" }), plain);
     expect(out).toBe("api {nope@thing!}");
   });
+
+  it("marks an unknown bare token as it was written, with no namespace invented for it", () => {
+    expect(renderTemplate("{version}", emptyLookup, colored)).toBe("\x1b[31m{version!}\x1b[0m");
+    expect(renderTemplate("{version:pad(20)}", emptyLookup, plain)).toBe("{version!}");
+  });
+});
+
+describe("bare tokens", () => {
+  it("are looked up with an empty namespace and nothing else answers them", () => {
+    const asked: Array<[string, string]> = [];
+    const lookup: IndicatorLookup = (ns, name) => {
+      asked.push([ns, name]);
+      return ns === "" && name === "version"
+        ? { ns, name, scope: "app", owner: "gateway", value: "1.2.3" }
+        : undefined;
+    };
+    expect(renderTemplate("{version} {app@version} {name}", lookup, plain)).toBe(
+      "1.2.3 {app@version!} {name!}",
+    );
+    expect(asked).toEqual([
+      ["", "version"],
+      ["app", "version"],
+      ["", "name"],
+    ]);
+  });
 });
 
 describe("plain mode", () => {
@@ -88,7 +119,7 @@ describe("plain mode", () => {
         "app@status": { value: "running", display: "●", tone: "ok" },
         "app@name": "api",
         "git@branch": "feature/login-form",
-        "x@version": "1.0.0",
+        version: "1.0.0",
       }),
       plain,
     );
@@ -102,9 +133,9 @@ describe("plain mode", () => {
   });
 
   it("strips escapes the value itself carried", () => {
-    // `x@` indicators are command stdout; `--json`/pipes asked for no color at all.
-    const lookup = lookupOf({ "x@version": "\x1b[32m1.2.3\x1b[0m" });
-    expect(renderTemplate("v{x@version:pad(8)}|", lookup, plain)).toBe("v1.2.3   |");
+    // A config-declared indicator is command stdout; `--json`/pipes asked for no color at all.
+    const lookup = lookupOf({ version: "\x1b[32m1.2.3\x1b[0m" });
+    expect(renderTemplate("v{version:pad(8)}|", lookup, plain)).toBe("v1.2.3   |");
   });
 });
 
@@ -112,10 +143,10 @@ describe("purity", () => {
   it("does not let one styled token poison the tone defaults of the next", () => {
     const lookup = lookupOf({
       "health@status": { value: "up", tone: "muted" },
-      "x@version": { value: "1.0", tone: "muted" },
+      version: { value: "1.0", tone: "muted" },
     });
     expect(renderTemplate("{health@status:bold}", lookup, colored)).toBe("\x1b[1mup\x1b[0m");
-    expect(renderTemplate("{x@version}", lookup, colored)).toBe("\x1b[2;90m1.0\x1b[0m");
+    expect(renderTemplate("{version}", lookup, colored)).toBe("\x1b[2;90m1.0\x1b[0m");
   });
 
   it("renders the same row twice identically", () => {
@@ -124,7 +155,7 @@ describe("purity", () => {
       "app@status": { value: "running", display: "●", tone: "ok" },
       "app@name": "api",
       "git@branch": "feature/login-form",
-      "x@version": "1.0.0",
+      version: "1.0.0",
     });
     expect(renderTemplate(parsed, lookup, colored)).toBe(renderTemplate(parsed, lookup, colored));
   });
@@ -160,7 +191,7 @@ describe("column alignment", () => {
       "app@status": { value: "running", display: "●", tone: "ok" },
       "app@name": "api",
       "git@branch": "main",
-      "x@version": "1.0.0",
+      version: "1.0.0",
     });
     expect(renderTemplate(parsed, lookup, colored)).toBe(renderTemplate(ROW, lookup, colored));
   });

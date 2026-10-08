@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { DEFAULT_TEMPLATES } from "../../src/config/types.js";
-import { parseTemplate, renderTemplate, templateTokens, type TokenNode } from "../../src/template/index.js";
+import {
+  parseTemplate,
+  renderTemplate,
+  templateTokens,
+  tokenLabel,
+  type TokenNode,
+} from "../../src/template/index.js";
 import { lookupOf } from "./fixtures.js";
 
 const plain = { color: false } as const;
@@ -24,21 +30,40 @@ describe("grammar", () => {
     ]);
   });
 
-  it("keeps literals between tokens, including adjacency", () => {
-    const parsed = parseTemplate("[{app@name}] {git@branch}/{x@version}");
+  it("parses a bare token as an indicator with no namespace", () => {
+    const parsed = parseTemplate("{version}");
     expect(parsed.warnings).toEqual([]);
-    expect(parsed.nodes.map((n) => (n.kind === "token" ? `${n.ns}@${n.name}` : n.text))).toEqual([
+    expect(parsed.nodes).toEqual([
+      { kind: "token", ns: "", name: "version", modifiers: [], source: "{version}" },
+    ]);
+  });
+
+  it("keeps literals between tokens, including adjacency", () => {
+    const parsed = parseTemplate("[{app@name}] {git@branch}/{version}");
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.nodes.map((n) => (n.kind === "token" ? [n.ns, n.name] : n.text))).toEqual([
       "[",
-      "app@name",
+      ["app", "name"],
       "] ",
-      "git@branch",
+      ["git", "branch"],
       "/",
-      "x@version",
+      ["", "version"],
     ]);
   });
 
   it("accepts dashes, digits and underscores in names", () => {
     expect(tokens("{my-plugin@build_status2}")).toHaveLength(1);
+    expect(tokens("{build_status-2}")).toMatchObject([{ ns: "", name: "build_status-2" }]);
+  });
+
+  it("chains modifiers on a bare token like on any other", () => {
+    const [token] = tokens("{version:max(8):dim}");
+    expect(token).toMatchObject({ ns: "", name: "version" });
+    expect(token?.modifiers).toEqual([{ kind: "max", width: 8 }, { kind: "dim" }]);
+  });
+
+  it("reads a lone modifier name as an indicator, since a modifier only follows a colon", () => {
+    expect(tokens("{dim}")).toMatchObject([{ ns: "", name: "dim", modifiers: [] }]);
   });
 
   it("parses colon-chained modifiers in authored order", () => {
@@ -77,19 +102,28 @@ describe("malformed input", () => {
     expect(renderTemplate(parsed, lookupOf({ "app@name": "api" }), plain)).toBe("name: {app@name");
   });
 
-  it.each(["{oops}", "{app@}", "{@name}", "{app name}", "{app@na me}", "{}"])(
-    "warns and renders %s literally",
-    (source) => {
-      const parsed = parseTemplate(source);
-      expect(parsed.warnings).toHaveLength(1);
-      expect(parsed.warnings[0]?.message).toMatch(/malformed token/);
-      expect(renderTemplate(parsed, lookupOf({ "app@name": "api" }), plain)).toBe(source);
-    },
-  );
+  it.each([
+    "{app@}",
+    "{@name}",
+    "{app name}",
+    "{app@na me}",
+    "{}",
+    "{ver sion}",
+    "{9lives}",
+    "{pad(8)}",
+    "{a@b@c}",
+  ])("warns and renders %s literally", (source) => {
+    const parsed = parseTemplate(source);
+    expect(parsed.warnings).toHaveLength(1);
+    expect(parsed.warnings[0]?.message).toBe(
+      `malformed token "${source}" (expected {indicator} or {ns@indicator})`,
+    );
+    expect(renderTemplate(parsed, lookupOf({ "app@name": "api" }), plain)).toBe(source);
+  });
 
   it("keeps rendering the rest of the row after a malformed token", () => {
-    const out = renderTemplate("{nope} {app@name}", lookupOf({ "app@name": "api" }), plain);
-    expect(out).toBe("{nope} api");
+    const out = renderTemplate("{no pe} {app@name}", lookupOf({ "app@name": "api" }), plain);
+    expect(out).toBe("{no pe} api");
   });
 
   it("never throws on adversarial input", () => {
@@ -131,9 +165,10 @@ describe("modifier diagnostics", () => {
 
 describe("templateTokens", () => {
   it("lists well-formed tokens only, so config validation can check them", () => {
-    expect(templateTokens("{app@name:pad(4)} {broken} {git@branch}")).toEqual([
+    expect(templateTokens("{app@name:pad(4)} {bro ken} {git@branch} {version:dim}")).toEqual([
       { ns: "app", name: "name" },
       { ns: "git", name: "branch" },
+      { ns: "", name: "version" },
     ]);
   });
 
@@ -143,6 +178,20 @@ describe("templateTokens", () => {
       { ns: "app", name: "name" },
       { ns: "app", name: "name" },
     ]);
+  });
+});
+
+describe("tokenLabel", () => {
+  it("spells a token the way a template does", () => {
+    expect(tokenLabel("git", "branch")).toBe("git@branch");
+    expect(tokenLabel("", "version")).toBe("version");
+  });
+
+  it("round-trips through the parser", () => {
+    for (const head of ["app@status", "my-plugin@build_status2", "version"]) {
+      const [token] = tokens(`{${head}:dim}`);
+      expect(tokenLabel(token?.ns ?? "?", token?.name ?? "?")).toBe(head);
+    }
   });
 });
 

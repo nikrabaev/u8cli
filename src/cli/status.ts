@@ -22,7 +22,7 @@ import type {
   SnapshotProfile,
   SnapshotRepo,
 } from "../ipc/protocol.js";
-import { renderTemplate, type IndicatorLookup } from "../template/index.js";
+import { renderTemplate, tokenLabel, type IndicatorLookup } from "../template/index.js";
 import { describeDirectory } from "../util/dirs.js";
 import { U8Error } from "../util/errors.js";
 import { VERSION } from "../version.js";
@@ -31,8 +31,9 @@ import { writeLine, writeLines } from "./io.js";
 
 /**
  * Bumped only on a breaking change to the `--json` shape. 3: target ids and
- * repo names are instance-qualified (`api@feat-x`) outside base, and the
- * document says which instance it describes.
+ * repo names are instance-qualified (`api@feat-x`) outside base, the document
+ * says which instance it describes, and a config-declared indicator is keyed by
+ * its bare name.
  */
 export const STATUS_SCHEMA_VERSION = 3;
 
@@ -46,7 +47,11 @@ export interface StatusOptions {
 // `--json`
 // ---------------------------------------------------------------------------
 
-/** Indicator values keyed `"ns@name"`, raw (never the pre-rendered `display`). */
+/**
+ * Indicator values keyed as a template spells them — `"app@status"`,
+ * `"git@branch"`, a bare `"version"` for one declared in config — and raw
+ * (never the pre-rendered `display`).
+ */
 export type IndicatorMap = Record<string, string>;
 
 export interface StatusJsonApp {
@@ -256,7 +261,7 @@ function indexIndicators(values: readonly IndicatorValue[]): IndicatorIndex {
     byCell.set(`${value.scope} ${value.owner} ${value.ns} ${value.name}`, value);
     const key = `${value.scope} ${value.owner}`;
     const map = byOwner.get(key) ?? {};
-    map[`${value.ns}@${value.name}`] = value.value;
+    map[tokenLabel(value.ns, value.name)] = value.value;
     byOwner.set(key, map);
   }
   return {

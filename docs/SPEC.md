@@ -94,14 +94,14 @@ Per `(command, target)` pair: `pre` → script → `post`.
 
 ### 2.7 Indicator
 
-A named, per-target (or per-repo) value rendered in templates as `{ns@name}`.
+A named, per-target (or per-repo) value rendered in templates as `{ns@name}`, or as a bare `{name}` when the config declares it.
 
 - Providers live **in the daemon** (from core, plugins, or config). Each declares its update mode:
   - **event** — pushed by the engine (e.g. process status),
   - **poll** — evaluated on an interval,
   - **static** — computed once at load.
 - The daemon caches current values and pushes deltas to connected clients. Headless `u8 status` reads the same cache — one source of truth.
-- **Config-defined indicators** (`x@` namespace): declared once at **workspace level** as a shell command + poll interval; executed **per target, in the target's cwd**; stdout (trimmed) is the value.
+- **Config-defined indicators** (no namespace — written `{name}`): declared once at **workspace level** as a shell command + poll interval; executed **per target, in the target's cwd**; stdout (trimmed) is the value.
 
 ### 2.8 Plugin
 
@@ -147,7 +147,7 @@ like any command: per-target logs, progress, hooks.
 ## 3. Naming conventions
 
 - **Commands**: `ns:name`. Reserved namespaces: `app` (core) and every loaded plugin's name (e.g. `git:pull`). User commands in config are **bare names** (`test`, `deploy`); a bare name using a reserved prefix is rejected at validation.
-- **Indicators**: `{ns@name}`. `app@…` and `repo@…` core, `<plugin>@…` plugin, `x@…` config-defined.
+- **Indicators**: `{ns@name}` — `app@…` and `repo@…` core, `<plugin>@…` plugin — and a bare `{name}` for config-defined ones. Every core and plugin token carries a namespace, so a token without one can only be the config's own, and no namespace is reserved for it.
 - Collisions inside a namespace are validation errors.
 
 Core indicators (v1): per app `app@name`, `app@dirname`, `app@path`, `app@status`, `app@pid`, `app@uptime`, `app@exitcode`; per repo `repo@name`, `repo@dirname`, `repo@path`, `repo@status` (the worst state among its apps).
@@ -164,12 +164,12 @@ Row templates are strings of literal text + tokens with optional colon-chained m
 {app@status} {app@name:pad(24)} {git@branch:color(yellow):max(15)} {health@status}
 ```
 
-- Grammar: `{ns@indicator(:modifier(args))*}`.
+- Grammar: `{(ns@)?indicator(:modifier(args))*}`. The namespace is omitted only for a config-defined indicator.
 - Modifiers (v1): `pad(n)` (right-pad/align to width), `max(n)` (truncate with `…`), `color(name)`, `dim`, `bold`. Indicators may carry a semantic default rendering (e.g. `app@status` renders `●` colored by state); modifiers override it.
 - **No conditionals or expressions.** Anything conditional belongs in a custom indicator.
 - Configuration: workspace-level `templates.repo` (repo header row) and `templates.app` (child row); any repo or app may override with its own `template`. Single-app repos render as **one merged row** using the app template.
 - An app row falls back to its repo's cells (`{git@branch}`, `{repo@dirname}`); a header row does not fall back to an app's, so `app@…` there is an unknown token.
-- Unknown token → rendered as `{ns@name!}` in red (not a crash); validation warns at load.
+- Unknown token → rendered as `{ns@name!}` (or `{name!}`) in red (not a crash); validation warns at load.
 
 ---
 
@@ -325,13 +325,13 @@ u8 daemon status|stop|logs
 
   "templates": {
     "repo": "{repo@name:pad(24)} {repo@dirname:dim} {git@branch:color(yellow):max(20)} {git@dirty:color(red)}",
-    "app": "  {app@status} {app@name:pad(22)} {health@status} {x@version:dim}"
+    "app": "  {app@status} {app@name:pad(22)} {health@status} {version:dim}"
   },
 
   "plugins": ["./plugins/deploy.ts"],          // git + health are built-in
 
   "indicators": {
-    "version": { "cmd": "jq -r .version package.json", "interval": 60000 }  // {x@version}
+    "version": { "cmd": "jq -r .version package.json", "interval": 60000 }  // {version}
   },
 
   "repos": {

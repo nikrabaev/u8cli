@@ -238,7 +238,7 @@ export interface NormalizedCommand {
   hooks: { pre: string[]; post: string[] };
 }
 
-/** A `{x@name}` indicator declared in config: a shell command polled per target. */
+/** An indicator declared in config, rendered as a bare `{name}`: a shell command polled per target. */
 export interface CustomIndicatorDef {
   name: string;
   cmd: string;
@@ -369,7 +369,7 @@ export const DEFAULT_HEALTH = {
   threshold: 2,
 } as const;
 
-/** Namespaces users may not claim for bare command names or `x@` indicators. */
+/** Namespace of the core commands and app-row indicators; a config command or indicator name may not claim it. */
 export const CORE_COMMAND_NAMESPACE = "app";
 
 /**

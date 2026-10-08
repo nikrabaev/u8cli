@@ -36,7 +36,7 @@ afterEach(() => undefined);
 const ESC = "[";
 
 /**
- * The rows, once every `x@ver` cell has been polled at least once.
+ * The rows, once every `{ver}` cell has been polled at least once.
  *
  * Config-defined indicators are staggered across targets at daemon start, so a
  * status taken in the first moments of a cold daemon legitimately shows a cell
@@ -50,7 +50,7 @@ async function settledRows(): Promise<string[]> {
     expect(result.code).toBe(0);
     lines = result.out.trimEnd().split("\n");
     return lines.filter((line) => line.includes("1.2.3")).length === 3;
-  }, "every x@ver cell to be polled once");
+  }, "every {ver} cell to be polled once");
   return lines;
 }
 
@@ -213,7 +213,9 @@ describe("--json", () => {
     // Raw values, never the pre-rendered display.
     expect(app?.indicators["app@status"]).toBe("stopped");
     expect(app?.indicators["app@name"]).toBe("api");
-    expect(app?.indicators["x@ver"]).toBe("1.2.3");
+    // Keyed as a template spells them: a config-declared one has no namespace.
+    expect(app?.indicators["ver"]).toBe("1.2.3");
+    expect(Object.keys(app?.indicators ?? {}).filter((key) => !key.includes("@"))).toEqual(["ver"]);
 
     const platform = json.repos.find((r) => r.name === "platform");
     expect(platform?.apps.map((a) => a.id)).toEqual(["platform.web", "platform.admin"]);

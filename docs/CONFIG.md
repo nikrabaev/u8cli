@@ -31,14 +31,14 @@ rejected everywhere, so a typo is an error at load rather than a setting that si
 | `plugins` | `(string \| { spec, options })[]` | `[]` | npm package names, or paths (`./`, `/`, `~`) to local files — each optionally with options. |
 | `builtins` | object | `git` and `health` on, `protos` off | Switches a built-in off, or configures one. |
 | `limits` | object | see [Limits](#limits) | Log rotation, timeouts, concurrency, daemon idle exit. |
-| `indicators` | `{ [name: string]: IndicatorDef }` | `{}` | Config-defined `{x@…}` indicators. |
+| `indicators` | `{ [name: string]: IndicatorDef }` | `{}` | Your own [indicators](#indicators), rendered as `{name}`. |
 | `repos` | `{ [name: string]: Repo }` | **required** | The repos u8 manages. |
 | `profiles` | `{ [name: string]: Profile }` | a synthesized `all` | Named selections of targets. |
 | `commands` | `{ [name: string]: Command }` | `{}` | Extra commands, plus hooks. |
 
 Repo, app and profile names must match `^[A-Za-z0-9][A-Za-z0-9_-]*$` — no `.`, `:` or `@`, because
 those are the separators for target ids (`repo.app`, `repo.app@instance`), command namespaces
-(`git:pull`) and indicators (`{git@branch}`). Command and `x@` indicator names may additionally contain `.`
+(`git:pull`) and indicators (`{git@branch}`). Command and indicator names may additionally contain `.`
 (`db.migrate`).
 
 ---
@@ -362,7 +362,7 @@ pre …  →  the command's script  →  post …
 
 ---
 
-## Indicators (`x@`)
+## Indicators
 
 Config-defined indicators are declared once at workspace level and evaluated **per owner, in that
 owner's working directory**. Trimmed stdout is the value.
@@ -380,8 +380,11 @@ owner's working directory**. Trimmed stdout is the value.
 | `interval` | int > 0 (ms) | `5000` | Poll interval. |
 | `scope` | `"app" \| "repo"` | `"app"` | Run once per app (in its cwd) or once per repo (in the repo root). |
 
-They render as `{x@version}`. Names are bare — `x` is the reserved namespace, so `"x@version"` as a
-key is a validation error.
+They render by bare name — `{version}`, `{size}`. Having no namespace is what marks a token as one
+of yours: everything from core (`{app@status}`) or a plugin (`{git@branch}`) carries one, so the two
+can never collide and no name is reserved for config indicators. A key containing `@` or `:` is a
+validation error, and a bare token that matches nothing declared here renders as `{versoin!}` in red
+and is reported as a warning in the daemon log.
 
 A `scope: "app"` probe gets the target's merged `env` on top of the daemon's; a `scope: "repo"`
 probe gets only the daemon's, because a repo has no env of its own. Read what you need from the
@@ -396,7 +399,8 @@ stripped, whitespace runs collapse to one space, and the result is capped at 200
 
 ## Templates
 
-A row is literal text plus `{ns@indicator}` tokens with optional `:`-chained modifiers.
+A row is literal text plus tokens — `{ns@indicator}` for a core or plugin indicator, a bare
+`{indicator}` for one declared under [`indicators`](#indicators) — with optional `:`-chained modifiers.
 
 ```jsonc
 "templates": {
@@ -430,10 +434,13 @@ is the header row instead — it never leaks into child rows.
 
 ```text
 {ns@name}                 {ns@name:mod}            {ns@name:mod(arg):mod}
+{name}                    {name:mod}               {name:mod(arg):mod}
 ```
 
-Both halves of `ns@name` must start with a letter and continue with letters, digits, `_` or `-`.
-`{{` and `}}` escape a literal brace.
+A name — and a namespace, when there is one — must start with a letter and continue with letters,
+digits, `_` or `-`. A token with no `@` is an indicator declared in this config; one from core or a
+plugin always carries its namespace, so `{status}` is never short for `{app@status}`. `{{` and `}}`
+escape a literal brace.
 
 Parsing never throws, so a template typo degrades rather than breaking the dashboard — but the two
 kinds of typo look different:
@@ -441,8 +448,8 @@ kinds of typo look different:
 - A **malformed head** (`{app@nam e}`) is rendered as the literal text you typed. In this build
   nothing else reports it, so a row echoing its own template *is* the error message.
 - A **malformed modifier** (`{app@name:pad(x)}`) is dropped and the token renders unmodified.
-- A **well-formed** token naming an indicator that does not exist (`{git@brunch}`) renders as
-  `{git@brunch!}` in red.
+- A **well-formed** token naming an indicator that does not exist (`{git@brunch}`, or a bare
+  `{versoin}` with no such key under `indicators`) renders as `{git@brunch!}` / `{versoin!}` in red.
 
 ```console
 $ u8 status          # templates.app = "  {app@nam e} | {app@name:pad(x)} | {git@brunch} | {{lit}} | {app@name}"
@@ -469,7 +476,7 @@ Some indicators carry a default appearance: `{app@status}` renders as a `●` co
 (`color`/`dim`/`bold`) discards that default entirely rather than merging with it. Layout modifiers
 (`pad`, `max`) do not.
 
-There are no conditionals or expressions. Anything conditional belongs in an `x@` indicator or a
+There are no conditionals or expressions. Anything conditional belongs in a config indicator or a
 plugin.
 
 ### Available indicators
@@ -497,7 +504,7 @@ plugin.
 | `{git@ahead}` / `{git@behind}` | repo | Commits vs upstream; empty when zero or no upstream |
 | `{health@status}` | app | `healthy`, `unhealthy`, `starting`, `n/a` |
 | `{protos@<alias>}` / `{protos@linked}` | app | Shared-package versions, once [protos](#protos) is configured |
-| `{x@<name>}` | as declared | Your config-defined indicators |
+| `{<name>}` | as declared | Your config-defined [indicators](#indicators) |
 | `{<plugin>@<name>}` | as declared | Plugin indicators |
 
 `stale` is not a lifecycle state: it means a *running* process whose spawn-time script, cwd or env no
@@ -889,7 +896,7 @@ caught) and re-validates on change.
   "templates": {
     "repo": "{repo@name:max(20):pad(20)} {repo@dirname:dim} {git@branch:color(yellow):max(18)} {git@dirty:color(red)}",
     // status/health are padded: without colour they render as words, not a glyph.
-    "app": "  {app@status:pad(8)} {app@name:max(16):pad(16)} {health@status:pad(9)} {app@uptime:dim:pad(5)} {x@port:dim}"
+    "app": "  {app@status:pad(8)} {app@name:max(16):pad(16)} {health@status:pad(9)} {app@uptime:dim:pad(5)} {port:dim}"
   },
 
   // Local file (jiti loads .ts) or an npm package from this workspace's node_modules.
@@ -909,7 +916,7 @@ caught) and re-validates on change.
   // Instances other than base: where their worktrees go, and where their ports come from.
   "instances": { "dir": ".u8/worktrees", "ports": { "from": 20000, "to": 20999 } },
 
-  // {x@port}: a shell command polled per target, in that target's cwd.
+  // {port}: a shell command polled per target, in that target's cwd.
   "indicators": {
     "port": { "cmd": "printf '%s' \"${PORT:--}\"", "interval": 30000 }
   },

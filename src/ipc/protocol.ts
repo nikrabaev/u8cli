@@ -47,6 +47,7 @@ export type IndicatorTone = "ok" | "warn" | "error" | "muted" | "info";
 
 /** One resolved indicator cell. `owner` is a repo name or a target id per `scope`. */
 export interface IndicatorValue {
+  /** Empty for an indicator declared in config, which a template writes bare: `{version}`. */
   ns: string;
   name: string;
   scope: "repo" | "app";

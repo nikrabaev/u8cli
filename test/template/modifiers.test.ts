@@ -56,7 +56,7 @@ describe("max(n)", () => {
   });
 
   it("cuts on visible columns, not bytes, when a value carries its own ANSI", () => {
-    // An `x@` indicator is arbitrary command stdout — routinely colored.
+    // A config-declared indicator is arbitrary command stdout — routinely colored.
     const out = render("{app@name:max(5)}", "\x1b[31mERROR-LONG\x1b[0m", colored);
     expect(stripAnsi(out)).toBe("ERRO…");
     expect(displayWidth(out)).toBe(5);

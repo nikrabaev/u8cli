@@ -18,7 +18,7 @@ indicator cache.
 | **Profile** | A named selection of targets. The active profile is per-machine state, not config — switching it never touches `u8.jsonc`. |
 | **Instance** | A parallel copy of part of the workspace: its own checkout (a git worktree), its own ports, its own processes. What `u8.jsonc` describes is the `base` instance; others run beside it. See [Instances](#instances). |
 | **Command** | A named unit of work run against targets. `kind: "task"` runs to completion; `kind: "service"` is supervised. Built-ins: `app:start`, `app:stop`, `app:restart`. |
-| **Indicator** | A named value rendered in row templates as `{ns@name}` — `app@status`, `repo@name`, `health@status`, `git@branch`, `x@`… for config-defined ones. |
+| **Indicator** | A named value rendered in row templates. Core and plugin ones are written `{ns@name}` — `app@status`, `repo@name`, `health@status`, `git@branch` — and the ones you declare in config by bare name: `{version}`. |
 | **Plugin** | An npm package or local file loaded into the daemon, contributing indicators, commands, hooks and a readiness signal. `git` and `health` are built in. |
 
 A **target** is addressed as `repo` (every app of that repo) or `repo.app` (exactly one). Outside
@@ -81,7 +81,7 @@ platform             platform main 9
 
 `db` and `api` are single-service repos, so each renders as one merged row; `platform` is a monorepo,
 so it gets a header row plus one row per app. Every column is a template token: status, name,
-`{health@status}`, `{app@uptime}` and a config-defined `{x@port}` on the child rows, and
+`{health@status}`, `{app@uptime}` and a config-defined `{port}` on the child rows, and
 `{git@branch}` plus `{git@dirty}` on the header — the `9` is nine changed files in that checkout.
 In a terminal the status column is a coloured `●`; piped (as above) it falls back to the word,
 because a colourless dot means nothing in a log file.

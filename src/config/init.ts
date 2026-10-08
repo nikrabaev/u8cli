@@ -20,7 +20,8 @@ export function skeletonConfig(name: string): string {
   "name": ${JSON.stringify(name)},
 
   // Row templates: literal text plus {namespace@indicator} tokens with optional
-  // :modifiers — pad(n), max(n), color(name), dim, bold.
+  // :modifiers — pad(n), max(n), color(name), dim, bold. An indicator declared
+  // under "indicators" below is written without a namespace: {version}.
   // "templates": {
   //   "repo": "{repo@name:pad(24)} {repo@dirname:dim} {git@branch:color(yellow)}",
   //   "app": "  {app@status} {app@name:pad(22)} {health@status}"
@@ -36,7 +37,7 @@ export function skeletonConfig(name: string): string {
   // their git worktrees go and which ports they are allocated from.
   // "instances": { "dir": ".u8/worktrees", "ports": { "from": 20000, "to": 20999 } },
 
-  // Extra indicators, rendered as {x@version}. The command runs in each
+  // Extra indicators, rendered as {version}. The command runs in each
   // target's cwd; trimmed stdout is the value.
   // "indicators": {
   //   "version": { "cmd": "jq -r .version package.json", "interval": 60000 }

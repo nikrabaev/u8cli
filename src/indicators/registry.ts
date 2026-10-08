@@ -27,10 +27,11 @@ import type {
 } from "../plugin/types.js";
 import { exec } from "../process/index.js";
 import type { ExecOptions, ExecResult } from "../process/types.js";
+import { NO_NAMESPACE, tokenLabel } from "../template/index.js";
 import { errorMessage } from "../util/errors.js";
 import type { Logger } from "../util/logger.js";
 import { coreIndicators } from "./core.js";
-import { CUSTOM_NAMESPACE, customIndicators } from "./custom.js";
+import { customIndicators } from "./custom.js";
 import { sanitizeIndicatorText } from "./sanitize.js";
 import type { IndicatorRegistryDeps } from "./types.js";
 
@@ -94,7 +95,7 @@ type Settled<T> = { state: "ok"; value: T } | { state: "error"; error: unknown }
 
 /**
  * Creates the registry. Core `app@` / `repo@` providers are registered immediately and
- * config-declared `x@` providers are derived from the workspace on every
+ * config-declared providers are derived from the workspace on every
  * `start()` / `rebind()`, so the daemon only has to add plugin providers.
  */
 export function createIndicatorRegistry(deps: IndicatorRegistryDeps): IndicatorRegistry {
@@ -230,12 +231,13 @@ class Registry implements IndicatorRegistry {
   private upsert(reg: IndicatorRegistration): ProviderEntry {
     const scope = reg.def.scope ?? "app";
     const key = providerKey(reg.ns, reg.name, scope);
-    const update = resolveUpdate(reg.def, `${reg.ns}@${reg.name}`, this.logger);
+    const label = tokenLabel(reg.ns, reg.name);
+    const update = resolveUpdate(reg.def, label, this.logger);
     if (reg.def.value === undefined && reg.def.subscribe === undefined) {
-      this.logger.warn(`${reg.ns}@${reg.name} defines neither value() nor subscribe(); it will stay empty`);
+      this.logger.warn(`${label} defines neither value() nor subscribe(); it will stay empty`);
     } else if (reg.def.subscribe !== undefined && update.mode !== "event") {
       this.logger.warn(
-        `${reg.ns}@${reg.name} declares update mode "${update.mode}" but defines subscribe(); ` +
+        `${label} declares update mode "${update.mode}" but defines subscribe(); ` +
           (reg.def.value === undefined ? "subscribing anyway" : "subscribe() is ignored"),
       );
     }
@@ -251,7 +253,7 @@ class Registry implements IndicatorRegistry {
       ns: reg.ns,
       name: reg.name,
       scope,
-      logger: this.logger.child(`${reg.ns}@${reg.name}`),
+      logger: this.logger.child(label),
       def: reg.def,
       update,
       timeoutMs: providerTimeout(update),
@@ -261,12 +263,16 @@ class Registry implements IndicatorRegistry {
     return entry;
   }
 
-  /** Config-declared `x@` providers follow the workspace, not the plugin host. */
+  /**
+   * Config-declared providers follow the workspace, not the plugin host. They
+   * are the ones registered under no namespace, so that is how the ones a
+   * reload dropped are found.
+   */
   private syncCustomProviders(): void {
     const wanted = customIndicators(this.deps.workspace.current().indicators);
     const keep = new Set(wanted.map((r) => providerKey(r.ns, r.name, r.def.scope ?? "app")));
     for (const [key, entry] of [...this.providers]) {
-      if (entry.ns !== CUSTOM_NAMESPACE || keep.has(key)) continue;
+      if (entry.ns !== NO_NAMESPACE || keep.has(key)) continue;
       for (const state of entry.owners.values()) {
         deactivate(state, this.logger);
         this.pending.delete(cellKey(entry, state.owner));
@@ -412,7 +418,7 @@ class Registry implements IndicatorRegistry {
     } catch (error) {
       // Only reachable if the registry itself misbehaves; a provider's own
       // failure is already data by this point.
-      this.logger.error(`${entry.ns}@${entry.name} evaluation failed: ${errorMessage(error)}`);
+      this.logger.error(`${tokenLabel(entry.ns, entry.name)} evaluation failed: ${errorMessage(error)}`);
     } finally {
       if (state.generation === gen) {
         state.running = false;

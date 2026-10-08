@@ -797,9 +797,9 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     const initial = host;
     if (isLoadable(initial)) await initial.load();
     for (const registration of initial.indicators()) indicators.register(registration);
-    // Core `app@` providers are registered by the registry itself, and `x@` ones
-    // are derived from the workspace on every start/rebind — only plugin
-    // contributions have to be pushed in from here.
+    // Core `app@` providers are registered by the registry itself, and the
+    // config's own are derived from the workspace on every start/rebind — only
+    // plugin contributions have to be pushed in from here.
     await indicators.start();
 
     disposers.push(

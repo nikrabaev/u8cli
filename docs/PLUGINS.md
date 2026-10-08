@@ -34,9 +34,8 @@ object works too — and that is the portable form, because importing it require
 installed in the workspace (see [Resolution](#resolution)). The definition may be the default export,
 the module itself, or a transpiled CommonJS `exports.default` — all three are unwrapped.
 
-`name` must match `^[A-Za-z0-9][A-Za-z0-9_-]*$` and may not be `app`, `repo` or `x` (reserved for
-the core commands and indicators, and for config-defined indicators). Two plugins claiming the same
-name is an error for the second one.
+`name` must match `^[A-Za-z0-9][A-Za-z0-9_-]*$` and may not be `app` or `repo` (reserved for the
+core commands and indicators). Two plugins claiming the same name is an error for the second one.
 
 ### Configuration: the factory export
 
@@ -533,7 +532,7 @@ Wire it up:
 "plugins": ["./plugins/ports.ts"],
 "templates": {
   // the demo's own app row, with {ports@open} appended
-  "app": "  {app@status:pad(8)} {app@name:max(16):pad(16)} {health@status:pad(9)} {app@uptime:dim:pad(5)} {x@port:dim} {ports@open:dim}"
+  "app": "  {app@status:pad(8)} {app@name:max(16):pad(16)} {health@status:pad(9)} {app@uptime:dim:pad(5)} {port:dim} {ports@open:dim}"
 }
 ```
 

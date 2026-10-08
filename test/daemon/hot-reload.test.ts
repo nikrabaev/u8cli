@@ -246,22 +246,23 @@ describe("watched saves", () => {
       ws,
       reloads,
       baseConfig({ indicators: { tag: { cmd: "printf 'v9'", interval: 300 } } }),
-      "the reload that adds an x@ indicator",
+      "the reload that adds an indicator",
     );
     expect(added.ok).toBe(true);
 
-    // `x@` providers are derived from the workspace, so a reload has to re-derive
-    // them: one cell per target, each evaluated in that target's own cwd.
+    // Config-declared providers are derived from the workspace, so a reload has
+    // to re-derive them: one cell per target, each evaluated in that target's
+    // own cwd. They carry no namespace, which is what tells them from a plugin's.
     const owners = await pollFor(async () => {
       const cells = (await client.request("workspace.snapshot", {})).indicators.filter(
-        (v) => v.ns === "x" && v.name === "tag" && v.value === "v9",
+        (v) => v.ns === "" && v.name === "tag" && v.value === "v9",
       );
       return cells.length === 2 ? cells.map((v) => v.owner).sort() : undefined;
     }, "the new indicator to be polled for every target");
     expect(owners).toEqual(["api", "web"]);
 
     await save(ws, reloads, baseConfig(), "the reload that removes the indicator");
-    expect((await client.request("workspace.snapshot", {})).indicators.some((v) => v.ns === "x")).toBe(false);
+    expect((await client.request("workspace.snapshot", {})).indicators.some((v) => v.ns === "")).toBe(false);
   });
 
   it("hot-applies added profiles and commands", async () => {

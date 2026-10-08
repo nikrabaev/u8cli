@@ -18,7 +18,7 @@ import { z } from "zod";
  */
 export const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
-/** Command and `x@` indicator names: bare, but dots are allowed (`db.migrate`). */
+/** Command and config indicator names: bare, but dots are allowed (`db.migrate`). */
 export const BARE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /**

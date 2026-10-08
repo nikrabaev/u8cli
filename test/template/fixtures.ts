@@ -3,10 +3,14 @@ import type { IndicatorLookup } from "../../src/template/index.js";
 
 export type ValueSpec = string | { value: string; display?: string; tone?: IndicatorTone };
 
-/** Builds a lookup from a `"ns@name"` map; anything absent is an unknown indicator. */
+/**
+ * Builds a lookup from a map keyed the way a template spells each token —
+ * `"app@name"`, or a bare `"version"` for a config-declared indicator. Anything
+ * absent is an unknown indicator.
+ */
 export function lookupOf(values: Record<string, ValueSpec>): IndicatorLookup {
   return (ns, name) => {
-    const spec = values[`${ns}@${name}`];
+    const spec = values[ns === "" ? name : `${ns}@${name}`];
     if (spec === undefined) return undefined;
     const body = typeof spec === "string" ? { value: spec } : spec;
     return { ns, name, scope: "app", owner: "gateway", ...body } satisfies IndicatorValue;

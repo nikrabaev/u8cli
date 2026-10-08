@@ -19,7 +19,7 @@ import path from "node:path";
 // The grammar, not the renderer: `parse.ts` imports nothing outside its own
 // module, so reading it here checks templates against the one true grammar
 // without coupling config to anything above it.
-import { parseTemplate, templateTokens } from "../template/parse.js";
+import { NO_NAMESPACE, parseTemplate, templateTokens, tokenLabel } from "../template/parse.js";
 import { describeDirectory } from "../util/dirs.js";
 import { ConfigError, type ConfigIssue } from "../util/errors.js";
 import { resolvePath, workspaceId } from "../util/paths.js";
@@ -69,18 +69,11 @@ import {
   type Templates,
 } from "./types.js";
 
-/** Poll interval for a config `x@` indicator that does not set one. */
+/** Poll interval for a config indicator that does not set one. */
 export const DEFAULT_INDICATOR_INTERVAL_MS = 5_000;
 
 /** Profile synthesized when the config declares none. */
 export const IMPLICIT_PROFILE_NAME = "all";
-
-/**
- * The `x@` namespace, mirrored from `CUSTOM_NAMESPACE` in `src/indicators`:
- * config sits below the indicator layer and cannot import it, and the letter is
- * part of the config language (SPEC §2.7) rather than of the registry.
- */
-const CUSTOM_INDICATOR_NAMESPACE = "x";
 
 /**
  * `records` are the instances this machine has created (see `instances.ts`);
@@ -835,20 +828,21 @@ function templateWarnings(
     const parsed = parseTemplate(template);
     for (const warning of parsed.warnings) out.push(`${at}: ${warning.message}`);
     for (const { ns, name } of templateTokens(parsed)) {
-      const token = `{${ns}@${name}}`;
+      const token = `{${tokenLabel(ns, name)}}`;
       if (row === "repo" && ns === CORE_COMMAND_NAMESPACE) {
         // The fallback runs one way: an app row may read its repo's cells, but a
         // header row stands for several apps and has no single one to read.
         out.push(`${at}: ${token} is an app-row token — a repo header row reads ${REPO_ROW_TOKENS}`);
-      } else if (ns === CUSTOM_INDICATOR_NAMESPACE) {
-        // The only namespace whose *names* this layer knows in full.
+      } else if (ns === NO_NAMESPACE) {
+        // A bare token is a config indicator, and those are the only ones whose
+        // *names* this layer knows in full.
         if (!declaredIndicators.has(name)) {
           out.push(`${at}: ${token} names no indicator declared under "indicators"`);
         }
       } else if (!namespaces.has(ns)) {
         out.push(
-          `${at}: ${token} uses unknown namespace "${ns}" — expected ` +
-            `${[...namespaces].map((n) => `"${n}"`).join(", ")} or "${CUSTOM_INDICATOR_NAMESPACE}"`,
+          `${at}: ${token} uses unknown namespace "${ns}" — expected ${quotedList([...namespaces])}; ` +
+            `an indicator declared under "indicators" is written without one`,
         );
       }
     }
@@ -874,6 +868,13 @@ function templateWarnings(
  * the indicator layer and cannot ask it.
  */
 const REPO_ROW_TOKENS = "{repo@name}, {repo@dirname}, {repo@path}, {repo@instance} or {repo@status}";
+
+/** `"a", "b" or "c"`. */
+function quotedList(items: readonly string[]): string {
+  const quoted = items.map((item) => `"${item}"`);
+  const last = quoted.pop() ?? "";
+  return quoted.length === 0 ? last : `${quoted.join(", ")} or ${last}`;
+}
 
 /** Core, the enabled built-ins, and whatever the declared plugins are likely called. */
 function knownNamespaces({

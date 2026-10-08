@@ -1,14 +1,16 @@
 /**
- * The `x@` namespace — indicators declared in `u8.jsonc` as a shell command.
+ * Indicators declared in `u8.jsonc` as a shell command, rendered as a bare
+ * `{name}`.
  *
  * Declared once at workspace level, executed per owner in that owner's cwd with
- * its merged env; trimmed stdout is the value (SPEC §2.7).
+ * its merged env; trimmed stdout is the value (SPEC §2.7). They are registered
+ * under no namespace at all, which is what keeps them apart from core and
+ * plugin providers without taking a name away from either.
  */
 import type { CustomIndicatorDef } from "../config/types.js";
 import type { IndicatorRegistration } from "../daemon/contracts.js";
 import type { IndicatorContext } from "../plugin/types.js";
-
-export const CUSTOM_NAMESPACE = "x";
+import { NO_NAMESPACE } from "../template/index.js";
 
 /** A probe that outruns its own interval would pile up; it gets killed first. */
 const PROBE_TIMEOUT_RATIO = 0.8;
@@ -38,7 +40,7 @@ export function customIndicators(defs: readonly CustomIndicatorDef[]): Indicator
   return defs.map((def) => {
     const timeoutMs = probeTimeoutMs(def.intervalMs);
     return {
-      ns: CUSTOM_NAMESPACE,
+      ns: NO_NAMESPACE,
       name: def.name,
       def: {
         scope: def.scope,
@@ -61,11 +63,11 @@ export function customIndicators(defs: readonly CustomIndicatorDef[]): Indicator
           // re-binding it — is not the user's command misbehaving, and must not
           // be reported as one on every reload.
           if (res.signal !== null && !res.timedOut) {
-            ctx.logger.debug(`x@${def.name} interrupted for ${ownerOf(ctx)}`, meta);
+            ctx.logger.debug(`indicator "${def.name}" interrupted for ${ownerOf(ctx)}`, meta);
           } else {
             // Empty, never stale: a dashboard cell showing a value the probe can
             // no longer confirm is worse than a blank one.
-            ctx.logger.warn(`x@${def.name} failed for ${ownerOf(ctx)}`, meta);
+            ctx.logger.warn(`indicator "${def.name}" failed for ${ownerOf(ctx)}`, meta);
           }
           return "";
         },

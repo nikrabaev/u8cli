@@ -1,7 +1,7 @@
 /**
- * Indicator layer: the daemon's cache of `{ns@name}` values and the providers
- * that fill it. The registry is the single source of truth behind both the TUI
- * rows and `u8 status --json`.
+ * Indicator layer: the daemon's cache of `{ns@name}` and `{name}` values and the
+ * providers that fill it. The registry is the single source of truth behind
+ * both the TUI rows and `u8 status --json`.
  */
 export {
   CHANGE_BATCH_MS,
@@ -25,7 +25,7 @@ export {
   type CoreStatus,
 } from "./core.js";
 
-export { CUSTOM_NAMESPACE, customIndicators, probeTimeoutMs } from "./custom.js";
+export { customIndicators, probeTimeoutMs } from "./custom.js";
 
 export { INDICATOR_ELLIPSIS, MAX_INDICATOR_LENGTH, sanitizeIndicatorText } from "./sanitize.js";
 

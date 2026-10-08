@@ -8,15 +8,15 @@
 import type { IndicatorTone, IndicatorValue } from "../ipc/protocol.js";
 import { applyStyle, stripAnsi, type Style } from "./ansi.js";
 import { applyModifiers } from "./modifiers.js";
-import { parseTemplate, type ParsedTemplate, type TemplateNode } from "./parse.js";
+import { parseTemplate, tokenLabel, type ParsedTemplate, type TemplateNode } from "./parse.js";
 
-/** Resolves a `{ns@name}` token against the indicator cache. */
+/** Resolves a token against the indicator cache; `ns` is empty for a bare `{name}`. */
 export type IndicatorLookup = (ns: string, name: string) => IndicatorValue | undefined;
 
 export interface RenderOptions {
   /**
    * `false` emits zero escape bytes — used by `--json`, pipes, and tests. Escapes
-   * a *value* carried (colored command stdout behind an `x@` indicator) are
+   * a *value* carried (colored command stdout behind a config indicator) are
    * stripped too: "no color" has to mean the whole row.
    */
   color: boolean;
@@ -57,7 +57,7 @@ function renderNode(node: TemplateNode, lookup: IndicatorLookup, opts: RenderOpt
   if (value === undefined) {
     // Spec §4: an unknown indicator is a visible red marker, not a crash and not
     // a blank — a silently empty column hides the mistake.
-    return paint(`{${node.ns}@${node.name}!}`, UNKNOWN_STYLE, opts);
+    return paint(`{${tokenLabel(node.ns, node.name)}!}`, UNKNOWN_STYLE, opts);
   }
 
   const raw = value.display ?? value.value;

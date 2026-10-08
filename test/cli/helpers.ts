@@ -169,7 +169,7 @@ export function fixtureConfig(): Record<string, unknown> {
     name: "fixture",
     templates: {
       repo: "REPO {repo@name:pad(10)}{git@branch}",
-      app: "APP {app@name:pad(10)} {app@status} {x@ver}",
+      app: "APP {app@name:pad(10)} {app@status} {ver}",
     },
     indicators: { ver: { cmd: "printf 1.2.3", interval: 60_000 } },
     repos: {

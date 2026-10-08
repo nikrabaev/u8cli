@@ -79,7 +79,7 @@ export interface StyledText {
  *
  * `base` is the indicator's tone-derived default styling. The first explicit
  * style modifier discards it wholesale rather than merging: once a template
- * author styles a token by hand they own its appearance, so `{x@y:bold}` on a
+ * author styles a token by hand they own its appearance, so `{version:bold}` on a
  * `muted` value is bold plain text, not bold gray dim.
  */
 export function applyModifiers(text: string, modifiers: readonly Modifier[], base: Style): StyledText {
@@ -128,7 +128,7 @@ export function padToWidth(text: string, width: number): string {
 /**
  * Truncates to `width` columns, spending the last column on the ellipsis.
  *
- * Escape sequences the *value* carried (an `x@` indicator is arbitrary command
+ * Escape sequences the *value* carried (a config indicator is arbitrary command
  * stdout, which is routinely colored) pass through whole and cost no columns; a
  * reset is re-appended when the cut discarded the value's own, so a half-eaten
  * SGR cannot bleed into the rest of the row.

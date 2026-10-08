@@ -520,11 +520,10 @@ describe("contributed names", () => {
 describe("namespace collisions", () => {
   it("rejects a plugin claiming a core namespace", async () => {
     const fixture = createFixture({
-      config: { plugins: ["./plugins/app.js", "./plugins/repo.js", "./plugins/x.js"] },
+      config: { plugins: ["./plugins/app.js", "./plugins/repo.js"] },
       files: {
         "plugins/app.js": `export default { name: "app" };`,
         "plugins/repo.js": `export default { name: "repo" };`,
-        "plugins/x.js": `export default { name: "x" };`,
       },
     });
 
@@ -535,7 +534,21 @@ describe("namespace collisions", () => {
     expect(record(host.list(), "./plugins/app.js").error).toContain("reserved by u8cli");
     // `repo@` is the header row's namespace, exactly as `app@` is the app row's.
     expect(record(host.list(), "./plugins/repo.js").error).toContain("reserved by u8cli");
-    expect(record(host.list(), "./plugins/x.js").error).toContain("reserved by u8cli");
+  });
+
+  it("reserves nothing for config indicators, which are written without a namespace", async () => {
+    const fixture = createFixture({
+      config: { plugins: ["./plugins/x.js"], indicators: { version: { cmd: "echo 1" } } },
+      files: {
+        "plugins/x.js": `export default { name: "x", indicators: { version: { value: () => "p" } } };`,
+      },
+    });
+
+    const host = fixture.host();
+    await host.load();
+
+    expect(record(host.list(), "./plugins/x.js")).toMatchObject({ name: "x", ok: true });
+    expect(host.indicators().map((i) => `${i.ns}@${i.name}`)).toEqual(["x@version"]);
   });
 
   it("rejects the second plugin to claim a name and keeps the first", async () => {

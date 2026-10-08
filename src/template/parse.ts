@@ -1,6 +1,7 @@
 /**
- * Row-template grammar: literal text plus `{ns@indicator:mod:mod}` tokens, with
- * `{{` / `}}` escaping literal braces.
+ * Row-template grammar: literal text plus `{ns@indicator:mod:mod}` tokens — or a
+ * bare `{indicator:mod}` for one the workspace declares itself — with `{{` /
+ * `}}` escaping literal braces.
  *
  * Parsing never throws. A malformed token degrades to the literal text the user
  * typed and records a warning, because a typo in a template must not take down a
@@ -23,6 +24,7 @@ export interface LiteralNode {
 
 export interface TokenNode {
   kind: "token";
+  /** {@link NO_NAMESPACE} for a bare token. */
   ns: string;
   name: string;
   modifiers: Modifier[];
@@ -43,8 +45,27 @@ export interface TokenRef {
   name: string;
 }
 
-/** `ns@indicator`; both halves are identifier-ish so `{x@version}` stays unambiguous. */
-const TOKEN_HEAD = /^([A-Za-z][A-Za-z0-9_-]*)@([A-Za-z][A-Za-z0-9_-]*)$/;
+/**
+ * The namespace of a bare token. `{version}` names an indicator declared under
+ * `indicators` in the config; core and plugin tokens always carry a namespace
+ * (`{app@status}`, `{git@branch}`) and a plugin's name is never empty, so having
+ * none is itself what identifies a config indicator — no word has to be
+ * reserved to tell the two apart.
+ */
+export const NO_NAMESPACE = "";
+
+/** `indicator` or `ns@indicator`; both halves are identifier-ish, so neither spelling can pass for the other. */
+const TOKEN_HEAD = /^(?:([A-Za-z][A-Za-z0-9_-]*)@)?([A-Za-z][A-Za-z0-9_-]*)$/;
+
+/**
+ * A token's head as a template spells it: `git@branch`, or `version` for one
+ * with no namespace. Everything that names an indicator to a person — the
+ * unknown-token marker, a config warning, a `--json` key, a log line — goes
+ * through here, so none of them shows a spelling the grammar would not accept.
+ */
+export function tokenLabel(ns: string, name: string): string {
+  return ns === NO_NAMESPACE ? name : `${ns}@${name}`;
+}
 
 export function parseTemplate(input: string): ParsedTemplate {
   const nodes: TemplateNode[] = [];
@@ -111,11 +132,15 @@ function parseToken(
   const [head = "", ...modifierSources] = body.split(":");
   const match = TOKEN_HEAD.exec(head);
   if (!match) {
-    warnings.push({ index, source, message: `malformed token "${source}" (expected {ns@indicator})` });
+    warnings.push({
+      index,
+      source,
+      message: `malformed token "${source}" (expected {indicator} or {ns@indicator})`,
+    });
     return undefined;
   }
 
-  const [, ns = "", name = ""] = match;
+  const [, ns = NO_NAMESPACE, name = ""] = match;
   const modifiers: Modifier[] = [];
   for (const modifierSource of modifierSources) {
     const parsed = parseModifier(modifierSource);
