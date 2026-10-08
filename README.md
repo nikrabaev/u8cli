@@ -12,7 +12,7 @@
 
 [Quickstart](#quickstart) · [Instances](#instances) · [Dashboard](#the-dashboard) · [Commands](#commands) · [Config reference](docs/CONFIG.md) · [Plugins](docs/PLUGINS.md)
 
-<img src="docs/assets/dashboard.gif" width="860" alt="The u8 dashboard starting a four-service stack in dependency order, then a second instance of the same stack on its own ports, then its log view and command palette">
+<img src="docs/assets/dashboard.gif" width="860" alt="The u8 dashboard starting a four-service stack in dependency order, creating a second instance of it from the instance menu and bringing that up on its own ports, folding both into an overview, then the log view and command palette">
 
 </div>
 
@@ -33,8 +33,9 @@ indicator cache.
 - **Instances: the same stack, several times at once.** Each has its own git worktrees, ports and
   processes — one per branch, or one per coding agent — and a command typed in a worktree acts on
   that copy only.
-- **A dashboard and a scriptable CLI over the same state.** Everything the TUI does is also a
-  headless command, and `u8 status --json` gives scripts the same data.
+- **A dashboard and a scriptable CLI over the same state.** One screen lists every instance, says
+  which of them needs a look, and creates, grows, shrinks and destroys them. Everything it does is
+  also a headless command, and `u8 status --json` gives scripts the same data.
 - **Config hot-reload that never touches a running process.** Edits apply in place; a service whose
   script, cwd or env changed is marked `stale` until its next restart.
 - **Plugins.** Indicators, commands, hooks and readiness signals from an npm package or a local
@@ -173,6 +174,9 @@ u8 -i feat-x instance add db              # later: it gets its own db too
 u8 -i feat-x instance remove platform     # …and goes back to using base's platform
 u8 instance destroy feat-x                # stop, tear down, remove the worktrees
 ```
+
+Every one of these is also in the dashboard, on `i` — see
+[Instances in the dashboard](#instances-in-the-dashboard).
 
 Three things make this work without editing the config per copy:
 
