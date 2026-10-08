@@ -5,6 +5,14 @@
   "type": "module",
   "license": "MIT",
   "author": "Nikita Rabaev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nikrabaev/u8cli.git"
+  },
+  "homepage": "https://github.com/nikrabaev/u8cli#readme",
+  "bugs": {
+    "url": "https://github.com/nikrabaev/u8cli/issues"
+  },
   "keywords": [
     "cli",
     "microservices",

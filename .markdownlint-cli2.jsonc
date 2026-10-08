@@ -12,6 +12,9 @@
     "MD060": false,
     // A changelog repeats "Added" / "Changed" / "Fixed" under every version by
     // design; only the same heading twice under one parent is a mistake.
-    "MD024": { "siblings_only": true }
+    "MD024": { "siblings_only": true },
+    // The README's centred header (title, badges, the dashboard recording) has
+    // no markdown spelling; everything else stays markdown.
+    "MD033": { "allowed_elements": ["h1", "div", "img", "br"] }
   }
 }
