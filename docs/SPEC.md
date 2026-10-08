@@ -311,6 +311,16 @@ The daemon watches `u8.jsonc`:
 - Header shows workspace name, active profile, daemon state, config-error banner when applicable.
 - Task runs show inline per-target progress and a result summary.
 
+With instances (§2.9), the dashboard is the one place every instance is visible at once, and does
+everything `u8 instance …` does:
+
+- **Sections.** Base's active profile first, then each other instance under a heading; a workspace with only base keeps the unheaded list. A heading carries the running count and, when they apply, the run in flight, *not initialised*, the number of stale apps and any app of another instance it depends on that is down. `Tab` / `Shift-Tab` move between headings, `←` / `→` (`h` / `l`) collapse and expand a section, `z` collapses or expands all, `f` narrows the list to one instance. When the row under the cursor disappears the cursor stays in its section; when the section disappears it moves to the heading that took its place — never to the same index, which is some other instance's app.
+- **One menu, on `i`,** for the instance under the cursor: details, up, init, add apps, remove apps, give up a kept checkout, destroy, new instance, and — opened in a git worktree no instance covers — new instance from this worktree. The menu captures the instance when it opens; every later step names that instance, wherever the cursor has moved. The command palette captures its scope the same way. Base's menu has no entry that edits or destroys it.
+- **An action is followed to its end.** Its run draws on the rows like any other; when it finishes, a result replaces the body until dismissed — outcome, addresses, checkouts kept, forgotten or removed, apps left stale (with the restart offered in place), a base dependency that is down, and on failure the reason and the tail of the failing log. Results queue behind an open modal rather than interrupt it.
+- **Refusals are the daemon's, verbatim.** The dashboard re-implements none of §2.9's rules; it shows what the daemon answered, in full.
+- **Destruction is tiered.** Removing keeps the checkout unless giving it up is chosen. Discarding uncommitted work is reachable only from the daemon's refusal of that prune, and takes the instance's name typed out. Destroy takes the instance's name, under the list of worktrees it removes. Forcing past a failed teardown is offered only on the result that reports it, and asks for as much as the request it repeats carries: the name again if that request discards. No single key removes a worktree, and Enter alone never answers a yes/no question.
+- **What the two front ends say is one text.** The sentences about stale apps, checkouts and base dependencies are shared with the CLI (`src/cli/instance-report.ts`); only the clause naming how to act on them differs — a command there, a key here.
+
 ### 9.2 Headless CLI
 
 ```bash

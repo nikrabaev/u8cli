@@ -17,4 +17,5 @@ export {
   RpcRemoteError,
   type RpcClient,
   type RpcClientOptions,
+  type RpcRequestOptions,
 } from "./client.js";

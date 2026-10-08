@@ -32,6 +32,12 @@ export interface DashboardRow {
   targets: TargetId[];
 }
 
+/** One thing worth knowing about a section, said on its heading. */
+export interface SectionFlag {
+  text: string;
+  tone: "info" | "warn" | "error";
+}
+
 /**
  * One instance's part of the list. Base is the active profile's apps; any
  * other instance is everything it runs.
@@ -41,8 +47,12 @@ export interface RowSection {
   appIds: readonly TargetId[];
   /** Apps of the section currently running, for its heading. */
   running: number;
-  /** Shown after the name: the profile in base, a caveat anywhere else. */
+  /** Shown after the name: the profile in base. */
   note?: string;
+  /** After the count: what is wrong, or in progress. Empty when nothing is. */
+  flags?: readonly SectionFlag[];
+  /** Drawn as its heading alone. The heading still acts on, and counts, every app. */
+  collapsed?: boolean;
 }
 
 export interface RowInput {
@@ -55,6 +65,12 @@ export interface RowInput {
   profile?: SnapshotProfile;
   /** Several instances: one headed block each, in this order. */
   sections?: readonly RowSection[];
+  /**
+   * Whether sections get a heading. Defaults to "when there is more than one";
+   * said outright when the list is narrowed to one instance of several, which
+   * still needs the heading that says whose rows these are.
+   */
+  headed?: boolean;
   indicators: readonly IndicatorValue[];
   color: boolean;
 }
@@ -69,26 +85,44 @@ export function buildRows(input: RowInput): DashboardRow[] {
     input.sections ?? [{ instance: BASE_INSTANCE, appIds: input.profile?.appIds ?? [], running: 0 }];
   // A lone section needs no heading: the header line already says what it is,
   // and a workspace that never made an instance should look as it always did.
-  const headed = sections.length > 1;
+  const headed = input.headed ?? sections.length > 1;
   const rows: DashboardRow[] = [];
   for (const section of sections) {
     if (headed) {
-      const label = `${section.instance}${section.note === undefined ? "" : ` · ${section.note}`}`;
-      const count = `${section.running}/${section.appIds.length} running`;
       rows.push({
         kind: "instance",
         id: sectionRowId(section.instance),
         repoName: "",
         instance: section.instance,
-        text: input.color
-          ? `${applyStyle(label, { bold: true, color: "cyan" })} ${applyStyle(count, { dim: true })}`
-          : `${label} ${count}`,
+        text: headingText(section, input.color),
         targets: [...section.appIds],
       });
+      if (section.collapsed === true) continue;
     }
     rows.push(...sectionRows(input, section));
   }
   return rows;
+}
+
+const FLAG_COLOR = { info: "cyan", warn: "yellow", error: "red" } as const;
+
+/**
+ * `▾ feat-x  2/3 running · not initialised · 1 stale`.
+ *
+ * The marker says whether the rows beneath are drawn; the flags are what makes
+ * one heading in ten worth a second look, so they carry their own colour and a
+ * heading with nothing wrong ends at its count.
+ */
+function headingText(section: RowSection, color: boolean): string {
+  const marker = section.collapsed === true ? "▸" : "▾";
+  const label = `${section.instance}${section.note === undefined ? "" : ` · ${section.note}`}`;
+  const count = `${section.running}/${section.appIds.length} running`;
+  const flags = section.flags ?? [];
+  if (!color) return [`${marker} ${label}  ${count}`, ...flags.map((flag) => flag.text)].join(" · ");
+  return [
+    `${applyStyle(marker, { dim: true })} ${applyStyle(label, { bold: true, color: "cyan" })}  ${applyStyle(count, { dim: true })}`,
+    ...flags.map((flag) => applyStyle(flag.text, { color: FLAG_COLOR[flag.tone] })),
+  ].join(applyStyle(" · ", { dim: true }));
 }
 
 function sectionRows(input: RowInput, section: RowSection): DashboardRow[] {

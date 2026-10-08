@@ -23,6 +23,8 @@ export interface DashboardOptions {
   configPath: string;
   /** The instance to land on; every instance is listed either way. */
   instance?: string;
+  /** The git worktree this was opened in, when no instance covers it yet. */
+  worktree?: string;
   stdin: NodeJS.ReadStream;
   stdout: NodeJS.WriteStream;
   stderr?: NodeJS.WriteStream;
@@ -54,6 +56,7 @@ export async function runDashboard(opts: DashboardOptions): Promise<number> {
     client: dashboardClient(attached),
     color: opts.color ?? true,
     instance: opts.instance,
+    worktree: opts.worktree,
   });
 
   const screen = enterAltScreen(opts.stdout, { enabled: opts.altScreen ?? true });

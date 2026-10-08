@@ -15,17 +15,24 @@ import {
   type DashboardController,
 } from "../../src/tui/controller.js";
 import { logWindow } from "../../src/tui/logs.js";
+import type { Snapshot } from "../../src/ipc/protocol.js";
 import type { DashboardState } from "../../src/tui/types.js";
 import {
+  agent2,
   app,
+  copyOf,
   createFakeClient,
+  featX,
   fixtureSnapshot,
   indicator,
+  instancePart,
+  instancesSnapshot,
   logLine,
   serviceState,
   settle,
   statusIndicator,
   testScheduler,
+  withInstances,
   type FakeClient,
   type TestScheduler,
 } from "./helpers.js";
@@ -51,6 +58,8 @@ function setup(opts: Partial<ControllerOptions> & { client?: FakeClient } = {}):
     scrollback: opts.scrollback,
     backfill: opts.backfill,
     instance: opts.instance,
+    worktree: opts.worktree,
+    now: opts.now,
   });
   live.push(controller);
   return {
@@ -233,12 +242,12 @@ describe("instances", () => {
   it("lists every instance under its own heading once there is more than base", () => {
     const { state } = setup({ client: withInstance() });
     expect(state().rows.map((row) => [row.kind, row.id, row.instance, row.text])).toEqual([
-      ["instance", "instance:base", "base", "base · profile all 0/3 running"],
+      ["instance", "instance:base", "base", "▾ base · profile all  0/3 running"],
       ["merged", "api", "base", "APP api stopped"],
       ["repo", "platform", "base", "REPO platform"],
       ["app", "platform.web", "base", "APP web stopped"],
       ["app", "platform.admin", "base", "APP admin stopped"],
-      ["instance", "instance:feat-x", "feat-x", "feat-x · not initialised 1/1 running"],
+      ["instance", "instance:feat-x", "feat-x", "▾ feat-x  1/1 running · not initialised"],
       ["merged", "api@feat-x", "feat-x", "APP api running"],
     ]);
     // The header counts what is on screen, and says how many instances that is.
@@ -271,6 +280,353 @@ describe("instances", () => {
       { targets: undefined, instance: "feat-x" },
       { targets: undefined, instance: "base" },
     ]);
+  });
+});
+
+describe("section headings", () => {
+  it("says what is wrong with an instance on its heading, and nothing when nothing is", () => {
+    const snapshot = withInstances(
+      fixtureSnapshot(),
+      featX({ status: { "api@feat-x": "running", "platform.web@feat-x": "running" }, stale: ["api@feat-x"], initialized: false }),
+      agent2(),
+    );
+    const { state } = setup({ client: createFakeClient(snapshot) });
+
+    expect(state().rows.filter((row) => row.kind === "instance").map((row) => row.text)).toEqual([
+      "▾ base · profile all  0/3 running",
+      // Its web depends on base's platform.admin, which is not running.
+      "▾ feat-x  2/2 running · not initialised · 1 stale · platform.admin@base is down",
+      "▾ agent-2  0/1 running",
+    ]);
+  });
+
+  it("follows the push stream: a base app coming up clears the flag on the instance that needs it", () => {
+    const { client, frame, state } = setup({ client: createFakeClient(instancesSnapshot()) });
+    const heading = (): string | undefined => state().rows.find((row) => row.id === "instance:feat-x")?.text;
+    expect(heading()).toBe("▾ feat-x  0/2 running · platform.admin@base is down");
+
+    client.push("service.changed", { state: serviceState("platform.admin", "running") });
+    frame();
+    expect(heading()).toBe("▾ feat-x  0/2 running");
+
+    client.push("service.changed", { state: serviceState("api@feat-x", "running", true) });
+    frame();
+    expect(heading()).toBe("▾ feat-x  1/2 running · 1 stale");
+  });
+
+  it("names the run in flight on the instance it touches, and on no other", () => {
+    const { client, frame, state } = setup({ client: createFakeClient(instancesSnapshot()) });
+    const headings = (): string[] => state().rows.filter((row) => row.kind === "instance").map((row) => row.text);
+
+    client.push("task.progress", {
+      progress: { runId: "r1", command: "instance:init", targetId: "api@agent-2", state: "running" },
+    });
+    frame();
+    expect(headings()).toEqual([
+      "▾ base · profile all  0/3 running",
+      "▾ feat-x  0/2 running · platform.admin@base is down",
+      "▾ agent-2  0/1 running · … instance:init",
+    ]);
+
+    client.push("task.finished", {
+      result: { runId: "r1", command: "instance:init", ok: true, targets: [], startedAt: 0, finishedAt: 1 },
+    });
+    frame();
+    expect(headings()[2]).toBe("▾ agent-2  0/1 running");
+  });
+});
+
+describe("moving between sections", () => {
+  /** Row ids, with the cursor's marked. */
+  const cursorRow = (state: DashboardState): string | undefined => state.rows[state.cursor]?.id;
+
+  it("jumps to the next and the previous heading", () => {
+    const { controller, state } = setup({ client: createFakeClient(instancesSnapshot()) });
+
+    controller.jumpSection(1);
+    expect(cursorRow(state())).toBe("instance:feat-x");
+    controller.jumpSection(1);
+    expect(cursorRow(state())).toBe("instance:agent-2");
+    // Nothing further down: it stays rather than wrapping to the top.
+    controller.jumpSection(1);
+    expect(cursorRow(state())).toBe("instance:agent-2");
+
+    controller.jumpSection(-1);
+    expect(cursorRow(state())).toBe("instance:feat-x");
+  });
+
+  it("goes back to the heading of the section it is in before leaving it", () => {
+    const { controller, state } = setup({ client: createFakeClient(instancesSnapshot()) });
+
+    controller.setCursor(state().rows.findIndex((row) => row.id === "platform.web@feat-x"));
+    controller.jumpSection(-1);
+    expect(cursorRow(state())).toBe("instance:feat-x");
+    controller.jumpSection(-1);
+    expect(cursorRow(state())).toBe("instance:base");
+  });
+
+  it("folds a section into its heading and lands on it", () => {
+    const { controller, state } = setup({ client: createFakeClient(instancesSnapshot()) });
+    controller.setCursor(state().rows.findIndex((row) => row.id === "platform.web@feat-x"));
+
+    controller.collapseSection();
+
+    expect(state().rows.map((row) => row.id)).toEqual([
+      "instance:base",
+      "api",
+      "platform",
+      "platform.web",
+      "platform.admin",
+      "instance:feat-x",
+      "instance:agent-2",
+      "api@agent-2",
+    ]);
+    expect(cursorRow(state())).toBe("instance:feat-x");
+    expect(state().rows[state().cursor]?.text).toBe("▸ feat-x  0/2 running · platform.admin@base is down");
+    // Folded away, not gone: the heading still counts them and still acts on them.
+    expect(state().rows[state().cursor]?.targets).toEqual(["api@feat-x", "platform.web@feat-x"]);
+    expect(state().total).toBe(6);
+
+    controller.expandSection();
+    expect(state().rows.map((row) => row.id)).toContain("platform.web@feat-x");
+    expect(cursorRow(state())).toBe("instance:feat-x");
+  });
+
+  it("acts on the whole instance from a folded heading", async () => {
+    const { client, controller, state } = setup({ client: createFakeClient(instancesSnapshot()) });
+    controller.setCursor(state().rows.findIndex((row) => row.id === "api@feat-x"));
+    controller.collapseSection();
+
+    await controller.stop("selection");
+    await controller.restart("profile");
+
+    expect(client.paramsOf("service.stop")).toEqual([
+      { targets: ["api@feat-x", "platform.web@feat-x"], instance: "feat-x" },
+    ]);
+    expect(client.paramsOf("service.restart")).toEqual([{ targets: undefined, instance: "feat-x" }]);
+  });
+
+  it("folds every section into an overview, and unfolds them all again", () => {
+    const { controller, state } = setup({ client: createFakeClient(instancesSnapshot()) });
+    controller.setCursor(state().rows.findIndex((row) => row.id === "api@agent-2"));
+
+    controller.toggleAllSections();
+    expect(state().rows.map((row) => row.text)).toEqual([
+      "▸ base · profile all  0/3 running",
+      "▸ feat-x  0/2 running · platform.admin@base is down",
+      "▸ agent-2  0/1 running",
+    ]);
+    expect(cursorRow(state())).toBe("instance:agent-2");
+
+    controller.toggleAllSections();
+    expect(state().rows).toHaveLength(10);
+    expect(cursorRow(state())).toBe("instance:agent-2");
+  });
+
+  it("folds an instance that appears while the list is an overview, and not otherwise", () => {
+    const { client, controller, frame, state } = setup({ client: createFakeClient(instancesSnapshot()) });
+    const arrive = (name: string): void => {
+      const next = withInstances(client.snapshot(), instancePart(name, [copyOf(app("api"), name)]));
+      client.setSnapshot(next);
+      client.push("config.reloaded", { ok: true, stale: [], snapshot: next });
+      frame();
+    };
+
+    arrive("agent-3");
+    expect(state().rows.map((row) => row.id)).toContain("api@agent-3");
+
+    controller.toggleAllSections();
+    arrive("agent-4");
+    // Somebody else's `u8 up`: one more heading, not five rows in the middle of the overview.
+    expect(state().rows.map((row) => row.id)).toEqual([
+      "instance:base",
+      "instance:feat-x",
+      "instance:agent-2",
+      "instance:agent-3",
+      "instance:agent-4",
+    ]);
+  });
+
+  it("narrows the list to one instance, and says so in the header counts", () => {
+    const { controller, state } = setup({ client: createFakeClient(instancesSnapshot()) });
+    controller.setCursor(state().rows.findIndex((row) => row.id === "platform.web@feat-x"));
+
+    controller.toggleFocus();
+
+    expect(state().focus).toBe("feat-x");
+    // The heading stays: it is what says whose rows these are, and where `i` acts.
+    expect(state().rows.map((row) => row.id)).toEqual(["instance:feat-x", "api@feat-x", "platform.web@feat-x"]);
+    expect(cursorRow(state())).toBe("platform.web@feat-x");
+    expect(state()).toMatchObject({ running: 0, total: 2, instances: 3 });
+
+    controller.toggleFocus();
+    expect(state().focus).toBeUndefined();
+    expect(state().rows).toHaveLength(10);
+    expect(cursorRow(state())).toBe("platform.web@feat-x");
+  });
+
+  it("unfolds the instance it focuses on", () => {
+    const { controller, state } = setup({ client: createFakeClient(instancesSnapshot()) });
+    controller.toggleAllSections();
+    controller.jumpSection(1);
+
+    controller.toggleFocus();
+
+    expect(state().rows.map((row) => row.id)).toEqual(["instance:feat-x", "api@feat-x", "platform.web@feat-x"]);
+  });
+
+  it("has nothing to fold, focus or jump to in a workspace that only has base", () => {
+    const { controller, state } = setup();
+    const before = state().rows.map((row) => [row.kind, row.id, row.text]);
+    controller.setCursor(2);
+
+    controller.collapseSection();
+    controller.toggleAllSections();
+    controller.toggleFocus();
+    controller.jumpSection(1);
+    controller.jumpSection(-1);
+
+    // The unheaded list a single-instance workspace has always drawn, untouched.
+    expect(state().rows.map((row) => [row.kind, row.id, row.text])).toEqual(before);
+    expect(before).toEqual([
+      ["merged", "api", "APP api stopped"],
+      ["repo", "platform", "REPO platform"],
+      ["app", "platform.web", "APP web stopped"],
+      ["app", "platform.admin", "APP admin stopped"],
+    ]);
+    expect(state().cursor).toBe(2);
+    expect(state().focus).toBeUndefined();
+    expect(state().notice).toBeUndefined();
+  });
+});
+
+describe("the cursor when the list changes under it", () => {
+  const cursorRow = (state: DashboardState): string | undefined => state.rows[state.cursor]?.id;
+
+  /** Replaces the daemon's view with `next`, the way a reload does. */
+  function reload(h: Harness, next: Snapshot): void {
+    h.client.setSnapshot(next);
+    h.client.push("config.reloaded", { ok: true, stale: [], snapshot: next });
+    h.frame();
+  }
+
+  it("lands on the heading that took a destroyed section's place, never on its neighbour's apps", () => {
+    const h = setup({ client: createFakeClient(instancesSnapshot()) });
+    h.controller.setCursor(h.state().rows.findIndex((row) => row.id === "api@feat-x"));
+    // The same index after the reload is `api@agent-2`: the next `x` would stop another task's api.
+    const index = h.state().cursor;
+
+    reload(h, withInstances(fixtureSnapshot(), agent2()));
+
+    expect(h.state().rows[index]?.id).toBe("api@agent-2");
+    expect(cursorRow(h.state())).toBe("instance:agent-2");
+  });
+
+  it("lands on the last heading when the last section is the one that went", () => {
+    const h = setup({ client: createFakeClient(instancesSnapshot()) });
+    h.controller.setCursor(h.state().rows.findIndex((row) => row.id === "api@agent-2"));
+
+    reload(h, withInstances(fixtureSnapshot(), featX()));
+
+    expect(cursorRow(h.state())).toBe("instance:feat-x");
+  });
+
+  it("goes back to the top of an unheaded list when the only instance is destroyed", () => {
+    const h = setup({ client: createFakeClient(withInstances(fixtureSnapshot(), agent2())) });
+    h.controller.setCursor(h.state().rows.findIndex((row) => row.id === "api@agent-2"));
+
+    reload(h, fixtureSnapshot());
+
+    expect(h.state().rows.some((row) => row.kind === "instance")).toBe(false);
+    expect(h.state().cursor).toBe(0);
+  });
+
+  it("stays in its section when the app under it leaves the instance", () => {
+    const h = setup({ client: createFakeClient(instancesSnapshot()) });
+    h.controller.setCursor(h.state().rows.findIndex((row) => row.id === "platform.web@feat-x"));
+
+    const shrunk = featX();
+    shrunk.instance.appIds = ["api@feat-x"];
+    shrunk.repos = shrunk.repos.filter((repo) => repo.name === "api@feat-x");
+    reload(h, withInstances(fixtureSnapshot(), shrunk, agent2()));
+
+    // The row is gone; the section's last row is the nearest thing left, and
+    // agent-2's heading — the same index — is not.
+    expect(cursorRow(h.state())).toBe("api@feat-x");
+  });
+
+  it("does not move when somebody else's instance appears above it", () => {
+    const h = setup({ client: createFakeClient(withInstances(fixtureSnapshot(), agent2())) });
+    h.controller.setCursor(h.state().rows.findIndex((row) => row.id === "api@agent-2"));
+
+    reload(h, withInstances(fixtureSnapshot(), featX(), agent2()));
+
+    expect(cursorRow(h.state())).toBe("api@agent-2");
+  });
+
+  it("drops a focus on an instance that is gone, and says so", () => {
+    const h = setup({ client: createFakeClient(instancesSnapshot()) });
+    h.controller.jumpSection(1);
+    h.controller.toggleFocus();
+
+    reload(h, withInstances(fixtureSnapshot(), agent2()));
+
+    expect(h.state().focus).toBeUndefined();
+    expect(h.state().rows.map((row) => row.id)).toContain("instance:base");
+    expect(cursorRow(h.state())).toBe("instance:agent-2");
+    expect(h.state().notice?.text).toBe("instance feat-x destroyed");
+  });
+});
+
+describe("reload notices", () => {
+  it("says what happened to the instances instead of 'config reloaded'", () => {
+    const { client, frame, state } = setup({ client: createFakeClient(withInstances(fixtureSnapshot(), agent2())) });
+
+    const grown = agent2();
+    grown.instance.appIds = ["api@agent-2", "platform.web@agent-2"];
+    client.push("config.reloaded", { ok: true, stale: [], snapshot: withInstances(fixtureSnapshot(), grown) });
+    frame();
+    expect(state().notice).toEqual({ text: "agent-2 gained platform.web", tone: "info" });
+
+    client.push("config.reloaded", { ok: true, stale: [], snapshot: withInstances(fixtureSnapshot(), grown, featX()) });
+    frame();
+    expect(state().notice?.text).toBe("instance feat-x created");
+  });
+
+  it("still says 'config reloaded' when the config is what changed", () => {
+    const { client, frame, state } = setup({ client: createFakeClient(instancesSnapshot()) });
+
+    client.push("config.reloaded", { ok: true, stale: [], snapshot: instancesSnapshot({ activeProfile: "frontend" }) });
+    frame();
+
+    expect(state().notice?.text).toBe("config reloaded");
+  });
+
+  it("counts the changes past the first two rather than listing them all", () => {
+    const { client, frame, state } = setup();
+    const parts = ["a", "b", "c", "d"].map((name) => instancePart(name, [copyOf(app("api"), name)]));
+
+    client.push("config.reloaded", { ok: true, stale: [], snapshot: withInstances(fixtureSnapshot(), ...parts) });
+    frame();
+
+    expect(state().notice?.text).toBe("instance a created; instance b created; and 2 more changes");
+  });
+});
+
+describe("an unregistered worktree", () => {
+  it("says the dashboard is showing base, until an instance runs from that worktree", () => {
+    const h = setup({ worktree: "/agents/wt-3" });
+    expect(h.state().worktree).toEqual({ dir: "/agents/wt-3", name: "wt-3" });
+
+    // feat-x's platform checkout is /agents/wt-3/platform: the worktree is somebody's now.
+    const next = withInstances(fixtureSnapshot(), featX());
+    h.client.push("config.reloaded", { ok: true, stale: [], snapshot: next });
+    h.frame();
+    expect(h.state().worktree).toBeUndefined();
+  });
+
+  it("is not mentioned when the dashboard was opened anywhere else", () => {
+    expect(setup().state().worktree).toBeUndefined();
   });
 });
 
@@ -520,6 +876,58 @@ describe("palette", () => {
   });
 });
 
+describe("palette scope", () => {
+  it("runs where its scope line said it would, wherever the cursor has been moved to since", async () => {
+    const h = setup({ client: createFakeClient(instancesSnapshot()) });
+    h.controller.setCursor(h.state().rows.findIndex((row) => row.id === "api@feat-x"));
+    h.controller.openPalette();
+    expect(h.state().palette?.scopeLabel).toBe("api@feat-x");
+
+    // No key moves the cursor under an open palette, but a rebuild can — an
+    // instance destroyed, or one just created to land on. The move is made
+    // directly here, which is the same thing to the palette.
+    h.controller.setCursor(h.state().rows.findIndex((row) => row.id === "api@agent-2"));
+    expect(h.state().palette?.scopeLabel).toBe("api@feat-x");
+    h.controller.paletteType("greet");
+    await h.controller.paletteRun();
+
+    expect(h.client.paramsOf("command.run")).toEqual([{ command: "greet", targets: ["api@feat-x"], instance: "feat-x" }]);
+  });
+
+  it("keeps 'the whole instance' meaning the instance it was opened in", async () => {
+    const h = setup({ client: createFakeClient(instancesSnapshot()) });
+    h.controller.setCursor(h.state().rows.findIndex((row) => row.id === "api@feat-x"));
+    h.controller.openPalette();
+    h.controller.paletteToggleScope();
+    expect(h.state().palette?.scopeLabel).toBe("instance feat-x");
+
+    h.controller.setCursor(0);
+    expect(h.state().palette?.scopeLabel).toBe("instance feat-x");
+    await h.controller.paletteRun();
+
+    expect(h.client.paramsOf("command.run")).toEqual([{ command: "app:start", targets: undefined, instance: "feat-x" }]);
+  });
+
+  it("closes rather than run a command on whatever took a destroyed instance's place", async () => {
+    const h = setup({ client: createFakeClient(instancesSnapshot()) });
+    h.controller.setCursor(h.state().rows.findIndex((row) => row.id === "api@feat-x"));
+    h.controller.openPalette();
+
+    // feat-x is destroyed elsewhere; the cursor falls to agent-2's heading.
+    const next = withInstances(fixtureSnapshot(), agent2());
+    h.client.setSnapshot(next);
+    h.client.push("config.reloaded", { ok: true, stale: [], snapshot: next });
+    // Before the frame that would show it: the key still goes to the palette.
+    h.controller.handleKey("", { return: true });
+    await settle();
+    h.frame();
+
+    expect(h.state().mode).toBe("list");
+    expect(h.state().palette).toBeUndefined();
+    expect(h.client.paramsOf("command.run")).toEqual([]);
+  });
+});
+
 describe("profiles", () => {
   it("switches the active profile and re-renders the list", async () => {
     const { client, controller, state } = setup();
@@ -532,6 +940,19 @@ describe("profiles", () => {
 
     expect(client.paramsOf("profile.use")).toEqual([{ name: "frontend" }]);
     expect(state().profile).toBe("frontend");
+    expect(state().rows.map((row) => row.id)).toEqual(["platform", "platform.web"]);
+    expect(state().cursor).toBe(0);
+  });
+
+  it("starts the new profile's list at the top, wherever the cursor was in the old one", async () => {
+    const { controller, state } = setup();
+    controller.setCursor(3);
+
+    controller.openProfiles();
+    controller.profilesMove(1);
+    await controller.profilesSelect();
+
+    // Two rows now; "the same place" in a different list would be its second.
     expect(state().rows.map((row) => row.id)).toEqual(["platform", "platform.web"]);
     expect(state().cursor).toBe(0);
   });

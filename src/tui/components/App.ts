@@ -13,13 +13,18 @@ import type { DashboardController } from "../controller.js";
 import { useControllerState, useTerminalSize } from "../hooks.js";
 import { frameRows, listViewport, logViewport } from "../present.js";
 import type { DashboardState } from "../types.js";
+import { Confirm } from "./Confirm.js";
+import { Detail } from "./Detail.js";
 import { el, type ReactElement } from "./element.js";
 import { Footer } from "./Footer.js";
+import { Form } from "./Form.js";
 import { Header } from "./Header.js";
 import { Help } from "./Help.js";
+import { InstanceMenu } from "./InstanceMenu.js";
 import { LogView } from "./LogView.js";
 import { Palette } from "./Palette.js";
 import { ProfileMenu } from "./ProfileMenu.js";
+import { Report } from "./Report.js";
 import { RowList } from "./RowList.js";
 
 export interface AppProps {
@@ -28,7 +33,7 @@ export interface AppProps {
 
 export function App({ controller }: AppProps): ReactElement {
   const state = useControllerState(controller);
-  const { rows } = useTerminalSize();
+  const { rows, columns } = useTerminalSize();
   const { exit } = useApp();
 
   useInput((input, key) => {
@@ -45,6 +50,11 @@ export function App({ controller }: AppProps): ReactElement {
   useEffect(() => {
     controller.setLogViewport(logRows);
   }, [controller, logRows]);
+  // Width too: a refusal is wrapped to it, and where it wraps decides how far
+  // a report can scroll.
+  useEffect(() => {
+    controller.setColumns(columns);
+  }, [controller, columns]);
 
   // `q` is a state change, not a call into Ink — so the same keypress works in a
   // test with no renderer attached.
@@ -80,5 +90,10 @@ function body(state: DashboardState): ReactElement {
   if (state.mode === "logs") return el(LogView, { state });
   if (state.mode === "palette") return el(Palette, { state });
   if (state.mode === "profiles") return el(ProfileMenu, { state });
+  if (state.mode === "instance") return el(InstanceMenu, { state });
+  if (state.mode === "detail") return el(Detail, { state });
+  if (state.mode === "form") return el(Form, { state });
+  if (state.mode === "confirm") return el(Confirm, { state });
+  if (state.mode === "report") return el(Report, { state });
   return el(RowList, { state });
 }

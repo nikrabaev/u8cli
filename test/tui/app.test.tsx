@@ -15,7 +15,21 @@ import { App } from "../../src/tui/components/App.js";
 import { createController, DEFAULT_FRAME_MS, type DashboardController } from "../../src/tui/controller.js";
 import { frameRows } from "../../src/tui/present.js";
 import type { Snapshot } from "../../src/ipc/protocol.js";
-import { createFakeClient, fixtureSnapshot, logLine, settle, testScheduler, type FakeClient, type TestScheduler } from "./helpers.js";
+import { U8Error } from "../../src/util/errors.js";
+import {
+  createFakeClient,
+  featX,
+  fixtureSnapshot,
+  instancesSnapshot,
+  logLine,
+  serviceState,
+  settle,
+  taskResult,
+  testScheduler,
+  withInstances,
+  type FakeClient,
+  type TestScheduler,
+} from "./helpers.js";
 
 interface Mounted {
   client: FakeClient;
@@ -32,10 +46,16 @@ interface Mounted {
 
 const mounted: Mounted[] = [];
 
-function mount(opts: { snapshot?: Snapshot; client?: FakeClient; color?: boolean } = {}): Mounted {
+function mount(opts: { snapshot?: Snapshot; client?: FakeClient; color?: boolean; worktree?: string } = {}): Mounted {
   const client = opts.client ?? createFakeClient(opts.snapshot ?? fixtureSnapshot());
   const clock = testScheduler();
-  const controller = createController({ client, color: opts.color ?? false, scheduler: clock.schedule });
+  const controller = createController({
+    client,
+    color: opts.color ?? false,
+    scheduler: clock.schedule,
+    worktree: opts.worktree,
+    now: () => 5_000,
+  });
   const app = render(<App controller={controller} />);
 
   const instance: Mounted = {
@@ -95,7 +115,19 @@ describe("frame", () => {
     const ui = mount();
     await settle();
 
-    for (const [key, expected] of [["?", "close help"], ["?", "q quit"], [":", "esc close"], ["\u001B", "q quit"], ["P", "esc close"]] as const) {
+    for (const [key, expected] of [
+      ["?", "close help"],
+      ["?", "q quit"],
+      [":", "esc close"],
+      ["\u001B", "q quit"],
+      ["P", "esc close"],
+      ["\u001B", "q quit"],
+      // The instance menu, then each surface it leads to.
+      ["i", "its letter runs it"],
+      ["v", "i actions  esc back"],
+      ["i", "its letter runs it"],
+      ["n", "esc cancel"],
+    ] as const) {
       await ui.type(key);
       const lines = ui.frame().split("\n");
       expect(lines, `frame height after ${JSON.stringify(key)}`).toHaveLength(frameRows(24));
@@ -126,7 +158,7 @@ describe("main screen", () => {
     expect(frame).toContain("APP admin stopped");
     // The bar is truncated to the terminal, so it has to fit one: every binding
     // is on it, none of them behind an ellipsis.
-    expect(frame).toContain("↑↓ move  ↵ logs  s/x/r target  S/X/R all  : palette  P profile  ? help  q quit");
+    expect(frame).toContain("↵ logs  s/x/r row  S/X/R all  i instance  : palette  P profile  ? help  q quit");
   });
 
   it("marks the selected row and moves the mark with j/k", async () => {
@@ -194,6 +226,287 @@ describe("main screen", () => {
     });
     await ui.tick();
     expect(ui.frame()).toContain("greet: 1 failed, 1 ok in 1.2s");
+  });
+});
+
+describe("instances", () => {
+  /** The frame with every run of spaces and every line break folded to one space. */
+  const flat = (ui: Mounted): string => ui.frame().replace(/\s+/g, " ");
+
+  it("draws a heading per instance, with what is wrong on it", async () => {
+    const ui = mount({
+      snapshot: withInstances(fixtureSnapshot(), featX({ status: { "api@feat-x": "running" }, stale: ["api@feat-x"], initialized: false })),
+    });
+    await settle();
+    const frame = ui.frame();
+
+    expect(frame).toContain("fixture · profile all · 2 instances · 1/5 running");
+    expect(frame).toContain("❯ ▾ base · profile all  0/3 running");
+    expect(frame).toContain("  ▾ feat-x  1/2 running · not initialised · 1 stale · platform.admin@base is down");
+    expect(frame).toContain("APP api running");
+  });
+
+  it("folds a section with ← and narrows to one with f", async () => {
+    const ui = mount({ snapshot: instancesSnapshot() });
+    await settle();
+
+    await ui.type("\t");
+    await ui.type("\u001B[D");
+    expect(ui.frame()).toContain("❯ ▸ feat-x  0/2 running");
+    // agent-2's api is the only instance copy still drawn.
+    expect(ui.frame().match(/APP api stopped/g)).toHaveLength(2);
+
+    await ui.type("\u001B[C");
+    await ui.type("f");
+    expect(ui.frame()).toContain("focus feat-x · 0/2 running");
+    expect(ui.frame()).not.toContain("agent-2  0/1");
+    expect(ui.frame()).not.toContain("base · profile all");
+    expect(ui.frame()).toContain("showing feat-x only — f shows every instance again");
+  });
+
+  it("opens the menu of the instance under the cursor, with a letter per entry", async () => {
+    const ui = mount({ snapshot: instancesSnapshot() });
+    await settle();
+
+    await ui.type("\t");
+    await ui.type("i");
+    const frame = ui.frame();
+
+    expect(frame).toContain("instance feat-x · 0/2 running · platform.admin@base is down");
+    expect(frame).toContain("❯ v  details");
+    expect(frame).toContain("  a  add apps…                 platform.admin");
+    expect(frame).toContain("  c  give up a kept checkout…  infra");
+    expect(frame).toContain("  D  destroy…");
+    expect(frame.split("\n").at(-1)).toContain("↵ or its letter runs it");
+  });
+
+  it("shows what an instance is made of", async () => {
+    const ui = mount({ snapshot: instancesSnapshot() });
+    await settle();
+
+    await ui.type("\t");
+    await ui.type("i");
+    await ui.type("v");
+    const frame = ui.frame();
+
+    expect(frame).toContain("instance feat-x · 0/2 running · initialised · created 4.0s ago");
+    expect(frame).toContain("  platform  adopted — u8 never removes it");
+    expect(frame).toContain("            /agents/wt-3/platform");
+    expect(frame).toContain("  infra     branch feat-x · created by u8 · no apps (kept)");
+    expect(frame).toContain("  api           stopped  http 20001  http://localhost:20001");
+    expect(frame).toContain("platform.admin@base  stopped — not running  (needed by platform.web)");
+  });
+
+  it("draws the create form, and a refusal under it without losing what was typed", async () => {
+    const ui = mount({ snapshot: instancesSnapshot() });
+    await settle();
+    ui.client.failOnce("instance.create", new U8Error("INSTANCE_EXISTS", 'instance "feat-x" already exists'));
+
+    await ui.type("i");
+    await ui.type("n");
+    expect(ui.frame()).toContain("new instance");
+    expect(ui.frame()).toContain("❯ name    ▌");
+    expect(ui.frame()).toContain("  branch  the instance's name");
+    expect(ui.frame()).toContain("  [x] platform.admin");
+
+    await ui.type("feat-x");
+    expect(ui.frame()).toContain("❯ name    feat-x▌");
+    await ui.type("\r");
+    await settle();
+
+    expect(ui.frame()).toContain('✗ instance "feat-x" already exists');
+    expect(ui.frame()).toContain("❯ name    feat-x▌");
+    expect(ui.frame().split("\n").at(-1)).toContain("esc cancel");
+  });
+
+  it("draws every line of a refusal that is several, without growing the frame", async () => {
+    const ui = mount({ snapshot: instancesSnapshot() });
+    await settle();
+    const git =
+      "could not create a worktree for \"api\": Preparing worktree (checking out 'main')\nfatal: 'main' is already checked out at '/ws/api'";
+    ui.client.failOnce("instance.create", new U8Error("WORKTREE_FAILED", git));
+
+    await ui.type("i");
+    await ui.type("n");
+    await ui.type("dup");
+    await ui.type("\r");
+    await settle();
+
+    const lines = ui.frame().split("\n");
+    expect(lines).toHaveLength(frameRows(24));
+    expect(ui.frame()).toContain("✗ could not create a worktree for \"api\": Preparing worktree (checking out 'main')");
+    expect(ui.frame()).toContain("fatal: 'main' is already checked out at '/ws/api'");
+    // The field the cursor is on, and the key bar, are still where they were.
+    expect(ui.frame()).toContain("❯ name    dup▌");
+    expect(lines.at(-1)).toContain("esc cancel");
+  });
+
+  it("says so when a refusal is longer than a short terminal can show", async () => {
+    const ui = mount({ snapshot: instancesSnapshot() });
+    await settle();
+    const long = Array.from({ length: 12 }, (_, i) => `issue ${i + 1}: something the config got wrong`).join("\n");
+    ui.client.failOnce("instance.create", new U8Error("INSTANCE_INVALID", long));
+
+    await resize(ui, 10);
+    await ui.type("i");
+    await ui.type("n");
+    await ui.type("x");
+    await ui.type("\r");
+    await settle();
+
+    const lines = ui.frame().split("\n");
+    expect(lines).toHaveLength(frameRows(10));
+    expect(ui.frame()).toContain("✗ issue 1: something the config got wrong");
+    // Cut, and marked as cut: a refusal that just stops reads as the whole of it.
+    expect(ui.frame()).toMatch(/… \d+ more lines do not fit this terminal/);
+    expect(ui.frame()).toContain("❯ name    x▌");
+    expect(lines.at(-1)).toContain("esc cancel");
+  });
+
+  it("asks for the instance's name before destroying it, and shows what goes", async () => {
+    const ui = mount({ snapshot: instancesSnapshot() });
+    await settle();
+
+    await ui.type("\t");
+    await ui.type("i");
+    await ui.type("D");
+    expect(ui.frame()).toContain("destroy instance feat-x");
+    expect(ui.frame()).toContain("removes 2 worktrees u8 created, with whatever is uncommitted in them:");
+    expect(ui.frame()).toContain("  /wt/feat-x/api");
+    expect(ui.frame()).toContain("type feat-x and press ↵ to destroy it: ▌");
+
+    await ui.type("feat");
+    expect(ui.frame()).toContain("type feat-x and press ↵ to destroy it: feat▌");
+    await ui.type("\r");
+    expect(ui.client.paramsOf("instance.destroy")).toEqual([]);
+    expect(ui.frame()).toContain("type feat-x exactly to destroy it — esc cancels");
+
+    await ui.type("-x");
+    await ui.type("\r");
+    await settle();
+    expect(ui.client.paramsOf("instance.destroy")).toEqual([{ name: "feat-x", force: undefined }]);
+    expect(ui.frame()).toContain("… feat-x: destroying");
+  });
+
+  it("shows a refused prune in full, wrapped to the terminal, with the way on from it", async () => {
+    const ui = mount({ snapshot: instancesSnapshot() });
+    await settle();
+    const refusal =
+      "the worktree at /wt/feat-x/api has uncommitted changes (README.md, src/a.ts and 3 more), so nothing was stopped or removed — " +
+      "commit or stash them, leave the checkout in place by dropping --prune, or throw them away with --discard";
+    ui.client.failOnce("instance.remove", new U8Error("WORKTREE_FAILED", refusal));
+
+    await ui.type("\t");
+    await ui.type("j");
+    await ui.type("i");
+    await ui.type("d");
+    expect(ui.frame()).toContain("remove apps from feat-x");
+    expect(ui.frame()).toContain("❯ [x] api");
+    expect(ui.frame()).toContain("checkout of a repo left with no apps: (•) keep it  ( ) give it up");
+
+    await ui.type("\u001B[B");
+    await ui.type("\u001B[B");
+    await ui.type("\u001B[C");
+    expect(ui.frame()).toContain("( ) keep it  (•) give it up");
+    await ui.type("\r");
+    await settle();
+
+    expect(ui.frame()).toContain("✗ feat-x · remove api — refused");
+    // Longer than the terminal is wide, and not one word of it is cut.
+    expect(refusal.length).toBeGreaterThan(200);
+    expect(flat(ui)).toContain(refusal);
+    expect(ui.frame().split("\n").every((line) => line.length <= 100)).toBe(true);
+    expect(ui.frame()).toContain("D discard the uncommitted changes and remove the worktree…");
+    expect(ui.frame().split("\n").at(-1)).toContain("↵ or esc close");
+
+    await ui.type("D");
+    expect(ui.frame()).toContain("discard uncommitted changes — feat-x");
+    expect(ui.frame()).toContain("type feat-x and press ↵ to discard and remove: ▌");
+  });
+
+  it("ends an action with its result, and a failed one with the end of its log", async () => {
+    const ui = mount({ snapshot: instancesSnapshot() });
+    await settle();
+    ui.client.lines.push(logLine("api@feat-x", "npm ERR! missing script: build"));
+
+    await ui.type("\t");
+    await ui.type("i");
+    await ui.type("i");
+    await settle();
+    await ui.tick();
+    expect(ui.frame()).toContain("… feat-x: init — instance:init");
+    // The activity line is budgeted for like any other: the frame is as tall as it was.
+    expect(ui.frame().split("\n")).toHaveLength(frameRows(24));
+
+    ui.client.finish(
+      taskResult(
+        "run-1",
+        "instance:init",
+        [
+          { targetId: "api@feat-x", state: "failed", exitCode: 1, durationMs: 3 },
+          { targetId: "platform.web@feat-x", state: "ok", durationMs: 3 },
+        ],
+        false,
+      ),
+    );
+    await settle();
+    await ui.tick();
+
+    const frame = ui.frame();
+    expect(frame).toContain("✗ feat-x · init — failed");
+    expect(frame).toContain("✗ api@feat-x failed — exit 1");
+    expect(frame).toContain("── api@feat-x: last 1 line ──");
+    expect(frame).toContain("npm ERR! missing script: build");
+    expect(frame).not.toContain("… feat-x: init");
+    expect(frame.split("\n")).toHaveLength(frameRows(24));
+
+    await ui.type("\r");
+    expect(ui.frame()).toContain("▾ feat-x  0/2 running");
+  });
+
+  it("offers the restart a membership change calls for, and sends it", async () => {
+    const before = withInstances(fixtureSnapshot(), featX({ status: { "platform.web@feat-x": "running" } }));
+    const ui = mount({ snapshot: before });
+    await settle();
+
+    await ui.type("\t");
+    await ui.type("j");
+    await ui.type("i");
+    await ui.type("d");
+    await ui.type("\r");
+    await settle();
+    const after = withInstances(fixtureSnapshot(), featX({ status: { "platform.web@feat-x": "running" }, stale: ["platform.web@feat-x"] }));
+    const instance = after.instances.find((i) => i.name === "feat-x");
+    if (instance) instance.appIds = ["platform.web@feat-x"];
+    after.repos = after.repos.filter((repo) => repo.name !== "api@feat-x");
+    after.services = [...after.services.filter((s) => s.targetId !== "api@feat-x"), serviceState("api@feat-x", "stopped")];
+    ui.client.setSnapshot(after);
+    ui.client.finish(taskResult("run-1", "instance:teardown", ["api@feat-x"]));
+    await settle();
+    await ui.tick();
+
+    expect(ui.frame()).toContain("✓ feat-x · remove api");
+    expect(flat(ui)).toContain("platform.web@feat-x is now stale: it is still running with what it pointed at before this change");
+    expect(ui.frame()).toContain("r restart it now");
+
+    await ui.type("r");
+    expect(ui.client.paramsOf("service.restart")).toEqual([{ targets: ["platform.web@feat-x"], instance: "feat-x" }]);
+    expect(ui.frame()).toContain("restarting platform.web@feat-x");
+  });
+
+  it("says so when it was opened in a worktree that has no instance, and offers one", async () => {
+    const ui = mount({ worktree: "/agents/fix-login" });
+    await settle();
+
+    expect(ui.frame()).toContain("this worktree has no instance of its own, so this is the base instance — i then w creates one for it");
+    // A banner is a line like any other: the frame did not grow.
+    expect(ui.frame().split("\n")).toHaveLength(frameRows(24));
+
+    await ui.type("i");
+    expect(ui.frame()).toContain("  w  new instance from this worktree…  /agents/fix-login");
+    await ui.type("w");
+    expect(ui.frame()).toContain("uses /agents/fix-login as it is — u8 never removes a worktree it did not create");
+    expect(ui.frame()).toContain("❯ name  fix-login▌");
   });
 });
 

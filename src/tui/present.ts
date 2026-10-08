@@ -10,7 +10,8 @@
 import { formatDuration, oneLine, STATE_SYMBOL } from "../cli/format.js";
 import type { TargetId } from "../config/types.js";
 import type { TaskTargetState } from "../ipc/protocol.js";
-import type { DashboardState, LogViewState, Mode, RunSummary } from "./types.js";
+import { displayWidth } from "../template/index.js";
+import type { DashboardState, LogViewState, Mode, ReportState, RunSummary, ToneLine } from "./types.js";
 
 /** Plugin failures worth a banner line; the rest are counted, not listed. */
 const MAX_PLUGIN_BANNERS = 2;
@@ -46,6 +47,15 @@ export function banners(state: DashboardState): Banner[] {
   } else if (state.connection === "lost") {
     out.push({ tone: "error", text: "lost the daemon and gave up reconnecting — press q to quit" });
   }
+  // Last: nothing is wrong, but what is on screen is not what the directory
+  // suggests — the same thing `u8 status` says there, with the key instead of
+  // the command.
+  if (state.worktree !== undefined) {
+    out.push({
+      tone: "warn",
+      text: "this worktree has no instance of its own, so this is the base instance — i then w creates one for it",
+    });
+  }
   return out;
 }
 
@@ -63,6 +73,8 @@ export function headerText(state: DashboardState): string {
     // Only once there is more than base: the count is across all of them then,
     // and saying so is what stops it reading as the profile's own.
     ...(state.instances > 1 ? [`${state.instances} instances`] : []),
+    // The count that follows is the focused instance's alone, and says so.
+    ...(state.focus === undefined ? [] : [`focus ${state.focus}`]),
     `${state.running}/${state.total} running`,
     state.connection === "connected" ? `daemon ${state.daemonVersion}` : `daemon ${state.connection}`,
   ].join(" · ");
@@ -83,9 +95,28 @@ export function rowRangeText(state: DashboardState): string | undefined {
 // Layout
 // ---------------------------------------------------------------------------
 
-/** Footer lines: the hint bar, plus a notice and a run summary when present. */
+/** Instance actions worth a footer line each; the rest are counted. */
+const MAX_ACTIVITY_LINES = 2;
+
+/**
+ * The instance actions still in flight, as footer lines.
+ *
+ * A create spends its first seconds making worktrees, before there is a row to
+ * draw progress on, and an `up` is two runs back to back — this is what says
+ * the dashboard has not forgotten either. Bounded like the plugin banners.
+ */
+export function activityLines(state: DashboardState): string[] {
+  const all = state.activity;
+  if (all.length <= MAX_ACTIVITY_LINES) return all.map((line) => `… ${line}`);
+  const shown = all.slice(0, MAX_ACTIVITY_LINES - 1).map((line) => `… ${line}`);
+  return [...shown, `… and ${all.length - shown.length} more instance actions in flight`];
+}
+
+/** Footer lines: the hint bar, plus the actions in flight, a notice and a run summary when present. */
 export function footerLines(state: DashboardState): number {
-  return 1 + (state.notice === undefined ? 0 : 1) + (state.summary === undefined ? 0 : 1);
+  return (
+    1 + activityLines(state).length + (state.notice === undefined ? 0 : 1) + (state.summary === undefined ? 0 : 1)
+  );
 }
 
 /**
@@ -122,6 +153,80 @@ export function listViewport(terminalRows: number, state: DashboardState): numbe
 /** Same, for the log view, which spends two lines on its title and status bar. */
 export function logViewport(terminalRows: number, state: DashboardState): number {
   return Math.max(1, listViewport(terminalRows, state) - 2);
+}
+
+// ---------------------------------------------------------------------------
+// Panels of text
+// ---------------------------------------------------------------------------
+
+/**
+ * Wraps one line to `width` columns at word boundaries, carrying its indent.
+ *
+ * A refusal from the daemon is a sentence of two hundred characters and has to
+ * be read whole; truncating it the way a row is truncated would cut off the
+ * part that says what to do. Continuation lines hang two columns in, so a
+ * wrapped sentence still reads as one item.
+ */
+export function wrapText(text: string, width: number): string[] {
+  // A message can already be several lines — git's own failures are two — and
+  // each is wrapped on its own: handed to the terminal as one, a line break in
+  // the middle draws a row nobody budgeted for and scrolling stops short of it.
+  const physical = text.replace(/\r\n?/g, "\n").replace(/\t/g, "  ").split("\n");
+  return physical.length === 1 ? wrapLine(physical[0] ?? "", width) : physical.flatMap((line) => wrapLine(line, width));
+}
+
+function wrapLine(text: string, width: number): string[] {
+  const room = Math.max(8, width);
+  if (displayWidth(text) <= room) return [text];
+  const indent = /^ */.exec(text)?.[0] ?? "";
+  const hang = `${indent}  `;
+  const out: string[] = [];
+  let line = indent;
+  let empty = true;
+  for (const word of text.slice(indent.length).split(" ")) {
+    let rest = word;
+    for (;;) {
+      const candidate = empty ? `${line}${rest}` : `${line} ${rest}`;
+      if (displayWidth(candidate) <= room) {
+        line = candidate;
+        empty = false;
+        break;
+      }
+      if (!empty) {
+        out.push(line);
+        line = hang;
+        empty = true;
+        continue;
+      }
+      // A single word wider than the line — a path, usually: cut it where it has to be.
+      const fit = Math.max(1, room - displayWidth(line));
+      out.push(`${line}${rest.slice(0, fit)}`);
+      rest = rest.slice(fit);
+      line = hang;
+      if (rest.length === 0) break;
+    }
+  }
+  if (!empty) out.push(line);
+  return out;
+}
+
+/** {@link wrapText} over toned lines; every piece keeps its line's tone. */
+export function wrapLines(lines: readonly ToneLine[], width: number): ToneLine[] {
+  return lines.flatMap((line) => wrapText(line.text, width).map((text) => ({ text, tone: line.tone })));
+}
+
+/**
+ * Lines of a report the body has room for: one goes to its title, and one to
+ * the follow-ups when it offers any.
+ */
+export function reportWindow(viewport: number, report: Pick<ReportState, "actions">): number {
+  return Math.max(1, viewport - 1 - (report.actions.length > 0 ? 1 : 0));
+}
+
+/** `✓ feat-x · add api` — and how many more results are queued behind it. */
+export function reportTitle(report: ReportState): string {
+  const waiting = report.waiting > 0 ? `  (${report.waiting} more result${report.waiting === 1 ? "" : "s"} after this)` : "";
+  return `${report.ok ? STATE_SYMBOL.ok : STATE_SYMBOL.failed} ${report.title}${waiting}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,8 +295,20 @@ export function hintText(mode: Mode, help: boolean): string {
       return "type to filter  ↵ run  tab scope  esc close";
     case "profiles":
       return "↑↓ move  ↵ use  esc close";
+    case "instance":
+      return "↑↓ move  ↵ or its letter runs it  esc close";
+    case "detail":
+      return "↑↓ scroll  pgup/pgdn page  g/G top/bottom  i actions  esc back";
+    case "form":
+      return "↑↓ field  type to edit  space toggle  ←→ choose  ↵ submit  esc cancel";
+    case "confirm":
+      return "answer as asked above  esc cancel";
+    case "report":
+      return "↑↓ scroll  pgup/pgdn page  ↵ or esc close";
     case "list":
-      return "↑↓ move  ↵ logs  s/x/r target  S/X/R all  : palette  P profile  ? help  q quit";
+      // The arrows gave their place to `i`: of everything on this bar they are
+      // the one binding nobody has to be told.
+      return "↵ logs  s/x/r row  S/X/R all  i instance  : palette  P profile  ? help  q quit";
   }
 }
 
@@ -219,10 +336,15 @@ export const HELP: readonly HelpEntry[] = [
   { keys: "pgup pgdn", what: "page through the list" },
   { keys: "g / G", what: "first / last row" },
   { keys: "s x r", what: "start / stop / restart the selection" },
-  { keys: "S X R", what: "start / stop / restart the whole profile" },
+  { keys: "S X R", what: "start / stop / restart the whole profile — or the instance the cursor is in" },
   { keys: "↵", what: "open the log view (esc returns)" },
   { keys: ": or p", what: "command palette — run any command" },
   { keys: "P", what: "switch profile" },
+  { keys: "i", what: "instance menu — details, up, init, add or remove apps, destroy, new" },
+  { keys: "tab ⇧tab", what: "next / previous instance section" },
+  { keys: "← → / h l", what: "collapse / expand the section under the cursor" },
+  { keys: "z", what: "collapse every section, or expand them all" },
+  { keys: "f", what: "focus on the instance under the cursor; again shows them all" },
   { keys: "?", what: "toggle this help" },
   { keys: "q", what: "quit the dashboard; the daemon and its services keep running" },
 ];

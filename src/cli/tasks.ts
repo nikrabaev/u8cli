@@ -32,6 +32,7 @@ import { U8Error } from "../util/errors.js";
 import { instanceIn, requireRegistered, scopeOf, withAttached, type CliContext } from "./context.js";
 import { EXIT_FAILURE, EXIT_INTERRUPTED } from "./errors.js";
 import { formatDuration, oneLine, paintState, renderTable, STATE_SYMBOL } from "./format.js";
+import { baseDependencyMessage, explicitTarget, externalDependenciesDown } from "./instance-report.js";
 import { writeLine, writeLines } from "./io.js";
 
 /** Which run to launch. `run` carries the knobs only `u8 run` exposes. */
@@ -160,14 +161,7 @@ async function launch(
   }
 }
 
-/**
- * Says which of base's apps an instance leans on are not up.
- *
- * A partial instance is wired to base for everything it has no copy of, and
- * starting it never starts base — that would be one task reaching into
- * everybody's stack. So when what it depends on is down, the start succeeds and
- * the app then fails its first request; this is the line that explains why.
- */
+/** Says which of base's apps an instance leans on are not up, and the command that starts them. */
 export async function warnAboutBase(ctx: CliContext, attached: AttachedClient, instanceName: string): Promise<void> {
   const snapshot = await attached.client.request("workspace.snapshot", {}).catch(() => attached.snapshot());
   const down = externalDependenciesDown(snapshot, instanceName);
@@ -175,27 +169,11 @@ export async function warnAboutBase(ctx: CliContext, attached: AttachedClient, i
   writeLine(
     ctx.io.stderr,
     ctx.style.yellow(
-      `instance "${instanceName}" uses ${down.join(", ")} from another instance, and ${down.length === 1 ? "it is" : "they are"} not running — ` +
-        `start with: u8 start ${down.map((id) => (id.includes("@") ? id : `${id}@base`)).join(" ")}`,
+      baseDependencyMessage(instanceName, down, `start with: u8 start ${down.map(explicitTarget).join(" ")}`),
     ),
   );
 }
 
-/** Dependencies of an instance's apps that live outside it and are not running. */
-export function externalDependenciesDown(snapshot: Snapshot, instanceName: string): string[] {
-  const instance = snapshot.instances.find((i) => i.name === instanceName);
-  if (!instance || instance.isBase) return [];
-  const own = new Set(instance.appIds);
-  const running = new Set(snapshot.services.filter((s) => s.status === "running").map((s) => s.targetId));
-  const out: string[] = [];
-  for (const app of snapshot.repos.flatMap((r) => r.apps)) {
-    if (!own.has(app.id)) continue;
-    for (const dep of app.dependsOn) {
-      if (!own.has(dep) && !running.has(dep) && !out.includes(dep)) out.push(dep);
-    }
-  }
-  return out;
-}
 
 /** The result, or `undefined` when the user interrupted before it arrived. */
 async function settle(

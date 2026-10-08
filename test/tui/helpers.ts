@@ -13,7 +13,7 @@
  * means sleeping in a test — so time is advanced by hand and a leaked timer is
  * visible as a non-zero {@link TestScheduler.pending}.
  */
-import type { TargetId } from "../../src/config/types.js";
+import { qualify, splitQualified, type TargetId } from "../../src/config/types.js";
 import { PROTOCOL_VERSION } from "../../src/ipc/protocol.js";
 import type {
   IndicatorTone,
@@ -28,9 +28,13 @@ import type {
   ServiceStatus,
   Snapshot,
   SnapshotApp,
+  SnapshotInstance,
+  SnapshotRepo,
+  TaskResult,
+  TaskTargetResult,
 } from "../../src/ipc/protocol.js";
 import type { Scheduler } from "../../src/tui/controller.js";
-import type { DashboardClient, Unsubscribe } from "../../src/tui/types.js";
+import type { DashboardClient, RpcRequestOptions, Unsubscribe } from "../../src/tui/types.js";
 
 // ---------------------------------------------------------------------------
 // Snapshot fixtures
@@ -95,8 +99,140 @@ export function app(repoName: string, name?: string): SnapshotApp {
   };
 }
 
-export function serviceState(targetId: TargetId, status: ServiceStatus): ServiceState {
-  return { targetId, status, stale: false, restartAttempts: 0 };
+export function serviceState(targetId: TargetId, status: ServiceStatus, stale = false): ServiceState {
+  return { targetId, status, stale, restartAttempts: 0 };
+}
+
+/** `base`'s app, as `instance` has it: the same definition under a qualified id. */
+export function copyOf(base: SnapshotApp, instance: string, extra: Partial<SnapshotApp> = {}): SnapshotApp {
+  return {
+    ...base,
+    id: qualify(base.id, instance),
+    baseId: base.id,
+    instance,
+    repoName: qualify(base.repoName, instance),
+    cwd: `/wt/${instance}${base.cwd.slice("/ws".length)}`,
+    ...extra,
+  };
+}
+
+/** One instance's part of a snapshot: its repos, its record, and cells and states for its apps. */
+export interface InstancePart {
+  instance: SnapshotInstance;
+  repos: SnapshotRepo[];
+  services: ServiceState[];
+  indicators: IndicatorValue[];
+}
+
+export function instancePart(
+  name: string,
+  apps: readonly SnapshotApp[],
+  opts: {
+    checkouts?: SnapshotInstance["checkouts"];
+    initialized?: boolean;
+    createdAt?: number;
+    status?: Record<TargetId, ServiceStatus>;
+    stale?: readonly TargetId[];
+  } = {},
+): InstancePart {
+  const byRepo = new Map<string, SnapshotApp[]>();
+  for (const one of apps) byRepo.set(one.repoName, [...(byRepo.get(one.repoName) ?? []), one]);
+  const stateOf = (id: TargetId): ServiceStatus => opts.status?.[id] ?? "stopped";
+  return {
+    instance: {
+      name,
+      isBase: false,
+      createdAt: opts.createdAt ?? 1,
+      appIds: apps.map((one) => one.id),
+      checkouts: opts.checkouts ?? {},
+      initialized: opts.initialized ?? true,
+    },
+    repos: [...byRepo].map(([repoName, own]) => ({
+      name: repoName,
+      baseName: own[0]?.baseId.split(".")[0] ?? repoName,
+      instance: name,
+      path: `/wt/${name}/${own[0]?.baseId.split(".")[0] ?? repoName}`,
+      apps: own,
+    })),
+    services: apps.map((one) => serviceState(one.id, stateOf(one.id), opts.stale?.includes(one.id) ?? false)),
+    indicators: [
+      ...apps.flatMap((one) => [
+        indicator({ ns: "app", name: "name", scope: "app", owner: one.id, value: one.name }),
+        statusIndicator(one.id, stateOf(one.id)),
+      ]),
+      ...[...byRepo.keys()].map((repoName) =>
+        indicator({ ns: "repo", name: "name", scope: "repo", owner: repoName, value: splitQualified(repoName).name }),
+      ),
+    ],
+  };
+}
+
+/** A snapshot with these instances beside base. */
+export function withInstances(base: Snapshot, ...parts: InstancePart[]): Snapshot {
+  return {
+    ...base,
+    repos: [...base.repos, ...parts.flatMap((part) => part.repos)],
+    instances: [...base.instances, ...parts.map((part) => part.instance)],
+    services: [...base.services, ...parts.flatMap((part) => part.services)],
+    indicators: [...base.indicators, ...parts.flatMap((part) => part.indicators)],
+  };
+}
+
+/**
+ * `feat-x`, the instance most instance tests are about. It runs its own `api`
+ * and `platform.web`; `web` depends on `platform.admin`, which it has no copy
+ * of, so it leans on base's. Its three checkouts are the three kinds there
+ * are: a worktree u8 created, a worktree somebody else made, and one an
+ * earlier remove left behind with no apps — whose repo is therefore absent
+ * from `repos`, exactly as the daemon reports it.
+ */
+export function featX(
+  opts: { status?: Record<TargetId, ServiceStatus>; stale?: readonly TargetId[]; initialized?: boolean } = {},
+): InstancePart {
+  const api = copyOf(app("api"), "feat-x", { ports: { http: 20001 } });
+  const web = copyOf(app("platform", "web"), "feat-x", { ports: { http: 20002 }, dependsOn: ["platform.admin"] });
+  return instancePart("feat-x", [api, web], {
+    ...opts,
+    createdAt: 1_000,
+    checkouts: {
+      "api@feat-x": { path: "/wt/feat-x/api", owned: true, branch: "feat-x", worktree: "/wt/feat-x/api", createdBranch: true },
+      "platform@feat-x": { path: "/agents/wt-3/platform", owned: false },
+      "infra@feat-x": { path: "/wt/feat-x/infra", owned: true, branch: "feat-x", worktree: "/wt/feat-x/infra" },
+    },
+  });
+}
+
+/** A second, smaller instance: something for the cursor to move to, and to land on. */
+export function agent2(): InstancePart {
+  const api = copyOf(app("api"), "agent-2", { ports: { http: 20010 } });
+  return instancePart("agent-2", [api], {
+    createdAt: 2_000,
+    checkouts: { "api@agent-2": { path: "/wt/agent-2/api", owned: true, branch: "agent-2", worktree: "/wt/agent-2/api" } },
+  });
+}
+
+/** Base, `feat-x` and `agent-2`: three sections, which is what navigation needs. */
+export function instancesSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
+  return { ...withInstances(fixtureSnapshot(), featX(), agent2()), ...overrides };
+}
+
+/** A finished run, with every target in the same state unless said otherwise. */
+export function taskResult(
+  runId: string,
+  command: string,
+  targets: Array<TargetId | TaskTargetResult>,
+  ok = true,
+): TaskResult {
+  return {
+    runId,
+    command,
+    ok,
+    targets: targets.map((target) =>
+      typeof target === "string" ? { targetId: target, state: ok ? "ok" : "failed", durationMs: 5 } : target,
+    ),
+    startedAt: 1_000,
+    finishedAt: 1_500,
+  };
 }
 
 export function indicator(value: {
@@ -129,7 +265,7 @@ type Answer = (params: unknown) => unknown;
 
 export interface FakeClient extends DashboardClient {
   /** Every RPC the controller made, in order. */
-  readonly calls: Array<{ method: RpcMethod; params: unknown }>;
+  readonly calls: Array<{ method: RpcMethod; params: unknown; opts?: RpcRequestOptions }>;
   /** Log targets currently subscribed — must be empty once a view closes. */
   readonly subscribed: Set<TargetId>;
   readonly subscribeCalls: TargetId[];
@@ -139,6 +275,16 @@ export interface FakeClient extends DashboardClient {
   /** Lines `logs.read` backfills with. */
   readonly lines: LogLine[];
   paramsOf(method: RpcMethod): unknown[];
+  /** The options each call to `method` was sent with. */
+  optsOf(method: RpcMethod): Array<RpcRequestOptions | undefined>;
+  /** Run ids handed out and not finished yet, oldest first. */
+  readonly running: string[];
+  /**
+   * Ends a run the way the daemon does: `task.finished` is pushed, and
+   * whoever awaits it gets the result. Until then `run.await` stays pending,
+   * which is what a run in flight looks like from the dashboard.
+   */
+  finish(result: TaskResult): void;
   push<N extends RpcNotification>(name: N, params: RpcNotificationPayload<N>): void;
   setSnapshot(next: Snapshot): void;
   disconnect(): void;
@@ -148,18 +294,38 @@ export interface FakeClient extends DashboardClient {
   answer<M extends RpcMethod>(method: M, fn: (params: RpcParams<M>) => RpcResult<M>): void;
   /** Makes every subsequent call to `method` reject. */
   fail(method: RpcMethod, err: Error): void;
+  /** Makes the next call to `method` reject, and the ones after it answer again. */
+  failOnce(method: RpcMethod, err: Error): void;
 }
 
 export function createFakeClient(initial: Snapshot = fixtureSnapshot()): FakeClient {
   let snapshot = initial;
   let runs = 0;
-  const calls: Array<{ method: RpcMethod; params: unknown }> = [];
+  const calls: Array<{ method: RpcMethod; params: unknown; opts?: RpcRequestOptions }> = [];
+  const running: string[] = [];
+  const finished = new Map<string, TaskResult>();
+  const awaiting = new Map<string, Array<(result: TaskResult) => void>>();
+  const nextRun = (): string => {
+    const runId = `run-${++runs}`;
+    running.push(runId);
+    return runId;
+  };
+  const instanceOf = (name: string): SnapshotInstance =>
+    snapshot.instances.find((i) => i.name === name) ?? {
+      name,
+      isBase: false,
+      createdAt: 0,
+      appIds: [],
+      checkouts: {},
+      initialized: false,
+    };
   const subscribed = new Set<TargetId>();
   const subscribeCalls: TargetId[] = [];
   const unsubscribeCalls: TargetId[] = [];
   const lines: LogLine[] = [];
   const answers = new Map<RpcMethod, Answer>();
   const failures = new Map<RpcMethod, Error>();
+  const failuresOnce = new Map<RpcMethod, Error>();
   const listeners = new Map<string, Set<(params: never) => void>>();
   const disconnects = new Set<() => void>();
   const reattaches = new Set<(s: Snapshot) => void>();
@@ -182,7 +348,32 @@ export function createFakeClient(initial: Snapshot = fixtureSnapshot()): FakeCli
       case "service.stop":
       case "service.restart":
       case "command.run":
-        return { runId: `run-${++runs}` };
+      case "instance.init":
+      case "instance.destroy":
+        return { runId: nextRun() };
+      // What the daemon answers once it has taken the request. The snapshot is
+      // the test's to move: nothing here pretends to be the instance manager.
+      case "instance.create": {
+        const { name } = params as { name: string };
+        return { instance: instanceOf(name), runId: nextRun() };
+      }
+      case "instance.add": {
+        const { name, targets } = params as { name: string; targets: string[] };
+        return { instance: instanceOf(name), added: targets.map((id) => qualify(id, name)), runId: nextRun() };
+      }
+      case "instance.remove": {
+        const { name, targets } = params as { name: string; targets: string[] };
+        const own = new Set(instanceOf(name).appIds);
+        return { removed: targets.map((id) => qualify(id, name)).filter((id) => own.has(id)), runId: nextRun() };
+      }
+      case "run.await": {
+        const { runId } = params as { runId: string };
+        const done = finished.get(runId);
+        if (done !== undefined) return done;
+        return new Promise<TaskResult>((resolve) => {
+          awaiting.set(runId, [...(awaiting.get(runId) ?? []), resolve]);
+        });
+      }
       case "workspace.snapshot":
         return snapshot;
       case "profile.use": {
@@ -208,9 +399,24 @@ export function createFakeClient(initial: Snapshot = fixtureSnapshot()): FakeCli
       return total;
     },
     paramsOf: (method) => calls.filter((call) => call.method === method).map((call) => call.params),
+    optsOf: (method) => calls.filter((call) => call.method === method).map((call) => call.opts),
+    running,
+    finish(result) {
+      const at = running.indexOf(result.runId);
+      if (at >= 0) running.splice(at, 1);
+      finished.set(result.runId, result);
+      client.push("task.finished", { result });
+      for (const resolve of awaiting.get(result.runId) ?? []) resolve(result);
+      awaiting.delete(result.runId);
+    },
 
-    request<M extends RpcMethod>(method: M, params: RpcParams<M>): Promise<RpcResult<M>> {
-      calls.push({ method, params });
+    request<M extends RpcMethod>(method: M, params: RpcParams<M>, opts?: RpcRequestOptions): Promise<RpcResult<M>> {
+      calls.push({ method, params, opts });
+      const once = failuresOnce.get(method);
+      if (once !== undefined) {
+        failuresOnce.delete(method);
+        return Promise.reject(once);
+      }
       const failure = failures.get(method);
       if (failure !== undefined) return Promise.reject(failure);
       const answer = answers.get(method);
@@ -258,6 +464,9 @@ export function createFakeClient(initial: Snapshot = fixtureSnapshot()): FakeCli
     },
     fail(method, err) {
       failures.set(method, err);
+    },
+    failOnce(method, err) {
+      failuresOnce.set(method, err);
     },
   };
 

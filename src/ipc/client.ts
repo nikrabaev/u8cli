@@ -48,11 +48,22 @@ export interface RpcClientOptions {
   maxLineBytes?: number;
 }
 
+/**
+ * Per-request overrides. A client's deadline is sized for a question the
+ * daemon answers from memory; a request that only returns once git has made
+ * worktrees, or once a run has finished, says so here instead of forcing the
+ * whole connection to give up its deadline.
+ */
+export interface RpcRequestOptions {
+  /** Deadline for this request alone. `0` disables it. Defaults to the client's. */
+  timeoutMs?: number;
+}
+
 export interface RpcClient {
   readonly socketPath: string;
   readonly connected: boolean;
   connect(): Promise<void>;
-  request<M extends RpcMethod>(method: M, params: RpcParams<M>): Promise<RpcResult<M>>;
+  request<M extends RpcMethod>(method: M, params: RpcParams<M>, opts?: RpcRequestOptions): Promise<RpcResult<M>>;
   /** Subscribes to a server push; returns the unsubscribe function. */
   on<N extends RpcNotification>(name: N, cb: (params: RpcNotificationPayload<N>) => void): () => void;
   onClose(cb: (err?: Error) => void): () => void;
@@ -128,7 +139,11 @@ class Client implements RpcClient {
     return this.#connecting;
   }
 
-  async request<M extends RpcMethod>(method: M, params: RpcParams<M>): Promise<RpcResult<M>> {
+  async request<M extends RpcMethod>(
+    method: M,
+    params: RpcParams<M>,
+    opts: RpcRequestOptions = {},
+  ): Promise<RpcResult<M>> {
     if (!this.#open) await this.connect();
     const socket = this.#socket;
     if (!socket || !this.#open) {
@@ -154,13 +169,12 @@ class Client implements RpcClient {
         fn();
       };
 
+      const timeoutMs = opts.timeoutMs ?? this.#timeoutMs;
       let timer: NodeJS.Timeout | undefined;
-      if (this.#timeoutMs > 0) {
+      if (timeoutMs > 0) {
         timer = setTimeout(() => {
-          settle(() =>
-            reject(new U8Error("RPC_ERROR", `${method} timed out after ${this.#timeoutMs}ms`)),
-          );
-        }, this.#timeoutMs);
+          settle(() => reject(new U8Error("RPC_ERROR", `${method} timed out after ${timeoutMs}ms`)));
+        }, timeoutMs);
         timer.unref();
       }
 

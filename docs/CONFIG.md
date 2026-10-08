@@ -766,9 +766,9 @@ number of others can run beside it, which is what makes it possible to work on s
 or have several tools work on several branches — at once.
 
 Instances are created from the command line (`u8 instance create`, `u8 up`) and changed from it
-(`u8 instance add`, `u8 instance remove`), not declared in the config: which worktrees exist on a
-machine is local state, like the active profile, and lives in the state dir. The config only says how
-they are made:
+(`u8 instance add`, `u8 instance remove`) — or from the dashboard's instance menu, which does the
+same things — not declared in the config: which worktrees exist on a machine is local state, like
+the active profile, and lives in the state dir. The config only says how they are made:
 
 ```jsonc
 "instances": {

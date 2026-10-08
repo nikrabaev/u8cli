@@ -24,7 +24,7 @@ Layers depend downward only; a lower layer never imports a higher one.
 - `src/indicators` — provider registry, value cache, core `app@` providers
 - `src/engine` — command runs, hook pipeline, `dependsOn` orchestration
 - `src/plugins` — host/loader plus the `git` and `health` built-ins under `src/plugins/builtin`
-- `src/cli`, `src/tui` — the two front ends; both render rows through `src/template`
+- `src/cli`, `src/tui` — the two front ends; both render rows through `src/template`, and both word what happened to an instance through `src/cli/instance-report.ts`
 - `examples/demo` — a real 3-repo workspace used for end-to-end checks
 
 ## Frozen contracts

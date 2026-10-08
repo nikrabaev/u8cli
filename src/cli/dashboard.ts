@@ -39,11 +39,14 @@ export async function dashboardCommand(ctx: CliContext, opts: StatusOptions = {}
   // Loaded on demand: Ink and React cost ~150ms to import, and `u8 status` in a
   // shell loop must not pay for a screen it will never draw.
   const { runDashboard } = await import("../tui/index.js");
-  const { configPath, instance } = scopeOf(ctx);
+  const { configPath, instance, unregistered } = scopeOf(ctx);
   try {
     return await runDashboard({
       configPath,
       instance,
+      // Not refused, as a command that changes things would be: the dashboard
+      // shows base, says that it does, and offers to make the instance.
+      worktree: unregistered,
       ...terminal,
       color: ctx.color,
       signal: ctx.io.signal,

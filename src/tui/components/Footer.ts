@@ -7,7 +7,7 @@
  */
 import { Box, Text } from "ink";
 
-import { hintText, summaryText } from "../present.js";
+import { activityLines, hintText, summaryText } from "../present.js";
 import type { DashboardState, NoticeTone } from "../types.js";
 import { el, type ReactElement } from "./element.js";
 
@@ -23,6 +23,11 @@ export function Footer({ state }: { readonly state: DashboardState }): ReactElem
   return el(
     Box,
     { flexDirection: "column", flexShrink: 0 },
+    // Above the notice: these stay for as long as the action does, and the
+    // notice under them comes and goes.
+    ...activityLines(state).map((line, index) =>
+      el(Text, { key: `activity:${index}`, color: "cyan", wrap: "truncate-end" }, line),
+    ),
     notice === undefined
       ? null
       : el(Text, { color: NOTICE_COLOR[notice.tone], wrap: "truncate-end" }, notice.text),

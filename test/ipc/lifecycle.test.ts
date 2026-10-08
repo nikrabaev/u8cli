@@ -215,6 +215,40 @@ describe("client failure modes", () => {
     expect(client.connected).toBe(true);
   });
 
+  it("lets one request outlive the client's deadline, or fall short of it", async () => {
+    const { socketPath, cleanup } = await makeSocketDir();
+    cleanups.push(cleanup);
+    const release = deferred<void>();
+    const server = createRpcServer({
+      socketPath,
+      handlers: {
+        // A run that takes as long as it takes: the answer is the whole point.
+        "run.await": async () => {
+          await release.promise;
+          return { runId: "r1", command: "c", ok: true, targets: [], startedAt: 0, finishedAt: 0 };
+        },
+        "daemon.ping": async () => new Promise(() => {}),
+      },
+    });
+    await server.listen();
+    cleanups.push(() => server.close());
+    const client = createRpcClient({ socketPath, timeoutMs: 100 });
+    cleanups.push(() => client.close());
+
+    const awaited = client.request("run.await", { runId: "r1" }, { timeoutMs: 0 });
+    // Well past the client's own deadline, and still waiting.
+    await new Promise((r) => setTimeout(r, 250));
+    release.resolve();
+    expect((await awaited).ok).toBe(true);
+
+    // The override is per request, in both directions: the next one is bound
+    // by what it asked for, not by the client's deadline or the last call's.
+    const started = Date.now();
+    const err = await client.request("daemon.ping", {}, { timeoutMs: 30 }).catch((e: unknown) => e);
+    expect((err as Error).message).toBe("daemon.ping timed out after 30ms");
+    expect(Date.now() - started).toBeLessThan(100);
+  });
+
   it("refuses to reconnect after an explicit close", async () => {
     const { socketPath, cleanup } = await makeSocketDir();
     cleanups.push(cleanup);

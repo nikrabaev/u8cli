@@ -38,6 +38,21 @@ export function dispatchKey(
     case "logs":
       logs(controller, state, input, key);
       return;
+    case "instance":
+      instance(controller, input, key);
+      return;
+    case "detail":
+      detail(controller, state, input, key);
+      return;
+    case "form":
+      form(controller, input, key);
+      return;
+    case "confirm":
+      confirm(controller, state, input, key);
+      return;
+    case "report":
+      report(controller, state, input, key);
+      return;
     case "list":
       list(controller, state, input, key);
       return;
@@ -67,6 +82,11 @@ function list(
     return;
   }
 
+  // Sections. Tab is the one key every layout has where it is expected.
+  if (key.tab === true) return controller.jumpSection(key.shift === true ? -1 : 1);
+  if (key.leftArrow === true) return controller.collapseSection();
+  if (key.rightArrow === true) return controller.expandSection();
+
   switch (input) {
     case "s":
       return void controller.start("selection");
@@ -85,6 +105,16 @@ function list(
       return controller.openPalette();
     case "P":
       return controller.openProfiles();
+    case "h":
+      return controller.collapseSection();
+    case "l":
+      return controller.expandSection();
+    case "z":
+      return controller.toggleAllSections();
+    case "f":
+      return controller.toggleFocus();
+    case "i":
+      return controller.openInstanceMenu();
     case "?":
       return controller.toggleHelp();
     case "q":
@@ -92,6 +122,101 @@ function list(
     default:
       break;
   }
+}
+
+/**
+ * The instance menu. Every entry answers to its own letter as well as to the
+ * cursor, so `i u` is "up" — and none of those letters is `j`, `k` or `q`,
+ * which keep meaning what they mean in every other list.
+ */
+function instance(controller: DashboardController, input: string, key: TuiKey): void {
+  if (key.upArrow === true || input === "k") return controller.instanceMenuMove(-1);
+  if (key.downArrow === true || input === "j") return controller.instanceMenuMove(1);
+  if (key.return === true) return void controller.instanceMenuRun();
+  if (key.escape === true || input === "q") return controller.closeInstanceMenu();
+  if (key.ctrl === true || key.meta === true) {
+    if (key.ctrl === true && input === "c") controller.quit();
+    return;
+  }
+  if (input === "?") return controller.toggleHelp();
+  if (isPrintable(input)) void controller.instanceMenuRun(input);
+}
+
+function detail(controller: DashboardController, state: DashboardState, input: string, key: TuiKey): void {
+  const height = state.viewport;
+  if (key.upArrow === true || input === "k") return controller.detailScroll(-1);
+  if (key.downArrow === true || input === "j") return controller.detailScroll(1);
+  if (key.pageUp === true) return controller.detailScroll(-page(height));
+  if (key.pageDown === true) return controller.detailScroll(page(height));
+  if (key.home === true || input === "g") return controller.detailTop();
+  if (key.end === true || input === "G") return controller.detailBottom();
+  if (key.escape === true || input === "q") return controller.closeDetail();
+  if (key.ctrl === true || key.meta === true) {
+    if (key.ctrl === true && input === "c") controller.quit();
+    return;
+  }
+  if (input === "i") return controller.detailActions();
+  if (input === "?") return controller.toggleHelp();
+}
+
+/**
+ * A form. Only the arrows and Tab move between fields: a letter is text in a
+ * name field, and must not be a motion in the checkbox under it.
+ */
+function form(controller: DashboardController, input: string, key: TuiKey): void {
+  if (key.escape === true) return controller.closeForm();
+  if (key.return === true) return void controller.formSubmit();
+  if (key.upArrow === true) return controller.formMove(-1);
+  if (key.downArrow === true) return controller.formMove(1);
+  if (key.tab === true) return controller.formMove(key.shift === true ? -1 : 1);
+  if (key.leftArrow === true) return controller.formCycle(-1);
+  if (key.rightArrow === true) return controller.formCycle(1);
+  if (key.backspace === true || key.delete === true) return controller.formBackspace();
+  if (key.ctrl === true || key.meta === true) {
+    if (key.ctrl === true && input === "c") controller.quit();
+    return;
+  }
+  if (input === " ") return controller.formToggle();
+  if (isPrintable(input)) controller.formType(input);
+}
+
+/**
+ * A question before something that cannot be taken back. A typed answer is
+ * text until Enter; a `y` question takes `y` and nothing else — in particular
+ * not Enter, which is what a hand does before the eyes have caught up.
+ */
+function confirm(controller: DashboardController, state: DashboardState, input: string, key: TuiKey): void {
+  if (key.escape === true) return controller.closeConfirm();
+  if (key.ctrl === true || key.meta === true) {
+    if (key.ctrl === true && input === "c") controller.quit();
+    return;
+  }
+  if (state.confirm?.expect === undefined) {
+    if (input === "y") return controller.confirmYes();
+    if (input === "n" || input === "q") return controller.closeConfirm();
+    return;
+  }
+  if (key.return === true) return controller.confirmAccept();
+  if (key.backspace === true || key.delete === true) return controller.confirmBackspace();
+  if (isPrintable(input)) controller.confirmType(input);
+}
+
+function report(controller: DashboardController, state: DashboardState, input: string, key: TuiKey): void {
+  const height = state.viewport;
+  if (key.upArrow === true || input === "k") return controller.reportScroll(-1);
+  if (key.downArrow === true || input === "j") return controller.reportScroll(1);
+  if (key.pageUp === true) return controller.reportScroll(-page(height));
+  if (key.pageDown === true) return controller.reportScroll(page(height));
+  if (key.home === true || input === "g") return controller.reportTop();
+  if (key.end === true || input === "G") return controller.reportBottom();
+  if (key.return === true || key.escape === true || input === "q") return controller.dismissReport();
+  if (key.ctrl === true || key.meta === true) {
+    if (key.ctrl === true && input === "c") controller.quit();
+    return;
+  }
+  if (input === "?") return controller.toggleHelp();
+  // What the report itself offers: restart the stale apps, force, discard.
+  if (isPrintable(input)) void controller.reportAct(input);
 }
 
 function logs(

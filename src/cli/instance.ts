@@ -21,7 +21,6 @@ import {
   instanceNameProblem,
   loadWorkspaceFrom,
   resolveTargetStrings,
-  splitQualified,
   type NormalizedApp,
   type NormalizedWorkspace,
 } from "../config/index.js";
@@ -31,11 +30,19 @@ import { U8Error } from "../util/errors.js";
 import { requireRegistered, scopeOf, withAttached, type CliContext, type Scope } from "./context.js";
 import { EXIT_FAILURE } from "./errors.js";
 import { renderTable } from "./format.js";
+import {
+  addressesOf,
+  checkoutOutcomes,
+  failureTailTitle,
+  nameForWorktree,
+  readFailureTails,
+  rewiredApps,
+  rewiredMessage,
+  typed,
+  urlsOf,
+} from "./instance-report.js";
 import { writeLine, writeLines, type OutputStream } from "./io.js";
 import { followRun, warnAboutBase } from "./tasks.js";
-
-/** Lines of a failing target's log shown without being asked. */
-const FAILURE_TAIL_LINES = 30;
 
 // ---------------------------------------------------------------------------
 // instance list
@@ -222,35 +229,16 @@ function editedInstance(scope: Scope, action: string): string {
   );
 }
 
-/** `api platform.shell`, the way they would be typed: ids as the config spells them. */
-function typed(snapshot: Snapshot, ids: readonly string[]): string {
-  const apps = new Map(snapshot.repos.flatMap((r) => r.apps).map((a) => [a.id, a.baseId]));
-  return ids.map((id) => apps.get(id) ?? splitQualified(id).name).join(" ");
-}
-
 /**
- * Names the running apps a membership change left on their old wiring.
- *
- * What an app points at — a dependency, another app's port in its `env` — is
- * decided by who else is in the instance, so adding or removing one rewires
- * the rest. Running processes are never touched; they go `stale`, and this is
- * the line that says a restart is what makes the change real for them.
+ * Names the running apps a membership change left on their old wiring, and the
+ * restart that makes the change real for them.
  */
 function printRewired(ctx: CliContext, before: Snapshot, after: Snapshot, instanceName: string): void {
-  const own = new Set(after.instances.find((i) => i.name === instanceName)?.appIds ?? []);
-  const already = new Set(before.services.filter((s) => s.stale).map((s) => s.targetId));
-  const stale = after.services
-    .filter((s) => s.stale && own.has(s.targetId) && !already.has(s.targetId))
-    .map((s) => s.targetId);
+  const stale = rewiredApps(before, after, instanceName);
   if (stale.length === 0) return;
-  const one = stale.length === 1;
   writeLine(
     ctx.io.stderr,
-    ctx.style.yellow(
-      `${stale.join(", ")} ${one ? "is" : "are"} now stale: ${one ? "it is" : "they are"} still running with what ` +
-        `${one ? "it" : "they"} pointed at before this change — restart to pick it up: ` +
-        `u8 -i ${instanceName} restart ${typed(after, stale)}`,
-    ),
+    ctx.style.yellow(rewiredMessage(stale, `u8 -i ${instanceName} restart ${typed(after, stale)}`)),
   );
 }
 
@@ -363,40 +351,30 @@ export async function instanceRemoveCommand(
 }
 
 /**
- * What became of the checkouts a removal left without apps. Kept is the
- * default and easy to miss — the directory is still there, still the
- * instance's — so it is said, with the two ways on from it.
+ * What became of the checkouts a removal left without apps — and, for one that
+ * was kept, the two ways on from it.
  */
 function printCheckouts(ctx: CliContext, before: Snapshot, after: Snapshot, instanceName: string, pruning: boolean): void {
-  const was = before.instances.find((i) => i.name === instanceName);
-  const now = after.instances.find((i) => i.name === instanceName);
-  if (!was || !now) return;
-  const inUse = (snapshot: Snapshot, repo: string): boolean => snapshot.repos.some((r) => r.name === repo && r.apps.length > 0);
-  const stillHeld = new Set(Object.values(now.checkouts).map((c) => c.worktree));
-
-  // One worktree can be several repos' checkout, and is reported once.
-  const said = new Set<string>();
-  const say = (stream: OutputStream, line: string): void => {
-    if (said.has(line)) return;
-    said.add(line);
-    writeLine(stream, line);
-  };
-  for (const [repo, checkout] of Object.entries(was.checkouts)) {
-    const repoName = splitQualified(repo).name;
-    if (now.checkouts[repo] !== undefined) {
-      if (!inUse(before, repo) || inUse(after, repo)) continue;
-      // Asked to go and still here: the run's own failure says why.
-      const next = pruning
-        ? ""
-        : ` — bring it back with: u8 -i ${instanceName} instance add ${repoName}; ` +
-          `give it up with: u8 -i ${instanceName} instance remove ${repoName} --prune`;
-      say(ctx.io.stderr, ctx.style.dim(`kept the checkout of ${repoName} at ${checkout.path}${next}`));
-    } else if (!checkout.owned) {
-      say(ctx.io.stdout, `forgot the checkout at ${checkout.path} ${ctx.style.dim("(adopted — the directory was not touched)")}`);
-    } else if (checkout.worktree !== undefined && stillHeld.has(checkout.worktree)) {
-      say(ctx.io.stderr, ctx.style.dim(`the worktree at ${checkout.worktree} stays: the instance's other apps still run from it`));
-    } else {
-      say(ctx.io.stdout, `removed the worktree at ${checkout.worktree ?? checkout.path}`);
+  for (const outcome of checkoutOutcomes(before, after, instanceName)) {
+    switch (outcome.kind) {
+      case "kept": {
+        // Asked to go and still here: the run's own failure says why.
+        const next = pruning
+          ? ""
+          : ` — bring it back with: u8 -i ${instanceName} instance add ${outcome.repo}; ` +
+            `give it up with: u8 -i ${instanceName} instance remove ${outcome.repo} --prune`;
+        writeLine(ctx.io.stderr, ctx.style.dim(`${outcome.text}${next}`));
+        break;
+      }
+      case "forgotten":
+        writeLine(ctx.io.stdout, `${outcome.text} ${ctx.style.dim(outcome.note ?? "")}`);
+        break;
+      case "shared":
+        writeLine(ctx.io.stderr, ctx.style.dim(outcome.text));
+        break;
+      case "removed":
+        writeLine(ctx.io.stdout, outcome.text);
+        break;
     }
   }
 }
@@ -484,52 +462,13 @@ async function runStep(
   return code;
 }
 
-/**
- * A name for a worktree nobody named: its directory, made to fit. Suffixed
- * when that is taken, because two tools can both call their worktree `fix`.
- */
-export function nameForWorktree(dir: string, snapshot: Snapshot): string {
-  const cleaned = path
-    .basename(dir)
-    .replace(/[^A-Za-z0-9_-]+/g, "-")
-    .replace(/^[^A-Za-z0-9]+/, "")
-    .replace(/-+$/, "");
-  const stem = cleaned.length === 0 || cleaned === BASE_INSTANCE ? "worktree" : cleaned;
-  const taken = new Set(snapshot.instances.map((i) => i.name));
-  if (!taken.has(stem)) return stem;
-  for (let n = 2; ; n++) if (!taken.has(`${stem}-${n}`)) return `${stem}-${n}`;
-}
-
-/**
- * The end of each failed target's output.
- *
- * A start that fails leaves its reason in the service log, an init step in the
- * run log; which one is asked for is decided by the command, the same way the
- * `u8 logs` hint is. Both are tried for a service run, since a target can fail
- * before its process ever existed.
- */
+/** The end of each failed target's output, so nothing has to be looked up. */
 async function printFailureTails(ctx: CliContext, attached: AttachedClient, result: TaskResult): Promise<void> {
-  const service = result.command.startsWith("app:");
-  for (const target of result.targets) {
-    if (target.state !== "failed" && target.state !== "aborted") continue;
-    const read = async (runId: string | undefined): Promise<string[]> => {
-      try {
-        const { lines } = await attached.client.request("logs.read", {
-          targetId: target.targetId,
-          lines: FAILURE_TAIL_LINES,
-          runId,
-        });
-        return lines.map((l) => l.text);
-      } catch {
-        return [];
-      }
-    };
-    let lines = await read(service ? undefined : result.runId);
-    if (lines.length === 0 && service) lines = await read(result.runId);
-    if (lines.length === 0) continue;
+  const tails = await readFailureTails((params) => attached.client.request("logs.read", params), result);
+  for (const tail of tails) {
     writeLine(ctx.io.stderr);
-    writeLine(ctx.io.stderr, ctx.style.dim(`── ${target.targetId}: last ${lines.length} line${lines.length === 1 ? "" : "s"} ──`));
-    for (const line of lines) writeLine(ctx.io.stderr, line);
+    writeLine(ctx.io.stderr, ctx.style.dim(failureTailTitle(tail)));
+    for (const line of tail.lines) writeLine(ctx.io.stderr, line);
   }
 }
 
@@ -537,23 +476,9 @@ async function printFailureTails(ctx: CliContext, attached: AttachedClient, resu
 // ports / env / exec — answered from the config, no daemon needed
 // ---------------------------------------------------------------------------
 
-function urlsOf(ports: Record<string, number>): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(ports)
-      .filter(([, port]) => port > 0)
-      .map(([name, port]) => [name, `http://localhost:${port}`]),
-  );
-}
-
 /** The addresses of an instance's apps — all of them, or just the ones in `only`. */
 function printAddresses(ctx: CliContext, snapshot: Snapshot, instanceName: string, only?: readonly string[]): void {
-  const instance = snapshot.instances.find((i) => i.name === instanceName);
-  if (!instance) return;
-  const own = new Set(only === undefined ? instance.appIds : instance.appIds.filter((id) => only.includes(id)));
-  const rows = snapshot.repos
-    .flatMap((r) => r.apps)
-    .filter((a) => own.has(a.id))
-    .flatMap((a) => Object.entries(urlsOf(a.ports)).map(([name, url]) => [a.id, ctx.style.dim(name), url]));
+  const rows = addressesOf(snapshot, instanceName, only).map((a) => [a.id, ctx.style.dim(a.port), a.url]);
   if (rows.length === 0) return;
   writeLine(ctx.io.stdout);
   writeLines(ctx.io.stdout, renderTable(rows));

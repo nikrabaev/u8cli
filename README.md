@@ -254,8 +254,8 @@ Three things u8 cannot do for you:
 ## The dashboard
 
 `u8` with no arguments is the interactive front end: the active profile's repos and apps as
-template-rendered rows, refreshed from the daemon's push stream, with a log view and a command
-palette.
+template-rendered rows, refreshed from the daemon's push stream, with a log view, a command palette
+and everything `u8 instance …` does.
 
 | Key | Action |
 | --- | --- |
@@ -266,6 +266,11 @@ palette.
 | `Enter` | Log view for the selection (follow + scrollback); `Esc` or `q` goes back |
 | `:` or `p` | Command palette — run any defined command on the selection or the profile |
 | `P` | Profile switcher |
+| `i` | Instance menu: what can be done with the instance under the cursor |
+| `Tab` / `Shift-Tab` | Jump to the next / previous instance section |
+| `←` `→` or `h` `l` | Collapse / expand the section under the cursor |
+| `z` | Collapse every section into one line per instance; again expands them all |
+| `f` | Focus: show only the instance under the cursor; again shows them all |
 | `?` | Toggle the key help |
 | `q` | Quit. The daemon and every service keep running |
 
@@ -273,13 +278,73 @@ Inside the log view the same navigation keys scroll the buffer. In the palette, 
 `↑`/`↓` (or `Ctrl-N`/`Ctrl-P`) to move, `Tab` to switch between running on the selection and on the
 whole profile, `Enter` to run, `Esc` to close.
 
-Once the workspace has more than the base instance, the list is sectioned: base (its active
-profile) first, then each instance under a heading with its own running count. A key that means
-"everything" acts on the section the cursor is in, and opening `u8` inside an instance's worktree
-lands on that instance.
-
 Everything the dashboard does is also a headless command, and both read the same indicator cache, so
 they can never disagree about a target's state.
+
+### Instances in the dashboard
+
+Once the workspace has more than the base instance, the list is sectioned: base (its active
+profile) first, then each instance under a heading. A key that means "everything" acts on the
+section the cursor is in, and opening `u8` inside an instance's worktree lands on that instance.
+
+A heading says what is worth knowing without opening anything, and nothing when nothing is wrong:
+
+```text
+u8 u8-demo · profile full · 4 instances · 9/11 running · daemon 0.1.0
+  ▸ base · profile full  4/4 running
+❯ ▾ feat-x  2/2 running · 1 stale · api@base is down
+  platform             platform feat-x
+    ● shell            healthy   4m    3200
+    ● auth-mfe         healthy   12s   3201
+  ▸ agent-2  3/3 running
+  ▸ agent-3  0/2 running · … instance:init · not initialised
+```
+
+After the running count come, when they apply: the run in flight on the instance, *not initialised*,
+how many of its running apps are `stale`, and any app of base it depends on that is not running.
+`z` folds every section into its heading — the view for ten instances at once, in which an instance
+somebody else creates arrives folded too — and `f` narrows the list to one.
+
+`i` opens the menu for the instance the cursor is in. Each entry also answers to its letter, so
+`i u` is "up":
+
+| Entry | What it does |
+| --- | --- |
+| `v` details | Each checkout (path, branch, created by u8 or adopted, kept with no apps, uncommitted changes when the `git` plugin reports them), each app with its ports and URLs, and what the instance uses from base and whether that is running |
+| `u` up | `u8 up`: run the init steps if they have not succeeded, start, and wait until every app is ready |
+| `i` init | Run the init steps again |
+| `a` add apps… | Choose from the apps it does not run yet; optionally a branch for a worktree that has to be created |
+| `d` remove apps… | Starts from the row under the cursor. Asks what becomes of a checkout left with no apps: keep it (preselected) or give it up |
+| `c` give up a kept checkout… | Shown while an earlier remove has left one behind. Nothing is ticked for you |
+| `D` destroy… | Lists what it removes, then asks for the instance's name |
+| `n` new instance… | Name, branch, start point, and which apps |
+| `w` new instance from this worktree… | Shown when `u8` was opened in a git worktree that has no instance yet: adopts it as it is, then inits and starts it, as `u8 up` would there |
+| `o` last result | Re-opens the last result that was dismissed |
+
+Base's menu has `details`, `up`, `init` and `new instance…` and nothing else: what base runs is what
+`u8.jsonc` declares, and nothing in the dashboard adds to it, takes from it or destroys it.
+
+An action draws its run on the rows it touches, like any other, and ends with a result that takes
+the screen until it is dismissed: what was done, the addresses of what was added, which running
+apps went `stale` (with `r` to restart them there and then), a warning when the instance now leans
+on an app of base that is not running — and, when something failed, the reason and the end of the
+failing log. A result that arrives while a log view or a form is open waits behind it.
+
+Nothing destructive happens on one key:
+
+- A refusal from the daemon — the last app of an instance, an instance still busy with an earlier
+  change, a name that is taken — is shown as the daemon worded it, and a form keeps what was typed.
+- **Removing** an app keeps its checkout unless *give it up* is chosen, and giving up a worktree u8
+  created only works when git reports it clean.
+- **Discarding** uncommitted work is never a choice up front. It is offered only after the daemon
+  has refused to give up a checkout and listed what is in it, and it takes typing the instance's name.
+- **Destroying** an instance takes typing its name, under the list of worktrees it will remove.
+- **Forcing** past a failed teardown step is offered only on the result that reports the failure:
+  `y` for a removal, the instance's name for a destroy — and for a removal that would also discard
+  uncommitted work. Enter alone never answers a `y` question.
+
+A dashboard opened in a git worktree that has no instance yet shows base, says so in a banner, and
+offers `i` `w`.
 
 The dashboard needs a real terminal on both ends. Piped, redirected, in CI, or with `U8_NO_TUI` set,
 a bare `u8` prints the status view instead and says so on stderr.
