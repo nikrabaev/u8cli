@@ -66,6 +66,7 @@ consumer and update the tests that pin the behaviour.
 
 - ✅ **Always:** dispose what you create — every timer, watcher, subscription, child process and file handle needs an owner; `unref()` timers that must not hold the event loop open.
 - ✅ **Always:** verify a supervisor change by asserting no orphaned processes survive (`pgrep -f`), not just that tests pass.
+- ✅ **Always:** re-record the README's dashboard recording (`pnpm record`; needs `vhs` and `gifsicle`) when a change alters what the dashboard draws, and keep the `alt` text beside it in step with `docs/assets/dashboard.tape`.
 - ⚠️ **Ask first:** editing a frozen contract; adding a dependency; changing the on-disk log format or the state-dir layout; anything that changes `--json` output shape.
 - 🚫 **Never:** commit secrets.
 - 🚫 **Never:** resolve `app:stop` through `commandTargets` — a `null` there means "signal the process group", not "skip". Use `coreStopScript` in `src/config/resolve.ts`.
