@@ -105,6 +105,36 @@ export function coreIndicators(deps: CoreIndicatorDeps): IndicatorRegistration[]
       update: { mode: "static" },
       value: (ctx) => ctx.cwd,
     }),
+    reg("instance", {
+      scope: "app",
+      description: "Instance this copy of the app runs in",
+      update: { mode: "static" },
+      value: (ctx) => ctx.target?.instance ?? "",
+    }),
+    reg("port", {
+      scope: "app",
+      description: "The app's first declared port, as this instance has it",
+      update: { mode: "static" },
+      value: (ctx) => primaryPort(ctx),
+    }),
+    reg("ports", {
+      scope: "app",
+      description: "Every declared port, as name:number",
+      update: { mode: "static" },
+      value: (ctx) =>
+        Object.entries(ctx.target?.ports ?? {})
+          .map(([name, port]) => `${name}:${port}`)
+          .join(" "),
+    }),
+    reg("url", {
+      scope: "app",
+      description: "http://localhost on the app's first declared port",
+      update: { mode: "static" },
+      value: (ctx) => {
+        const port = primaryPort(ctx);
+        return port === "" ? "" : `http://localhost:${port}`;
+      },
+    }),
     reg("status", {
       scope: "app",
       description: "Service lifecycle state",
@@ -133,9 +163,17 @@ export function coreIndicators(deps: CoreIndicatorDeps): IndicatorRegistration[]
     // --- repo scope: the header row -----------------------------------------
     repoReg("name", {
       scope: "repo",
-      description: "Repo name",
+      // The name the config gives it: which instance a row belongs to is said
+      // by `{repo@instance}` and by where the row is listed, not by a suffix.
+      description: "Repo name, as the config spells it",
       update: { mode: "static" },
-      value: (ctx) => ctx.repo.name,
+      value: (ctx) => ctx.repo.baseName,
+    }),
+    repoReg("instance", {
+      scope: "repo",
+      description: "Instance this checkout belongs to",
+      update: { mode: "static" },
+      value: (ctx) => ctx.repo.instance,
     }),
     repoReg("dirname", {
       scope: "repo",
@@ -176,6 +214,12 @@ function repoStates(deps: CoreIndicatorDeps, repoName: string): ServiceState[] {
     if (state) out.push(state);
   }
   return out;
+}
+
+/** An unallocated port is `0`, which is no more worth showing than no port at all. */
+function primaryPort(ctx: IndicatorContext): string {
+  const port = Object.values(ctx.target?.ports ?? {})[0];
+  return port === undefined || port === 0 ? "" : String(port);
 }
 
 function pidValue(state: ServiceState | undefined): string {

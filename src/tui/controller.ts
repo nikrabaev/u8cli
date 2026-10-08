@@ -21,7 +21,7 @@
  *    respawns) underneath; the controller only tracks which of the three
  *    connection states to draw and re-applies whatever snapshot comes back.
  */
-import type { TargetId } from "../config/types.js";
+import { BASE_INSTANCE, type TargetId } from "../config/types.js";
 import type {
   IndicatorValue,
   LogLine,
@@ -34,7 +34,7 @@ import type {
 import { errorMessage } from "../util/errors.js";
 import { dispatchKey } from "./keymap.js";
 import { appendLogLines, logViewBottom, logViewTop, scrollLogView } from "./logs.js";
-import { buildRows, indicatorKey, type DashboardRow } from "./rows.js";
+import { buildRows, indicatorKey, sectionRowId, type DashboardRow, type RowSection } from "./rows.js";
 import { clamp, windowTopFor } from "./scroll.js";
 import type {
   ConnectionState,
@@ -84,6 +84,12 @@ const defaultScheduler: Scheduler = (fn, ms) => {
 
 export interface ControllerOptions {
   client: DashboardClient;
+  /**
+   * The instance the dashboard was opened for; the cursor starts on its
+   * section. Everything is still listed — the dashboard is the one place every
+   * instance is visible at once — this only decides where you land.
+   */
+  instance?: string;
   /** The TUI owns a terminal, so this defaults to true. */
   color?: boolean;
   /** Minimum gap between push-driven re-renders. */
@@ -173,7 +179,8 @@ export function createController(opts: ControllerOptions): DashboardController {
   let rows: DashboardRow[] = [];
   let cursor = 0;
   /** Sticky selection across rebuilds: the row id, not its index. */
-  let selectedId: string | undefined;
+  let selectedId: string | undefined =
+    opts.instance === undefined || opts.instance === BASE_INSTANCE ? undefined : sectionRowId(opts.instance);
   let viewport = INITIAL_VIEWPORT;
   let logViewport = INITIAL_VIEWPORT;
   let windowTop = 0;
@@ -204,6 +211,51 @@ export function createController(opts: ControllerOptions): DashboardController {
   const scopeTargets = (scope: ActionScope): TargetId[] | undefined =>
     scope === "profile" ? undefined : [...selectionTargets()];
 
+  /**
+   * The instance a key acts in: the one the cursor is on. "The whole profile"
+   * said from inside an instance's section means that whole instance — never
+   * base, and never somebody else's copy.
+   */
+  const currentInstance = (): string => currentRow()?.instance ?? BASE_INSTANCE;
+
+  /** `profile full` in base, `instance feat-x` anywhere else. */
+  const scopeName = (): string => {
+    const instance = currentInstance();
+    return instance === BASE_INSTANCE ? `profile ${activeProfile().name}` : `instance ${instance}`;
+  };
+
+  /** Every app "the whole profile" covers where the cursor is. */
+  const scopeAppIds = (): TargetId[] => {
+    const instance = currentInstance();
+    if (instance === BASE_INSTANCE) return activeProfile().appIds;
+    return snapshot.instances.find((i) => i.name === instance)?.appIds ?? [];
+  };
+
+  /** Base's profile, then every other instance: the blocks the list is made of. */
+  const sections = (): RowSection[] => {
+    const running = (ids: readonly TargetId[]): number =>
+      ids.filter((id) => services.get(id)?.status === "running").length;
+    const profile = activeProfile();
+    const out: RowSection[] = [
+      {
+        instance: BASE_INSTANCE,
+        appIds: profile.appIds,
+        running: running(profile.appIds),
+        note: `profile ${profile.name}`,
+      },
+    ];
+    for (const instance of snapshot.instances) {
+      if (instance.isBase) continue;
+      out.push({
+        instance: instance.name,
+        appIds: instance.appIds,
+        running: running(instance.appIds),
+        note: instance.initialized ? undefined : "not initialised",
+      });
+    }
+    return out;
+  };
+
   const applySnapshot = (next: Snapshot): void => {
     snapshot = next;
     indicators.clear();
@@ -223,11 +275,10 @@ export function createController(opts: ControllerOptions): DashboardController {
   };
 
   const rebuildRows = (): void => {
-    const profile = activeProfile();
     rows = buildRows({
       repos: snapshot.repos,
       templates: snapshot.templates,
-      profile,
+      sections: sections(),
       indicators: [...indicators.values()],
       color,
     });
@@ -239,7 +290,8 @@ export function createController(opts: ControllerOptions): DashboardController {
 
   const buildState = (): DashboardState => {
     const profile = activeProfile();
-    const selected = new Set(profile.appIds);
+    // Everything listed, across instances: the header counts what is on screen.
+    const selected = new Set(sections().flatMap((section) => section.appIds));
     let running = 0;
     for (const service of services.values()) {
       if (selected.has(service.targetId) && service.status === "running") running += 1;
@@ -271,7 +323,8 @@ export function createController(opts: ControllerOptions): DashboardController {
       viewport,
       logViewport,
       running,
-      total: profile.appIds.length,
+      total: selected.size,
+      instances: snapshot.instances.length,
       configError,
       pluginErrors: [...pluginErrors].map(([plugin, error]) => ({ plugin, error })),
       notice,
@@ -422,13 +475,14 @@ export function createController(opts: ControllerOptions): DashboardController {
       return;
     }
     summary = undefined;
-    const label = targets === undefined ? `profile ${activeProfile().name}` : describeTargets(targets);
+    const instance = currentInstance();
+    const label = targets === undefined ? scopeName() : describeTargets(targets);
     setNotice(`${LIFECYCLE_VERB[kind]} ${label}`);
     emit(true);
     try {
-      if (kind === "start") await client.request("service.start", { targets });
-      else if (kind === "stop") await client.request("service.stop", { targets });
-      else await client.request("service.restart", { targets });
+      if (kind === "start") await client.request("service.start", { targets, instance });
+      else if (kind === "stop") await client.request("service.stop", { targets, instance });
+      else await client.request("service.restart", { targets, instance });
     } catch (err) {
       fail(err);
     }
@@ -505,9 +559,7 @@ export function createController(opts: ControllerOptions): DashboardController {
   const refreshPalette = (): void => {
     const open = palette;
     if (open === undefined) return;
-    const inScope = new Set<TargetId>(
-      open.scope === "profile" ? activeProfile().appIds : selectionTargets(),
-    );
+    const inScope = new Set<TargetId>(open.scope === "profile" ? scopeAppIds() : selectionTargets());
     const query = open.query.trim().toLowerCase();
     // Name matches rank above description matches: one letter of a query would
     // otherwise pull in every command whose sentence happens to contain it.
@@ -529,10 +581,7 @@ export function createController(opts: ControllerOptions): DashboardController {
     const items = [...named, ...described];
     open.items = items;
     open.index = clamp(open.index, 0, Math.max(0, items.length - 1));
-    open.scopeLabel =
-      open.scope === "profile"
-        ? `profile ${activeProfile().name}`
-        : describeTargets(selectionTargets());
+    open.scopeLabel = open.scope === "profile" ? scopeName() : describeTargets(selectionTargets());
   };
 
   const openPalette = (): void => {
@@ -560,13 +609,14 @@ export function createController(opts: ControllerOptions): DashboardController {
     const item = open?.items[open.index];
     if (open === undefined || item === undefined) return;
     const targets = open.scope === "profile" ? undefined : [...selectionTargets()];
-    const label = open.scope === "profile" ? `profile ${activeProfile().name}` : describeTargets(targets ?? []);
+    const instance = currentInstance();
+    const label = open.scope === "profile" ? scopeName() : describeTargets(targets ?? []);
     closePalette();
     summary = undefined;
     setNotice(`running ${item.name} on ${label}`);
     emit(true);
     try {
-      await client.request("command.run", { command: item.name, targets });
+      await client.request("command.run", { command: item.name, targets, instance });
     } catch (err) {
       fail(err);
     }

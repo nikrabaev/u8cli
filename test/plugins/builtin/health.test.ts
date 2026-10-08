@@ -194,12 +194,15 @@ function targetOf(ws: NormalizedWorkspace, id: string): TargetInfo {
   if (!app) throw new Error(`no app "${id}"`);
   return {
     id: app.id,
+    baseId: app.baseId,
+    instance: app.instance,
     repoName: app.repoName,
     name: app.name,
     implicit: app.implicit,
     cwd: app.cwd,
     scripts: { ...app.scripts },
     env: { ...app.env },
+    ports: { ...app.ports },
     dependsOn: [...app.dependsOn],
     hasHealth: app.health !== undefined,
   };
@@ -219,7 +222,7 @@ function indicatorCtx(fx: Fixture, service?: ServiceState): IndicatorContext {
   return {
     ...baseCtx(fx),
     scope: "app",
-    repo: { name: "api", path: fx.root },
+    repo: { name: "api", baseName: "api", instance: "base", path: fx.root },
     target: fx.target,
     cwd: fx.target.cwd,
     service,
@@ -236,7 +239,7 @@ function hookCtx(fx: Fixture, command: string, ok = true): HookContext {
     command,
     phase: "post",
     runId: "run-1",
-    repo: { name: "api", path: fx.root },
+    repo: { name: "api", baseName: "api", instance: "base", path: fx.root },
     target: fx.target,
     cwd: fx.target.cwd,
     result: { ok, exitCode: ok ? 0 : 1, durationMs: 1 },

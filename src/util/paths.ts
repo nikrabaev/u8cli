@@ -44,6 +44,10 @@ export interface StatePaths {
   pidFile: string;
   daemonLog: string;
   stateFile: string;
+  /** The instances this machine has created for the workspace, and their ports. */
+  instancesFile: string;
+  /** Which config this state dir belongs to, and where its repos are checked out. */
+  workspaceFile: string;
   serviceLogDir: string;
   taskLogDir: string;
 }
@@ -58,6 +62,8 @@ export function statePaths(realConfigPath: string): StatePaths {
     pidFile: path.join(dir, "daemon.pid"),
     daemonLog: path.join(dir, "daemon.log"),
     stateFile: path.join(dir, "state.json"),
+    instancesFile: path.join(dir, "instances.json"),
+    workspaceFile: path.join(dir, "workspace.json"),
     serviceLogDir: path.join(dir, "logs", "services"),
     taskLogDir: path.join(dir, "logs", "tasks"),
   };

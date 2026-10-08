@@ -9,6 +9,9 @@
     // paragraph to satisfy a column limit makes every later edit a wide diff.
     "MD013": false,
     // Table pipe padding is left to the author; content alignment is what matters.
-    "MD060": false
+    "MD060": false,
+    // A changelog repeats "Added" / "Changed" / "Fixed" under every version by
+    // design; only the same heading twice under one parent is a mistake.
+    "MD024": { "siblings_only": true }
   }
 }

@@ -205,6 +205,8 @@ export interface DashboardState {
   logViewport: number;
   running: number;
   total: number;
+  /** How many instances the workspace has, base included. */
+  instances: number;
   /** Set while the daemon is running its last-good config (SPEC §8). */
   configError?: string;
   pluginErrors: PluginFailure[];

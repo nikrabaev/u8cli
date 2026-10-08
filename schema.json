@@ -18,6 +18,16 @@
         "type": "string"
       }
     },
+    "vars": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
     "templates": {
       "type": "object",
       "properties": {
@@ -144,6 +154,36 @@
       },
       "additionalProperties": false
     },
+    "instances": {
+      "type": "object",
+      "properties": {
+        "dir": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ports": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "to": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "indicators": {
       "type": "object",
       "propertyNames": {
@@ -189,6 +229,61 @@
             "type": "string",
             "minLength": 1
           },
+          "ports": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+            },
+            "additionalProperties": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          },
+          "instance": {
+            "type": "object",
+            "properties": {
+              "copy": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "init": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                ]
+              },
+              "teardown": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
           "template": {
             "type": "string"
           },
@@ -197,6 +292,16 @@
             "propertyNames": {
               "type": "string",
               "minLength": 1
+            },
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "vars": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
             },
             "additionalProperties": {
               "type": "string"
@@ -278,6 +383,54 @@
                   "type": "string",
                   "minLength": 1
                 },
+                "ports": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
+                  },
+                  "additionalProperties": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535
+                  }
+                },
+                "instance": {
+                  "type": "object",
+                  "properties": {
+                    "init": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        }
+                      ]
+                    },
+                    "teardown": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  "additionalProperties": false
+                },
                 "template": {
                   "type": "string"
                 },
@@ -286,6 +439,16 @@
                   "propertyNames": {
                     "type": "string",
                     "minLength": 1
+                  },
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                },
+                "vars": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"
                   },
                   "additionalProperties": {
                     "type": "string"

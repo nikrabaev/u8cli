@@ -24,17 +24,27 @@
  */
 import { randomUUID } from "node:crypto";
 import { setMaxListeners } from "node:events";
+import { existsSync } from "node:fs";
+import { cp, mkdir } from "node:fs/promises";
+import path from "node:path";
 import {
   commandTargets,
   coreStartScript,
   coreStopScript,
+  BASE_INSTANCE,
   expandTarget,
   findApp,
   findCommand,
+  findInstance,
   findRepo,
+  instanceTargets,
   profileTargets,
+  qualify,
+  qualifyTarget,
   resolveTargetStrings,
+  splitQualified,
   topoWaves,
+  unknownTargetMessage,
   type NormalizedApp,
   type NormalizedCommand,
   type NormalizedRepo,
@@ -45,10 +55,14 @@ import type {
   BoundCommand,
   BoundHook,
   Engine,
+  LifecycleOptions,
+  LifecyclePhase,
   PluginHost,
   RunCommandOptions,
   RunHandle,
+  StartScope,
   Supervisor,
+  TargetScope,
   Unsubscribe,
   WorkspaceHolder,
 } from "../daemon/contracts.js";
@@ -62,6 +76,7 @@ import type {
 import type { CommandContext, HookContext, HookResult, TargetInfo } from "../plugin/types.js";
 import { exec, parseLogLine, pruneTaskRuns, readLastLines, taskRunLogPath } from "../process/index.js";
 import type { ExecOptions, ExecResult } from "../process/types.js";
+import { describeDirectory } from "../util/dirs.js";
 import { errorMessage, U8Error } from "../util/errors.js";
 import type { Logger } from "../util/logger.js";
 import type { StatePaths } from "../util/paths.js";
@@ -126,6 +141,10 @@ type Work = (sink: TargetSink) => Promise<WorkOutcome>;
 interface RunOptions {
   serial?: boolean;
   concurrency?: number;
+  /** The instance target strings are read from; base when absent. */
+  instance?: string;
+  /** Settle each started target on ready rather than on running. */
+  wait?: boolean;
 }
 
 type Gate =
@@ -510,24 +529,39 @@ export function createEngine(deps: EngineDeps): Engine {
    * them would let a stop resurrect what it is tearing down.
    */
   function orphanApp(ws: NormalizedWorkspace, id: TargetId): NormalizedApp {
-    const dot = id.indexOf(".");
+    // The id is all that is left of it, so its place in the workspace is read
+    // back out of the id: `platform.shell@feat-x`.
+    const { name: baseId, instance } = splitQualified(id);
+    const dot = baseId.indexOf(".");
     return {
       id,
-      repoName: dot === -1 ? id : id.slice(0, dot),
-      name: dot === -1 ? id : id.slice(dot + 1),
+      baseId,
+      instance,
+      repoName: qualify(dot === -1 ? baseId : baseId.slice(0, dot), instance),
+      name: dot === -1 ? baseId : baseId.slice(dot + 1),
       implicit: dot === -1,
       cwd: ws.rootDir,
       scripts: {},
       env: {},
+      ports: {},
       dependsOn: [],
       restart: "no",
       readyTimeoutMs: ws.limits.readyTimeoutMs,
       stopTimeoutMs: ws.limits.stopTimeoutMs,
+      lifecycle: { init: [], teardown: [] },
     };
   }
 
   function pipelineTarget(ws: NormalizedWorkspace, app: NormalizedApp, cwd?: string): PipelineTarget {
-    const repo = findRepo(ws, app.repoName) ?? { name: app.repoName, path: app.cwd, apps: [app] };
+    const repo: NormalizedRepo = findRepo(ws, app.repoName) ?? {
+      name: app.repoName,
+      baseName: splitQualified(app.repoName).name,
+      instance: app.instance,
+      path: app.cwd,
+      basePath: app.cwd,
+      lifecycle: { copy: [], init: [], teardown: [] },
+      apps: [app],
+    };
     return { id: app.id, app, repo, cwd: cwd ?? app.cwd };
   }
 
@@ -546,17 +580,38 @@ export function createEngine(deps: EngineDeps): Engine {
   // Target resolution
   // -------------------------------------------------------------------------
 
-  function selectedIds(ws: NormalizedWorkspace, targets: readonly string[] | undefined): TargetId[] {
-    if (!targets || targets.length === 0) return profileTargets(ws, deps.activeProfile());
-    return resolveTargetStrings(ws, targets);
+  /**
+   * What an untargeted command means: the active profile in base, and every app
+   * the instance runs anywhere else — an instance *is* its selection, so it has
+   * no profile of its own to consult.
+   */
+  function defaultIds(ws: NormalizedWorkspace, instance: string): TargetId[] {
+    return instance === BASE_INSTANCE ? profileTargets(ws, deps.activeProfile()) : instanceTargets(ws, instance);
   }
 
-  /** Targets the supervisor still owns a process for that the config has dropped. */
-  function orphanIds(ws: NormalizedWorkspace): TargetId[] {
+  function selectedIds(
+    ws: NormalizedWorkspace,
+    targets: readonly string[] | undefined,
+    instance: string = BASE_INSTANCE,
+  ): TargetId[] {
+    if (!targets || targets.length === 0) return defaultIds(ws, instance);
+    return resolveTargetStrings(ws, targets, instance);
+  }
+
+  /**
+   * Targets the supervisor still owns a process for that the config has dropped,
+   * as seen from `instance`. Base also answers for processes whose instance no
+   * longer exists at all: nothing else is left that could name them.
+   */
+  function orphanIds(ws: NormalizedWorkspace, instance: string): TargetId[] {
     return supervisor
       .states()
       .filter((s) => s.status !== "stopped" && findApp(ws, s.targetId) === undefined)
-      .map((s) => s.targetId);
+      .map((s) => s.targetId)
+      .filter((id) => {
+        const owner = splitQualified(id).instance;
+        return owner === instance || (instance === BASE_INSTANCE && findInstance(ws, owner) === undefined);
+      });
   }
 
   /**
@@ -570,11 +625,16 @@ export function createEngine(deps: EngineDeps): Engine {
    * until the daemon exits. Start and run stay strict on purpose: nothing in the
    * config says what they would run.
    */
-  function selectedStopIds(ws: NormalizedWorkspace, targets: readonly string[] | undefined): TargetId[] {
-    const orphans = orphanIds(ws);
+  function selectedStopIds(
+    ws: NormalizedWorkspace,
+    targets: readonly string[] | undefined,
+    instance: string = BASE_INSTANCE,
+  ): TargetId[] {
     if (targets === undefined || targets.length === 0) {
-      const selected = profileTargets(ws, deps.activeProfile());
-      for (const id of orphans) if (!selected.includes(id)) selected.push(id);
+      // An instance that is already gone from the config has no default
+      // selection left, and its processes are exactly what must still stop.
+      const selected = findInstance(ws, instance) === undefined ? [] : defaultIds(ws, instance);
+      for (const id of orphanIds(ws, instance)) if (!selected.includes(id)) selected.push(id);
       return selected;
     }
 
@@ -582,14 +642,21 @@ export function createEngine(deps: EngineDeps): Engine {
     for (const spec of targets) {
       // A repo name keeps covering the apps it used to have, including when
       // the repo itself survived the reload and only one of its apps did not.
+      // Matched in qualified form, so `platform` typed in an instance covers
+      // `platform.shell@feat-x` and never base's `platform.shell`.
+      const wanted = splitQualified(qualifyTarget(spec, instance));
       const ids = [
-        ...(expandTarget(ws, spec) ?? []),
-        ...orphans.filter((id) => id === spec || id.startsWith(`${spec}.`)),
+        ...(expandTarget(ws, spec, instance) ?? []),
+        ...orphanIds(ws, wanted.instance).filter((id) => {
+          const orphan = splitQualified(id);
+          return (
+            orphan.instance === wanted.instance &&
+            (orphan.name === wanted.name || orphan.name.startsWith(`${wanted.name}.`))
+          );
+        }),
       ];
       if (ids.length === 0) {
-        throw new U8Error("UNKNOWN_TARGET", `unknown target "${spec}" — expected a repo name or "repo.app"`, {
-          spec,
-        });
+        throw new U8Error("UNKNOWN_TARGET", unknownTargetMessage(ws, spec, instance), { spec, instance });
       }
       for (const id of ids) if (!out.includes(id)) out.push(id);
     }
@@ -852,6 +919,7 @@ export function createEngine(deps: EngineDeps): Engine {
     concurrency: number,
     blocked: Map<TargetId, string>,
     plan: StartPlan,
+    wait = false,
   ): Promise<void> {
     const ws = workspace.current();
     const hooks = hooksOf(ws, rec.command);
@@ -928,6 +996,21 @@ export function createEngine(deps: EngineDeps): Engine {
               const message = service.lastError ?? "service crashed during start";
               sink.note(message);
               return { state: "failed", exitCode: service.exitCode ?? null, error: message };
+            }
+            if (wait) {
+              const gate = await awaitDependencies(rec, [id]);
+              if (gate.kind !== "ready") {
+                // The process is left as it is: a service that is up but not
+                // yet healthy is something to read the log of, not to kill.
+                const message =
+                  gate.kind === "aborted"
+                    ? (rec.cancelReason ?? "run cancelled before it became ready")
+                    : gate.kind === "crashed"
+                      ? (supervisor.state(id).lastError ?? "service crashed before it became ready")
+                      : `started, but did not become ready within ${gate.timeoutMs}ms`;
+                sink.note(message);
+                return { state: "failed", exitCode: supervisor.state(id).exitCode ?? null, error: message };
+              }
             }
             return { state: "ok", exitCode: 0 };
           } catch (err) {
@@ -1015,15 +1098,264 @@ export function createEngine(deps: EngineDeps): Engine {
   }
 
   // -------------------------------------------------------------------------
+  // Instance lifecycle
+  // -------------------------------------------------------------------------
+
+  /**
+   * What a lifecycle step is told about where it runs. An app's own env is
+   * already whatever the config says; these are the facts no config value
+   * carries for a repo-level step, which has no app to borrow an env from.
+   */
+  function lifecycleEnv(ws: NormalizedWorkspace, repo: NormalizedRepo, app?: NormalizedApp): Record<string, string> {
+    // A repo that is its own app shares everything with it, env included.
+    const only = repo.apps.length === 1 ? repo.apps[0] : undefined;
+    const source = app ?? (only?.implicit === true ? only : undefined);
+    return {
+      ...targetEnv(source?.env ?? {}),
+      U8_INSTANCE: repo.instance,
+      U8_REPO: repo.baseName,
+      U8_REPO_PATH: repo.path,
+      U8_BASE_PATH: repo.basePath,
+      U8_WORKSPACE_ROOT: ws.rootDir,
+      ...(app === undefined ? {} : { U8_TARGET: app.id, U8_APP: app.name }),
+    };
+  }
+
+  /**
+   * Runs shell steps in order. `keepGoing` is for teardown: a step that fails
+   * to undo one thing must not be the reason the next thing is left behind, so
+   * every step runs and the first failure is what gets reported.
+   */
+  async function runSteps(
+    rec: RunRecord,
+    sink: TargetSink,
+    steps: readonly string[],
+    where: { cwd: string; env: Record<string, string>; stopTimeoutMs: number },
+    keepGoing: boolean,
+  ): Promise<WorkOutcome> {
+    let failure: WorkOutcome | undefined;
+    for (const step of steps) {
+      if (rec.controller.signal.aborted) break;
+      sink.note(`$ ${step}`);
+      const outcome = await runScript({
+        script: step,
+        cwd: where.cwd,
+        env: where.env,
+        signal: rec.controller.signal,
+        stopTimeoutMs: where.stopTimeoutMs,
+        logger: log,
+        onLine: (stream, text, ts) => {
+          sink.line(stream, text, ts);
+        },
+      });
+      if (outcome.ok) continue;
+      const message = `${describeExit(outcome)}: ${step}`;
+      sink.note(message);
+      failure ??= { state: "failed", exitCode: outcome.exitCode, error: message };
+      if (!keepGoing) break;
+    }
+    return failure ?? { state: "ok", exitCode: 0 };
+  }
+
+  /**
+   * Brings over what git does not carry into a new worktree. Nothing is ever
+   * overwritten: on a re-init the file in the checkout is the one somebody has
+   * been editing, and base's copy is not more correct than theirs.
+   */
+  async function copyFromBase(repo: NormalizedRepo, sink: TargetSink): Promise<WorkOutcome> {
+    if (repo.path === repo.basePath) return { state: "ok", exitCode: 0 };
+    for (const rel of repo.lifecycle.copy) {
+      const source = path.resolve(repo.basePath, rel);
+      const target = path.resolve(repo.path, rel);
+      if (!isWithin(source, repo.basePath) || !isWithin(target, repo.path)) {
+        const message = `copy "${rel}" points outside the repo`;
+        sink.note(message);
+        return { state: "failed", exitCode: null, error: message };
+      }
+      try {
+        if (!existsSync(source)) {
+          sink.note(`copy ${rel}: not in the base checkout, skipped`);
+          continue;
+        }
+        if (existsSync(target)) {
+          sink.note(`copy ${rel}: already here, kept`);
+          continue;
+        }
+        await mkdir(path.dirname(target), { recursive: true });
+        await cp(source, target, { recursive: true });
+        sink.note(`copy ${rel}`);
+      } catch (err) {
+        const message = `copy "${rel}" failed: ${errorMessage(err)}`;
+        sink.note(message);
+        return { state: "failed", exitCode: null, error: message };
+      }
+    }
+    return { state: "ok", exitCode: 0 };
+  }
+
+  /**
+   * A checkout that is already gone cannot host its own teardown, but what
+   * teardown undoes — a database, a compose project — is usually still there.
+   * The base checkout is the same code, and the env is still the instance's.
+   */
+  function teardownCwd(sink: TargetSink, dir: string, fallback: string): string {
+    if (describeDirectory(dir) === undefined) return dir;
+    sink.note(`${dir} is gone; running from ${fallback} instead`);
+    return fallback;
+  }
+
+  /** Stops what the instance runs without settling any target: teardown owns the results. */
+  async function stopForTeardown(ws: NormalizedWorkspace, ids: readonly TargetId[]): Promise<void> {
+    for (const wave of stopWaves(ws, ids)) {
+      await Promise.all(
+        wave.map(async (id) => {
+          try {
+            await supervisor.stop(id, { timeoutMs: findApp(ws, id)?.stopTimeoutMs ?? ws.limits.stopTimeoutMs });
+          } catch (err) {
+            log.warn(`stopping ${id} before teardown failed: ${errorMessage(err)}`);
+          }
+        }),
+      );
+    }
+  }
+
+  /**
+   * `instance:init` and `instance:teardown`.
+   *
+   * Repos run side by side; within one, order is the point. Init runs the
+   * repo's steps in the checkout root first — an install at the root is what
+   * every app's own step stands on — then each app's. Teardown is the mirror
+   * image. The repo's steps are reported on its first app: a run's rows are
+   * targets, and a repo is not one.
+   */
+  function runLifecycle(phase: LifecyclePhase, instanceName: string, opts: LifecycleOptions = {}): RunHandle {
+    const ws = workspace.current();
+    // An instance the workspace no longer knows — its record names nothing the
+    // config still has — runs no steps, but must still be destroyable: what is
+    // left of it is whatever the supervisor is running and what `finalize` does.
+    const ids = findInstance(ws, instanceName) ? instanceTargets(ws, instanceName) : [];
+    const command = `instance:${phase}`;
+    const rec = createRun(command, ids);
+    const hooks = hooksOf(ws, command);
+    const repos = ws.repos.filter((r) => r.instance === instanceName);
+
+    const initRepo = async (repo: NormalizedRepo): Promise<void> => {
+      const [first, ...rest] = repo.apps;
+      if (!first) return;
+      let repoReady = false;
+      await runPipeline(rec, pipelineTarget(ws, first), hooks, async (sink) => {
+        const copied = await copyFromBase(repo, sink);
+        if (copied.state !== "ok") return copied;
+        const where = { cwd: repo.path, env: lifecycleEnv(ws, repo), stopTimeoutMs: first.stopTimeoutMs };
+        const repoSteps = await runSteps(rec, sink, repo.lifecycle.init, where, false);
+        if (repoSteps.state !== "ok") return repoSteps;
+        repoReady = true;
+        return runSteps(
+          rec,
+          sink,
+          first.lifecycle.init,
+          { cwd: first.cwd, env: lifecycleEnv(ws, repo, first), stopTimeoutMs: first.stopTimeoutMs },
+          false,
+        );
+      });
+      for (const app of rest) {
+        if (!repoReady) {
+          finish(rec, app.id, "skipped", { error: `not initialised: the steps of "${repo.baseName}" did not complete` });
+          continue;
+        }
+        await runPipeline(rec, pipelineTarget(ws, app), hooks, (sink) =>
+          runSteps(
+            rec,
+            sink,
+            app.lifecycle.init,
+            { cwd: app.cwd, env: lifecycleEnv(ws, repo, app), stopTimeoutMs: app.stopTimeoutMs },
+            false,
+          ),
+        );
+      }
+    };
+
+    const teardownRepo = async (repo: NormalizedRepo): Promise<void> => {
+      const [first, ...rest] = repo.apps;
+      if (!first) return;
+      const appSteps = (app: NormalizedApp, sink: TargetSink): Promise<WorkOutcome> =>
+        runSteps(
+          rec,
+          sink,
+          app.lifecycle.teardown,
+          {
+            cwd: teardownCwd(sink, app.cwd, path.resolve(repo.basePath, path.relative(repo.path, app.cwd))),
+            env: lifecycleEnv(ws, repo, app),
+            stopTimeoutMs: app.stopTimeoutMs,
+          },
+          true,
+        );
+      for (const app of [...rest].reverse()) {
+        await runPipeline(rec, pipelineTarget(ws, app), hooks, (sink) => appSteps(app, sink));
+      }
+      await runPipeline(rec, pipelineTarget(ws, first), hooks, async (sink) => {
+        const own = await appSteps(first, sink);
+        const repoSteps = await runSteps(
+          rec,
+          sink,
+          repo.lifecycle.teardown,
+          {
+            cwd: teardownCwd(sink, repo.path, repo.basePath),
+            env: lifecycleEnv(ws, repo),
+            stopTimeoutMs: first.stopTimeoutMs,
+          },
+          true,
+        );
+        return own.state !== "ok" ? own : repoSteps;
+      });
+    };
+
+    return launch(rec, async () => {
+      if (opts.stopFirst === true) {
+        const running = [...ids];
+        for (const id of orphanIds(ws, instanceName)) if (!running.includes(id)) running.push(id);
+        await stopForTeardown(ws, running);
+      }
+
+      const each = phase === "init" ? initRepo : teardownRepo;
+      await runPool(
+        repos.map((repo) => () => each(repo)),
+        concurrencyFor(ws, undefined, {}),
+      );
+
+      if (opts.finalize === undefined) return;
+      const ok = ids.every((id) => {
+        const state = rec.results.get(id)?.state;
+        return state === "ok" || state === "skipped";
+      });
+      try {
+        await opts.finalize(ok);
+      } catch (err) {
+        // The steps' own verdicts stand where they failed; a target that had
+        // succeeded is failed here, because the run as a whole did not do
+        // what it was asked.
+        const message = errorMessage(err);
+        log.error(`finishing ${command} for "${instanceName}" failed: ${message}`);
+        for (const id of ids) {
+          const existing = rec.results.get(id);
+          if (existing && existing.state !== "ok" && existing.state !== "skipped") continue;
+          rec.results.set(id, { targetId: id, durationMs: existing?.durationMs ?? 0, state: "failed", error: message });
+          progress(rec, id, "failed", { error: message });
+        }
+      }
+    });
+  }
+
+  // -------------------------------------------------------------------------
   // Public surface
   // -------------------------------------------------------------------------
 
   function startRun(targets: string[] | undefined, opts: RunOptions): RunHandle {
     const ws = workspace.current();
-    const ids = selectedIds(ws, targets);
+    const ids = selectedIds(ws, targets, opts.instance);
     const rec = createRun("app:start", ids);
     const concurrency = concurrencyFor(ws, findCommand(ws, "app:start"), opts);
-    return launch(rec, () => startPass(rec, ids, concurrency, new Map(), coreStartPlan(ws)));
+    return launch(rec, () => startPass(rec, ids, concurrency, new Map(), coreStartPlan(ws), opts.wait));
   }
 
   /**
@@ -1037,12 +1369,12 @@ export function createEngine(deps: EngineDeps): Engine {
     const rec = createRun(cmd.name, ids);
     const concurrency = concurrencyFor(ws, cmd, opts);
     const plan = serviceCommandPlan(ws, cmd, ids);
-    return launch(rec, () => startPass(rec, ids, concurrency, new Map(), plan));
+    return launch(rec, () => startPass(rec, ids, concurrency, new Map(), plan, opts.wait));
   }
 
   function stopRun(targets: string[] | undefined, opts: RunOptions): RunHandle {
     const ws = workspace.current();
-    const ids = selectedStopIds(ws, targets);
+    const ids = selectedStopIds(ws, targets, opts.instance);
     const rec = createRun("app:stop", ids);
     const concurrency = concurrencyFor(ws, findCommand(ws, "app:stop"), opts);
     return launch(rec, () => stopPass(rec, ids, concurrency));
@@ -1050,19 +1382,24 @@ export function createEngine(deps: EngineDeps): Engine {
 
   function restartRun(targets: string[] | undefined, opts: RunOptions): RunHandle {
     const ws = workspace.current();
-    const ids = selectedIds(ws, targets);
+    const ids = selectedIds(ws, targets, opts.instance);
     const rec = createRun("app:restart", ids);
     const concurrency = concurrencyFor(ws, findCommand(ws, "app:restart"), opts);
     return launch(rec, async () => {
       const blocked = new Map<TargetId, string>();
       await restartStopPass(rec, ids, concurrency, blocked);
-      await startPass(rec, ids, concurrency, blocked, coreStartPlan(ws));
+      await startPass(rec, ids, concurrency, blocked, coreStartPlan(ws), opts.wait);
     });
   }
 
   return {
     runCommand(opts: RunCommandOptions): RunHandle {
-      const runOpts: RunOptions = { serial: opts.serial, concurrency: opts.concurrency };
+      const runOpts: RunOptions = {
+        serial: opts.serial,
+        concurrency: opts.concurrency,
+        instance: opts.instance,
+        wait: opts.wait,
+      };
       switch (opts.command) {
         case "app:start":
           return startRun(opts.targets, runOpts);
@@ -1075,7 +1412,7 @@ export function createEngine(deps: EngineDeps): Engine {
       }
 
       const ws = workspace.current();
-      const ids = selectedIds(ws, opts.targets);
+      const ids = selectedIds(ws, opts.targets, opts.instance);
 
       const plugin = plugins.commands().find((c) => c.name === opts.command);
       if (plugin) return runPluginCommand(plugin, ids, runOpts);
@@ -1091,17 +1428,19 @@ export function createEngine(deps: EngineDeps): Engine {
       return runConfigCommand(cmd, ids, runOpts);
     },
 
-    startTargets(targets?: string[]): RunHandle {
-      return startRun(targets, {});
+    startTargets(targets?: string[], scope: StartScope = {}): RunHandle {
+      return startRun(targets, scope);
     },
 
-    stopTargets(targets?: string[]): RunHandle {
-      return stopRun(targets, {});
+    stopTargets(targets?: string[], scope: TargetScope = {}): RunHandle {
+      return stopRun(targets, scope);
     },
 
-    restartTargets(targets?: string[]): RunHandle {
-      return restartRun(targets, {});
+    restartTargets(targets?: string[], scope: StartScope = {}): RunHandle {
+      return restartRun(targets, scope);
     },
+
+    runLifecycle,
 
     awaitRun(runId: string): Promise<TaskResult> {
       const rec = runs.get(runId);
@@ -1206,4 +1545,10 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
     }, ms);
     signal.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+/** True when `candidate` is `root` or somewhere beneath it. */
+function isWithin(candidate: string, root: string): boolean {
+  const rel = path.relative(root, candidate);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }

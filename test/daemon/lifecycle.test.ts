@@ -59,7 +59,7 @@ describe("cold start", () => {
     const pong = await client.request("daemon.ping", {});
 
     expect(pong.pong).toBe(true);
-    expect(pong.protocolVersion).toBe(2);
+    expect(pong.protocolVersion).toBe(3);
     expect(fs.existsSync(ws.paths.socket)).toBe(true);
 
     const pid = daemonPid(ws);

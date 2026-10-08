@@ -16,12 +16,14 @@ describe("jsonSchema", () => {
       "commands",
       "env",
       "indicators",
+      "instances",
       "limits",
       "name",
       "plugins",
       "profiles",
       "repos",
       "templates",
+      "vars",
     ]);
   });
 

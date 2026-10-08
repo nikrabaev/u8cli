@@ -18,13 +18,23 @@ export interface WorkspaceInfo {
 }
 
 export interface RepoInfo {
+  /** Unique across instances: `platform`, or `platform@feat-x`. */
   name: string;
-  /** Absolute repo root. */
+  /** The repo's key in the config, whichever instance this checkout belongs to. */
+  baseName: string;
+  /** `"base"`, or the instance this checkout belongs to. */
+  instance: string;
+  /** Absolute root of this instance's checkout. */
   path: string;
 }
 
 export interface TargetInfo {
+  /** Unique across instances: `api`, or `api@feat-x`. */
   id: TargetId;
+  /** The id as the config spells it. */
+  baseId: TargetId;
+  /** `"base"`, or the instance this copy runs in. */
+  instance: string;
   repoName: string;
   name: string;
   implicit: boolean;
@@ -32,6 +42,8 @@ export interface TargetInfo {
   cwd: string;
   scripts: Record<string, string>;
   env: Record<string, string>;
+  /** Named ports as this copy has them. */
+  ports: Record<string, number>;
   dependsOn: TargetId[];
   hasHealth: boolean;
 }

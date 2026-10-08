@@ -191,7 +191,7 @@ function subscribeCtx(repoPath: string, store: Map<string, unknown>): IndicatorC
     store,
     exec: (cmd, opts = {}) => execCommand(cmd, { cwd: repoPath, ...opts }),
     scope: "repo",
-    repo: { name: "repo", path: repoPath },
+    repo: { name: "repo", baseName: "repo", instance: "base", path: repoPath },
     cwd: repoPath,
   };
 }

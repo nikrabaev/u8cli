@@ -149,7 +149,7 @@ describe("main screen", () => {
     await ui.type("j");
     await ui.type("s");
 
-    expect(ui.client.paramsOf("service.start")).toEqual([{ targets: ["platform.web", "platform.admin"] }]);
+    expect(ui.client.paramsOf("service.start")).toEqual([{ targets: ["platform.web", "platform.admin"], instance: "base" }]);
     expect(ui.frame()).toContain("starting platform.web, platform.admin");
   });
 
@@ -303,7 +303,7 @@ describe("command palette", () => {
     expect(ui.frame()).toContain("on profile all");
 
     await ui.type("\r");
-    expect(ui.client.paramsOf("command.run")).toEqual([{ command: "greet", targets: undefined }]);
+    expect(ui.client.paramsOf("command.run")).toEqual([{ command: "greet", targets: undefined, instance: "base" }]);
     expect(ui.frame()).toContain("running greet on profile all");
   });
 

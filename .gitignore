@@ -6,3 +6,6 @@ coverage/
 .u8-test/
 *.tgz
 .idea/
+
+# Worktrees u8 creates for instances (see docs/CONFIG.md → Instances)
+.u8/

@@ -17,8 +17,10 @@ import {
 import { logWindow } from "../../src/tui/logs.js";
 import type { DashboardState } from "../../src/tui/types.js";
 import {
+  app,
   createFakeClient,
   fixtureSnapshot,
+  indicator,
   logLine,
   serviceState,
   settle,
@@ -48,6 +50,7 @@ function setup(opts: Partial<ControllerOptions> & { client?: FakeClient } = {}):
     scheduler: clock.schedule,
     scrollback: opts.scrollback,
     backfill: opts.backfill,
+    instance: opts.instance,
   });
   live.push(controller);
   return {
@@ -172,6 +175,71 @@ describe("frames", () => {
   });
 });
 
+describe("instances", () => {
+  /** The fixture plus one instance holding a copy of `api`. */
+  function withInstance(): FakeClient {
+    const base = fixtureSnapshot();
+    const copy = { ...app("api"), id: "api@feat-x", baseId: "api", instance: "feat-x", repoName: "api@feat-x" };
+    return createFakeClient({
+      ...base,
+      repos: [...base.repos, { name: "api@feat-x", baseName: "api", instance: "feat-x", path: "/wt/api", apps: [copy] }],
+      instances: [
+        ...base.instances,
+        { name: "feat-x", isBase: false, createdAt: 1, appIds: ["api@feat-x"], checkouts: {}, initialized: false },
+      ],
+      services: [...base.services, serviceState("api@feat-x", "running")],
+      indicators: [
+        ...base.indicators,
+        indicator({ ns: "app", name: "name", scope: "app", owner: "api@feat-x", value: "api" }),
+        statusIndicator("api@feat-x", "running"),
+      ],
+    });
+  }
+
+  it("lists every instance under its own heading once there is more than base", () => {
+    const { state } = setup({ client: withInstance() });
+    expect(state().rows.map((row) => [row.kind, row.id, row.instance, row.text])).toEqual([
+      ["instance", "instance:base", "base", "base · profile all 0/3 running"],
+      ["merged", "api", "base", "APP api stopped"],
+      ["repo", "platform", "base", "REPO platform"],
+      ["app", "platform.web", "base", "APP web stopped"],
+      ["app", "platform.admin", "base", "APP admin stopped"],
+      ["instance", "instance:feat-x", "feat-x", "feat-x · not initialised 1/1 running"],
+      ["merged", "api@feat-x", "feat-x", "APP api running"],
+    ]);
+    // The header counts what is on screen, and says how many instances that is.
+    expect(state()).toMatchObject({ running: 1, total: 4, instances: 2 });
+  });
+
+  it("draws no heading for a workspace that only has base", () => {
+    const { state } = setup();
+    expect(state().rows.some((row) => row.kind === "instance")).toBe(false);
+    expect(state().instances).toBe(1);
+  });
+
+  it("lands on the instance the dashboard was opened for", () => {
+    const { state } = setup({ client: withInstance(), instance: "feat-x" });
+    expect(state().rows[state().cursor]?.id).toBe("instance:feat-x");
+  });
+
+  it("means the instance under the cursor when a key says 'everything'", async () => {
+    const { client, controller, state } = setup({ client: withInstance(), instance: "feat-x" });
+
+    // On the heading: the selection is the whole instance, by id.
+    await controller.stop("selection");
+    // "The whole profile", said inside an instance, is that instance — never base.
+    await controller.restart("profile");
+    controller.setCursor(state().rows.findIndex((row) => row.id === "api"));
+    await controller.restart("profile");
+
+    expect(client.paramsOf("service.stop")).toEqual([{ targets: ["api@feat-x"], instance: "feat-x" }]);
+    expect(client.paramsOf("service.restart")).toEqual([
+      { targets: undefined, instance: "feat-x" },
+      { targets: undefined, instance: "base" },
+    ]);
+  });
+});
+
 describe("lifecycle keys", () => {
   it("starts the selection and the whole profile", async () => {
     const { client, controller } = setup();
@@ -181,11 +249,11 @@ describe("lifecycle keys", () => {
     await controller.stop("selection");
     await controller.restart("profile");
 
-    expect(client.paramsOf("service.start")).toEqual([{ targets: ["api"] }]);
+    expect(client.paramsOf("service.start")).toEqual([{ targets: ["api"], instance: "base" }]);
     // A repo header row acts on every app beneath it.
-    expect(client.paramsOf("service.stop")).toEqual([{ targets: ["platform.web", "platform.admin"] }]);
+    expect(client.paramsOf("service.stop")).toEqual([{ targets: ["platform.web", "platform.admin"], instance: "base" }]);
     // No targets means "the active profile" on the wire.
-    expect(client.paramsOf("service.restart")).toEqual([{ targets: undefined }]);
+    expect(client.paramsOf("service.restart")).toEqual([{ targets: undefined, instance: "base" }]);
   });
 
   it("turns a failed request into a notice instead of a rejection", async () => {
@@ -402,7 +470,7 @@ describe("palette", () => {
     controller.paletteMove(1);
     await controller.paletteRun();
 
-    expect(client.paramsOf("command.run")).toEqual([{ command: "greet", targets: undefined }]);
+    expect(client.paramsOf("command.run")).toEqual([{ command: "greet", targets: undefined, instance: "base" }]);
     expect(state().mode).toBe("list");
   });
 
@@ -414,7 +482,7 @@ describe("palette", () => {
     controller.paletteType("greet");
     await controller.paletteRun();
 
-    expect(client.paramsOf("command.run")).toEqual([{ command: "greet", targets: ["platform.admin"] }]);
+    expect(client.paramsOf("command.run")).toEqual([{ command: "greet", targets: ["platform.admin"], instance: "base" }]);
   });
 });
 

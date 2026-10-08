@@ -71,9 +71,9 @@ describe("list mode", () => {
     press(controller, "R");
     await settle();
 
-    expect(client.paramsOf("service.start")).toEqual([{ targets: ["api"] }, { targets: undefined }]);
-    expect(client.paramsOf("service.stop")).toEqual([{ targets: ["api"] }, { targets: undefined }]);
-    expect(client.paramsOf("service.restart")).toEqual([{ targets: ["api"] }, { targets: undefined }]);
+    expect(client.paramsOf("service.start")).toEqual([{ targets: ["api"], instance: "base" }, { targets: undefined, instance: "base" }]);
+    expect(client.paramsOf("service.stop")).toEqual([{ targets: ["api"], instance: "base" }, { targets: undefined, instance: "base" }]);
+    expect(client.paramsOf("service.restart")).toEqual([{ targets: ["api"], instance: "base" }, { targets: undefined, instance: "base" }]);
   });
 
   it("opens the log view, the palette, the switcher and the help", () => {
@@ -188,7 +188,7 @@ describe("palette mode", () => {
 
     press(controller, "", { return: true });
     await settle();
-    expect(client.paramsOf("command.run")).toEqual([{ command: "greet", targets: ["api"] }]);
+    expect(client.paramsOf("command.run")).toEqual([{ command: "greet", targets: ["api"], instance: "base" }]);
     expect(controller.getState().mode).toBe("list");
   });
 

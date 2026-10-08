@@ -16,11 +16,11 @@ No linter or formatter is configured. Match the surrounding file.
 
 Layers depend downward only; a lower layer never imports a higher one.
 
-- `src/config` — discovery, JSONC + zod validation, normalization, pure resolvers
+- `src/config` — discovery, JSONC + zod validation, normalization (incl. `${…}` references and the per-instance expansion), pure resolvers
 - `src/template` — row-template grammar, modifiers, ANSI-aware width
 - `src/ipc` — NDJSON JSON-RPC over a unix socket (transport only, no business logic)
 - `src/process` — detached-group spawn, one-shot exec, rotating log files
-- `src/daemon` — supervisor, daemon wiring, RPC handlers, entry point, client launcher, config watcher
+- `src/daemon` — supervisor, daemon wiring, RPC handlers, entry point, client launcher, config watcher, instance manager (records, git worktrees, port allocation)
 - `src/indicators` — provider registry, value cache, core `app@` providers
 - `src/engine` — command runs, hook pipeline, `dependsOn` orchestration
 - `src/plugins` — host/loader plus the `git` and `health` built-ins under `src/plugins/builtin`
@@ -33,7 +33,7 @@ These files are the seams every layer codes against. Changing one ripples across
 areas, so treat an edit as a design decision, not a refactor: check every
 consumer and update the tests that pin the behaviour.
 
-- `src/config/types.ts` — the normalized workspace model
+- `src/config/types.ts` — the normalized workspace model, including instances (`api@feat-x` is an ordinary app)
 - `src/ipc/protocol.ts` — the wire contract (`RpcMethods`, `RpcNotifications`)
 - `src/process/types.ts` — `ProcessHandle`, `ExecResult`
 - `src/plugin/types.ts` — the public plugin API (re-exported from `src/plugin/index.ts`)
@@ -46,6 +46,7 @@ consumer and update the tests that pin the behaviour.
 - `noUncheckedIndexedAccess` is on: handle the `undefined` — ✅ `const first = xs[0]; if (!first) return;` 🚫 `xs[0]!`
 - JSDoc explains *why*, not what — ✅ `/** Head-biased: the start of a failing command's output is what explains it. */` 🚫 `/** Returns the output. */`
 - Errors carry a code from `U8Error` in `src/util/errors.ts` — ✅ `throw new U8Error("UNKNOWN_TARGET", ...)` 🚫 `throw new Error("bad target")`
+- Instance-qualified ids go through the helpers in `src/config/types.ts` — ✅ `qualify(baseId, instance)`, `splitQualified(id)` 🚫 `` `${id}@${name}` ``, `id.split("@")`
 
 ## Testing
 
@@ -54,6 +55,7 @@ consumer and update the tests that pin the behaviour.
 - Point `U8_STATE_HOME` at a tmpdir for anything that starts a daemon, and tear down every daemon and service in `afterEach`, including on failure.
 - Socket paths are capped by the kernel (~104 bytes); keep test state dirs short or `connect()` fails with a bare `EINVAL`. See `statePaths` in `src/util/paths.ts`.
 - A new regression test must be shown to fail against the unfixed code — otherwise it pins nothing.
+- Instance tests use real git repos and real worktrees, and prove isolation by asking each copy who it is over its own port. Pick a random port block per test (see `portBlock` in `test/daemon/instances.test.ts`): workers run in parallel.
 
 ## Git / PR workflow
 
@@ -69,6 +71,10 @@ consumer and update the tests that pin the behaviour.
 - 🚫 **Never:** resolve `app:stop` through `commandTargets` — a `null` there means "signal the process group", not "skip". Use `coreStopScript` in `src/config/resolve.ts`.
 - 🚫 **Never:** inject `process.env` inside `src/process` — the daemon owns the env merge (workspace → repo → app) so what runs is what config says.
 - 🚫 **Never:** let a plugin failure take down the daemon; a bad plugin is disabled and reported.
+- 🚫 **Never:** resolve a target typed inside an instance to base as a fallback — pass the instance to `expandTarget` / `resolveTargetStrings` in `src/config/resolve.ts`; reaching base takes an explicit `name@base`. One task must not be able to restart another's service by typing a bare name.
+- 🚫 **Never:** remove or modify a checkout whose record is not `owned` — an adopted worktree belongs to the tool that made it.
+- 🚫 **Never:** interpolate `${…}` into anything a shell runs (scripts, `health.cmd`, hooks, indicator commands) — references resolve in `env` values and `health.http` only; a script reads its values from the environment.
+- 🚫 **Never:** allocate an instance port outside the daemon's instance manager — one owner is what stops two instances getting the same number.
 - 🚫 **Never:** reference line numbers in docs, or duplicate `package.json` / config bodies.
 
 ## Deep docs

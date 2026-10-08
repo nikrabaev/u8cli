@@ -22,13 +22,14 @@ import type { CommandKind } from "../config/index.js";
 import type { AttachedClient } from "../daemon/index.js";
 import type {
   Snapshot,
+  SnapshotInstance,
   TaskProgress,
   TaskResult,
   TaskTargetResult,
   TaskTargetState,
 } from "../ipc/protocol.js";
 import { U8Error } from "../util/errors.js";
-import { withAttached, type CliContext } from "./context.js";
+import { instanceIn, requireRegistered, scopeOf, withAttached, type CliContext } from "./context.js";
 import { EXIT_FAILURE, EXIT_INTERRUPTED } from "./errors.js";
 import { formatDuration, oneLine, paintState, renderTable, STATE_SYMBOL } from "./format.js";
 import { writeLine, writeLines } from "./io.js";
@@ -39,10 +40,12 @@ export type TaskSpec =
   | { kind: "run"; command: string; serial?: boolean; concurrency?: number };
 
 export interface TaskOptions {
-  /** Target strings as typed; empty means "the active profile". */
+  /** Target strings as typed; empty means the instance's default selection. */
   targets: readonly string[];
-  /** Every target in the workspace, rather than the active profile. */
+  /** Every target of the instance, rather than its default selection. */
   all?: boolean;
+  /** Report a start only once the service is ready, not merely running. */
+  wait?: boolean;
 }
 
 /** States worth a line while the run is in flight: the ones that are final. */
@@ -57,44 +60,78 @@ export async function taskCommand(ctx: CliContext, spec: TaskSpec, opts: TaskOpt
   if (opts.all === true && opts.targets.length > 0) {
     throw new U8Error("UNKNOWN_TARGET", "--all cannot be combined with explicit targets");
   }
+  const scope = scopeOf(ctx);
+  requireRegistered(scope, spec.kind === "run" ? `u8 run ${spec.command}` : `u8 ${spec.kind}`);
 
   return withAttached(ctx, { requestTimeoutMs: 0 }, async (attached) => {
-    const targets = selectTargets(attached.snapshot(), opts);
-    const printer = createProgressPrinter(ctx);
-    /** Set the moment the run is accepted; progress for other runs is ignored. */
-    let runId: string | undefined;
-
-    const offProgress = attached.on("task.progress", ({ progress }) => {
-      if (progress.runId === runId) printer.push(progress);
-    });
-    // A daemon that goes away mid-run would otherwise leave the CLI waiting on a
-    // promise the transport has already rejected; this makes the reason visible.
-    const offShutdown = attached.on("daemon.shutdown", ({ reason }) => {
-      writeLine(ctx.io.stderr, ctx.style.yellow(`the daemon is shutting down (${reason})`));
-    });
-
-    try {
-      runId = (await launch(attached, spec, targets)).runId;
-      const result = await settle(ctx, attached, runId);
-      if (result === undefined) {
-        writeLine(
-          ctx.io.stderr,
-          ctx.style.dim(`detached — the run continues in the background (u8 status, u8 logs --run ${runId})`),
-        );
-        return EXIT_INTERRUPTED;
-      }
-      printer.flush(result);
-      printSummary(ctx, result, commandKind(attached.snapshot(), result.command));
-      return result.ok ? 0 : EXIT_FAILURE;
-    } finally {
-      offProgress();
-      offShutdown();
+    const instance = instanceIn(attached.snapshot(), scope);
+    const targets = selectTargets(instance, opts);
+    const { code } = await followRun(ctx, attached, () =>
+      launch(attached, spec, targets, { instance: instance.name, wait: opts.wait }),
+    );
+    if (spec.kind === "start" || spec.kind === "restart") {
+      await warnAboutBase(ctx, attached, instance.name);
     }
+    return code;
   });
 }
 
-function selectTargets(snapshot: Snapshot, opts: TaskOptions): string[] | undefined {
-  if (opts.all === true) return snapshot.repos.flatMap((repo) => repo.apps.map((a) => a.id));
+export interface FollowedRun {
+  /** Absent when the user interrupted before the run finished. */
+  result?: TaskResult;
+  /** The exit code the run earns: 0, failure, or interrupted. */
+  code: number;
+}
+
+/**
+ * Launches a run and stays with it: per-target lines as each settles, then the
+ * summary table. Everything that starts a run and has to say how it went goes
+ * through here, so `u8 start`, `u8 up` and `u8 instance create` cannot drift
+ * apart in how they report the same kind of thing.
+ */
+export async function followRun(
+  ctx: CliContext,
+  attached: AttachedClient,
+  start: () => Promise<{ runId: string }>,
+): Promise<FollowedRun> {
+  const printer = createProgressPrinter(ctx);
+  /** Set the moment the run is accepted; progress for other runs is ignored. */
+  let runId: string | undefined;
+
+  const offProgress = attached.on("task.progress", ({ progress }) => {
+    if (progress.runId === runId) printer.push(progress);
+  });
+  // A daemon that goes away mid-run would otherwise leave the CLI waiting on a
+  // promise the transport has already rejected; this makes the reason visible.
+  const offShutdown = attached.on("daemon.shutdown", ({ reason }) => {
+    writeLine(ctx.io.stderr, ctx.style.yellow(`the daemon is shutting down (${reason})`));
+  });
+
+  try {
+    runId = (await start()).runId;
+    const result = await settle(ctx, attached, runId);
+    if (result === undefined) {
+      writeLine(
+        ctx.io.stderr,
+        ctx.style.dim(`detached — the run continues in the background (u8 status, u8 logs --run ${runId})`),
+      );
+      return { code: EXIT_INTERRUPTED };
+    }
+    printer.flush(result);
+    printSummary(ctx, result, commandKind(attached.snapshot(), result.command));
+    return { result, code: result.ok ? 0 : EXIT_FAILURE };
+  } finally {
+    offProgress();
+    offShutdown();
+  }
+}
+
+/**
+ * `--all` never leaves the instance: "everything" typed in one worktree must
+ * not reach into base or into another task's copy.
+ */
+function selectTargets(instance: SnapshotInstance, opts: TaskOptions): string[] | undefined {
+  if (opts.all === true) return [...instance.appIds];
   return opts.targets.length === 0 ? undefined : [...opts.targets];
 }
 
@@ -102,22 +139,62 @@ async function launch(
   attached: AttachedClient,
   spec: TaskSpec,
   targets: string[] | undefined,
+  scope: { instance: string; wait?: boolean },
 ): Promise<{ runId: string }> {
+  const { instance, wait } = scope;
   switch (spec.kind) {
     case "start":
-      return attached.client.request("service.start", { targets });
+      return attached.client.request("service.start", { targets, instance, wait });
     case "stop":
-      return attached.client.request("service.stop", { targets });
+      return attached.client.request("service.stop", { targets, instance });
     case "restart":
-      return attached.client.request("service.restart", { targets });
+      return attached.client.request("service.restart", { targets, instance, wait });
     case "run":
       return attached.client.request("command.run", {
         command: spec.command,
         targets,
+        instance,
         serial: spec.serial,
         concurrency: spec.concurrency,
       });
   }
+}
+
+/**
+ * Says which of base's apps an instance leans on are not up.
+ *
+ * A partial instance is wired to base for everything it has no copy of, and
+ * starting it never starts base — that would be one task reaching into
+ * everybody's stack. So when what it depends on is down, the start succeeds and
+ * the app then fails its first request; this is the line that explains why.
+ */
+export async function warnAboutBase(ctx: CliContext, attached: AttachedClient, instanceName: string): Promise<void> {
+  const snapshot = await attached.client.request("workspace.snapshot", {}).catch(() => attached.snapshot());
+  const down = externalDependenciesDown(snapshot, instanceName);
+  if (down.length === 0) return;
+  writeLine(
+    ctx.io.stderr,
+    ctx.style.yellow(
+      `instance "${instanceName}" uses ${down.join(", ")} from another instance, and ${down.length === 1 ? "it is" : "they are"} not running — ` +
+        `start with: u8 start ${down.map((id) => (id.includes("@") ? id : `${id}@base`)).join(" ")}`,
+    ),
+  );
+}
+
+/** Dependencies of an instance's apps that live outside it and are not running. */
+export function externalDependenciesDown(snapshot: Snapshot, instanceName: string): string[] {
+  const instance = snapshot.instances.find((i) => i.name === instanceName);
+  if (!instance || instance.isBase) return [];
+  const own = new Set(instance.appIds);
+  const running = new Set(snapshot.services.filter((s) => s.status === "running").map((s) => s.targetId));
+  const out: string[] = [];
+  for (const app of snapshot.repos.flatMap((r) => r.apps)) {
+    if (!own.has(app.id)) continue;
+    for (const dep of app.dependsOn) {
+      if (!own.has(dep) && !running.has(dep) && !out.includes(dep)) out.push(dep);
+    }
+  }
+  return out;
 }
 
 /** The result, or `undefined` when the user interrupted before it arrived. */
@@ -286,6 +363,9 @@ function printFailureHints(ctx: CliContext, result: TaskResult, kind: CommandKin
  */
 function printOutputHint(ctx: CliContext, result: TaskResult, kind: CommandKind): void {
   if (kind !== "task") return;
+  // A teardown that succeeded took its targets with it: there is no longer an
+  // instance for `u8 logs` to look the run up under.
+  if (result.command === "instance:teardown") return;
   const ran = result.targets.find((t) => t.state === "ok");
   if (!ran) return;
   writeLine(

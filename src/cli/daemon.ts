@@ -16,13 +16,15 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 
+import { BASE_INSTANCE } from "../config/index.js";
 import { pingDaemon } from "../daemon/index.js";
 import { createRpcClient, type RpcClient } from "../ipc/index.js";
+import type { Snapshot } from "../ipc/protocol.js";
 import { readLastLines } from "../process/index.js";
 import { isU8Error } from "../util/errors.js";
 import { CONFIG_FILENAME } from "../util/paths.js";
 import { formatUptime } from "../indicators/index.js";
-import { daemonLocationOf, type CliContext, type DaemonLocation } from "./context.js";
+import { daemonLocationOf, scopeOf, type CliContext, type DaemonLocation } from "./context.js";
 import { EXIT_FAILURE, EXIT_INTERRUPTED } from "./errors.js";
 import { formatDuration, renderTable } from "./format.js";
 import { writeLine, writeLines } from "./io.js";
@@ -80,7 +82,7 @@ function idleExit(inMs: number | null): string {
   return inMs === null ? "not armed" : `in ${formatDuration(inMs)}`;
 }
 
-export async function daemonStopCommand(ctx: CliContext): Promise<number> {
+export async function daemonStopCommand(ctx: CliContext, opts: { force?: boolean } = {}): Promise<number> {
   const location = daemonLocationOf(ctx);
   const paths = location.paths;
   const client = await connectExisting(paths.socket);
@@ -94,6 +96,13 @@ export async function daemonStopCommand(ctx: CliContext): Promise<number> {
 
   let pid: number | undefined;
   try {
+    if (opts.force !== true) {
+      const refusal = collateralOf(ctx, await client.request("workspace.snapshot", {}));
+      if (refusal !== undefined) {
+        writeLine(ctx.io.stderr, ctx.style.red(refusal));
+        return EXIT_FAILURE;
+      }
+    }
     pid = (await client.request("daemon.status", {})).pid;
     await client.request("daemon.stop", {});
   } finally {
@@ -113,6 +122,46 @@ export async function daemonStopCommand(ctx: CliContext): Promise<number> {
   }
   writeLine(ctx.io.stdout, `daemon stopped${pid === undefined ? "" : ctx.style.dim(` (pid ${pid})`)}`);
   return 0;
+}
+
+/**
+ * Why stopping the daemon would stop more than its caller is looking at, or
+ * `undefined` when it would not.
+ *
+ * One daemon runs every instance, so this command takes down work that belongs
+ * to other tasks. Typed inside an instance it is almost certainly meant as
+ * "stop mine"; typed in base while other instances run, it is at least worth a
+ * second look. Either way the answer is the command that does what was meant.
+ */
+function collateralOf(ctx: CliContext, snapshot: Snapshot): string | undefined {
+  let mine = BASE_INSTANCE;
+  let outside = false;
+  try {
+    const scope = scopeOf(ctx);
+    mine = scope.instance;
+    outside = scope.unregistered !== undefined;
+  } catch {
+    // No config to place this directory by: it is treated as base.
+  }
+
+  const running = new Set(snapshot.services.filter((s) => s.status !== "stopped").map((s) => s.targetId));
+  const busy = snapshot.instances
+    .filter((i) => i.name !== mine)
+    .map((i) => ({ name: i.name, count: i.appIds.filter((id) => running.has(id)).length }))
+    .filter((i) => i.count > 0);
+
+  if (mine !== BASE_INSTANCE || outside) {
+    return (
+      `\`u8 daemon stop\` stops every instance's services, not only this one's` +
+      (busy.length > 0 ? ` (${busy.map((i) => `${i.name}: ${i.count} running`).join(", ")})` : "") +
+      ` — use \`u8 stop\` for this instance, or \`u8 daemon stop --force\``
+    );
+  }
+  if (busy.length === 0) return undefined;
+  return (
+    `other instances have services running (${busy.map((i) => `${i.name}: ${i.count}`).join(", ")}) and stopping the ` +
+    `daemon stops them too — \`u8 stop\` stops only base, \`u8 daemon stop --force\` stops everything`
+  );
 }
 
 export interface DaemonLogsOptions {

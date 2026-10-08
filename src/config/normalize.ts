@@ -24,7 +24,15 @@ import { describeDirectory } from "../util/dirs.js";
 import { ConfigError, type ConfigIssue } from "../util/errors.js";
 import { resolvePath, workspaceId } from "../util/paths.js";
 import {
+  isLiteral,
+  parseInterpolation,
+  renderInterpolation,
+  type Ref,
+  type Resolution,
+} from "./interpolate.js";
+import {
   BARE_NAME_PATTERN,
+  NAME_PATTERN,
   type RawBuiltins,
   type RawHealth,
   type RawLimits,
@@ -33,22 +41,29 @@ import {
   type RawWorkspaceConfig,
 } from "./schema.js";
 import {
+  BASE_INSTANCE,
   type BuiltinFlags,
   CORE_COMMAND_NAMESPACE,
   type CustomIndicatorDef,
   DEFAULT_HEALTH,
+  DEFAULT_INSTANCES_DIR,
   DEFAULT_LIMITS,
+  DEFAULT_PORT_RANGE,
   DEFAULT_PROTOS_INTERVAL_MS,
   DEFAULT_TEMPLATES,
   type HealthCheckDef,
+  type InstanceRecord,
+  type InstanceRepoRecord,
   type Limits,
   type NormalizedApp,
   type NormalizedCommand,
+  type NormalizedInstance,
   type NormalizedProfile,
   type NormalizedRepo,
   type NormalizedWorkspace,
   type PluginRef,
   type ProtosOptions,
+  qualify,
   REPO_NAMESPACE,
   type TargetId,
   type Templates,
@@ -67,79 +82,67 @@ export const IMPLICIT_PROFILE_NAME = "all";
  */
 const CUSTOM_INDICATOR_NAMESPACE = "x";
 
-export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string): NormalizedWorkspace {
+/**
+ * `records` are the instances this machine has created (see `instances.ts`);
+ * none is the common case and leaves exactly the base instance, whose apps and
+ * repos are the document's own.
+ */
+export function normalizeWorkspace(
+  raw: RawWorkspaceConfig,
+  configPath: string,
+  records: readonly InstanceRecord[] = [],
+): NormalizedWorkspace {
   const issues: ConfigIssue[] = [];
+  const warnings: string[] = [];
   const rootDir = path.dirname(configPath);
   const limits = mergeLimits(raw.limits);
-  const workspaceEnv = raw.env ?? {};
+  const workspaceName = raw.name ?? path.basename(rootDir);
 
-  // --- repos & apps -------------------------------------------------------
+  // --- repos & apps, once per instance ---------------------------------------
   const repos: NormalizedRepo[] = [];
   const apps: NormalizedApp[] = [];
-  const pendingDeps: Array<{ app: NormalizedApp; specs: string[]; configPath: string }> = [];
+  const instances: NormalizedInstance[] = [];
+  const drafts: Draft[] = [];
   const dirChecks: DirectoryCheck[] = [];
 
-  for (const [repoName, entry] of Object.entries(raw.repos)) {
-    const repoPath = resolvePath(entry.path, rootDir);
-    const repo: NormalizedRepo = { name: repoName, path: repoPath, template: entry.template, apps: [] };
-    const appEntries = Object.entries(entry.apps ?? {});
-    dirChecks.push({ at: `repos.${repoName}.path`, dir: repoPath });
-
-    if (appEntries.length === 0) {
-      // Implicit app: the repo entry *is* the app definition.
-      const app = buildApp({
-        id: repoName,
-        repoName,
-        name: repoName,
-        implicit: true,
-        cwd: repoPath,
-        baseEnv: workspaceEnv,
-        entry,
-        limits,
-      });
-      repo.apps.push(app);
-      pendingDeps.push({ app, specs: entry.dependsOn ?? [], configPath: `repos.${repoName}.dependsOn` });
-    } else {
-      for (const [appName, appEntry] of appEntries) {
-        const appCwd = resolvePath(appEntry.path ?? ".", repoPath);
-        // An app that inherits the repo directory is already covered by the
-        // repo's own check; only a `path` of its own is a second place to be wrong.
-        if (appCwd !== repoPath) {
-          dirChecks.push({ at: `repos.${repoName}.apps.${appName}.path`, dir: appCwd, under: repoPath });
-        }
-        const app = buildApp({
-          id: `${repoName}.${appName}`,
-          repoName,
-          name: appName,
-          implicit: false,
-          cwd: appCwd,
-          baseEnv: workspaceEnv,
-          defaults: entry,
-          entry: appEntry,
-          limits,
-        });
-        repo.apps.push(app);
-        pendingDeps.push({
-          app,
-          specs: appEntry.dependsOn ?? entry.dependsOn ?? [],
-          configPath: appEntry.dependsOn
-            ? `repos.${repoName}.apps.${appName}.dependsOn`
-            : `repos.${repoName}.dependsOn`,
-        });
+  const seenInstances = new Set<string>([BASE_INSTANCE]);
+  for (const record of [undefined, ...[...records].sort((a, b) => a.createdAt - b.createdAt)]) {
+    if (record !== undefined) {
+      const problem = instanceNameProblem(record.name);
+      if (problem !== undefined || seenInstances.has(record.name)) {
+        warnings.push(`instance "${record.name}": ${problem ?? "listed twice; the later one is ignored"}`);
+        continue;
       }
+      seenInstances.add(record.name);
     }
-
-    repos.push(repo);
-    apps.push(...repo.apps);
+    const built = buildInstance({ raw, rootDir, limits, record, issues, warnings, dirChecks });
+    instances.push(built.instance);
+    repos.push(...built.repos);
+    drafts.push(...built.drafts);
+    for (const repo of built.repos) apps.push(...repo.apps);
   }
 
   // --- target index ---------------------------------------------------------
-  const knownIds = new Set<TargetId>(apps.map((a) => a.id));
-  const idsByRepo = new Map<string, TargetId[]>(repos.map((r) => [r.name, r.apps.map((a) => a.id)]));
+  // References in the document are always written against base: `dependsOn`,
+  // profile targets, command targets and `${target.ports.x}` name what the
+  // config declares, and each instance then maps them onto its own copies.
+  const baseApps = apps.filter((a) => a.instance === BASE_INSTANCE);
+  const baseRepos = repos.filter((r) => r.instance === BASE_INSTANCE);
+  const byId = new Map<TargetId, NormalizedApp>(apps.map((a) => [a.id, a]));
+  const knownIds = new Set<TargetId>(baseApps.map((a) => a.id));
+  const idsByRepo = new Map<string, TargetId[]>(baseRepos.map((r) => [r.name, r.apps.map((a) => a.id)]));
 
   /** A repo name expands to all of its apps; an id matches exactly. */
   const expand = (spec: string): TargetId[] | undefined =>
     knownIds.has(spec) ? [spec] : idsByRepo.get(spec);
+
+  /**
+   * The copy of a base app that `instance` should talk to: its own when it has
+   * one, base's otherwise. This one rule is what makes a partial instance work —
+   * a worktree of the frontend alone still finds the api it was written against.
+   */
+  const inInstance = (baseId: TargetId, instance: string): NormalizedApp | undefined =>
+    byId.get(qualify(baseId, instance)) ?? byId.get(baseId);
 
   const resolveRefs = (specs: readonly string[], pathOf: (index: number) => string): TargetId[] => {
     const out: TargetId[] = [];
@@ -154,20 +157,52 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
     return out;
   };
 
-  // One repo-level `dependsOn` feeds every app of that repo: resolve it once so
-  // a bad reference is reported at the place it was authored, not once per app.
+  // One repo-level `dependsOn` feeds every app of that repo, in every instance:
+  // resolve it once so a bad reference is reported at the place it was authored,
+  // not once per app.
   const resolvedDeps = new Map<string, TargetId[]>();
-  for (const { app, specs, configPath: depPath } of pendingDeps) {
-    let ids = resolvedDeps.get(depPath);
+  for (const { app, depSpecs, depsAt } of drafts) {
+    let ids = resolvedDeps.get(depsAt);
     if (!ids) {
-      ids = resolveRefs(specs, (i) => `${depPath}[${i}]`);
-      resolvedDeps.set(depPath, ids);
+      ids = resolveRefs(depSpecs, (i) => `${depsAt}[${i}]`);
+      resolvedDeps.set(depsAt, ids);
     }
-    app.dependsOn = [...ids];
+    const mapped = ids.map((id) => inInstance(id, app.instance)?.id ?? id);
+    app.dependsOn = mapped.filter((id, index) => id !== app.id && mapped.indexOf(id) === index);
   }
 
+  // --- references -----------------------------------------------------------
+  // After every app exists: `${api.ports.http}` may name a repo declared later.
+  const interpolationIssues: ConfigIssue[] = [];
+  for (const draft of drafts) {
+    const resolve = referenceResolver({ draft, workspaceName, rootDir, expand, inInstance });
+    for (const [key, text] of Object.entries(draft.app.env)) {
+      const parsed = parseInterpolation(text);
+      if (isLiteral(parsed)) {
+        // `$${` is the one thing a literal string still has to have undone.
+        draft.app.env[key] = renderInterpolation(parsed, resolve).value;
+        continue;
+      }
+      const rendered = renderInterpolation(parsed, resolve);
+      draft.app.env[key] = rendered.value;
+      const at = draft.envAt[key] ?? `env.${key}`;
+      for (const message of rendered.errors) interpolationIssues.push({ path: at, message });
+    }
+    const health = draft.app.health;
+    if (health?.http !== undefined) {
+      const rendered = renderInterpolation(parseInterpolation(health.http), resolve);
+      health.http = rendered.value;
+      for (const message of rendered.errors) {
+        interpolationIssues.push({ path: `${draft.healthAt ?? "health"}.http`, message });
+      }
+    }
+  }
+  // A workspace- or repo-level value is resolved once per app that inherits it,
+  // and a mistake in it is the same mistake every time.
+  issues.push(...dedupeIssues(interpolationIssues));
+
   // --- profiles -------------------------------------------------------------
-  const profiles = normalizeProfiles(raw, apps, repos, resolveRefs, issues);
+  const profiles = normalizeProfiles(raw, baseApps, baseRepos, resolveRefs, issues);
   const defaultProfile = profiles.find((p) => p.isDefault)?.name ?? profiles[0]?.name ?? IMPLICIT_PROFILE_NAME;
 
   // --- commands -------------------------------------------------------------
@@ -189,6 +224,13 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
         continue;
       }
       for (const id of ids) targetScripts[id] = script;
+    }
+    // An instance's copy of an app answers to the entry written for the app.
+    for (const app of apps) {
+      if (app.instance === BASE_INSTANCE) continue;
+      if (Object.prototype.hasOwnProperty.call(targetScripts, app.baseId)) {
+        targetScripts[app.id] = targetScripts[app.baseId] ?? null;
+      }
     }
     commands.push({
       name,
@@ -233,11 +275,14 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
   return {
     configPath,
     rootDir,
-    name: raw.name ?? path.basename(rootDir),
+    name: workspaceName,
     id: workspaceId(configPath),
     templates: mergeTemplates(raw.templates),
     repos,
     apps,
+    instances,
+    portRange: raw.instances?.ports ?? { ...DEFAULT_PORT_RANGE },
+    instancesDir: resolvePath(raw.instances?.dir ?? DEFAULT_INSTANCES_DIR, rootDir),
     profiles,
     defaultProfile,
     commands,
@@ -250,9 +295,374 @@ export function normalizeWorkspace(raw: RawWorkspaceConfig, configPath: string):
     // odd thing about that repo, including a template token that never resolves.
     warnings: [
       ...directoryWarnings(dirChecks),
+      ...warnings,
+      ...portWarnings(baseApps),
       ...templateWarnings(raw, { plugins, builtins }, new Set(indicators.map((i) => i.name))),
     ],
   };
+}
+
+// ---------------------------------------------------------------------------
+// Instances
+// ---------------------------------------------------------------------------
+
+/**
+ * An app whose `${…}` references are still text. The extra fields are what
+ * resolving them needs and nothing downstream should see: where each value was
+ * written (so an error names a line of the document, not a merged map) and the
+ * vars in scope.
+ */
+interface Draft {
+  app: NormalizedApp;
+  repo: NormalizedRepo;
+  vars: Record<string, string>;
+  /** Env key → dotted config path of the entry that set it. */
+  envAt: Record<string, string>;
+  healthAt?: string;
+  depSpecs: string[];
+  depsAt: string;
+}
+
+interface BuildInstanceArgs {
+  raw: RawWorkspaceConfig;
+  rootDir: string;
+  limits: Limits;
+  /** `undefined` builds base: every repo, where the document says it is. */
+  record: InstanceRecord | undefined;
+  issues: ConfigIssue[];
+  warnings: string[];
+  dirChecks: DirectoryCheck[];
+}
+
+/**
+ * Builds one instance's repos and apps from the same document base is built
+ * from. Nothing about an instance is authored separately: it is the config,
+ * re-read with different checkout roots and different ports.
+ *
+ * Problems with the *document* are reported on the base pass only — they would
+ * otherwise repeat once per instance. Problems with a *record* (a repo the
+ * config has since dropped) are warnings: a stale record must never be what
+ * stops a workspace from loading.
+ */
+function buildInstance(args: BuildInstanceArgs): {
+  instance: NormalizedInstance;
+  repos: NormalizedRepo[];
+  drafts: Draft[];
+} {
+  const { raw, rootDir, limits, record, issues, warnings, dirChecks } = args;
+  const instanceName = record?.name ?? BASE_INSTANCE;
+  const isBase = record === undefined;
+  const repos: NormalizedRepo[] = [];
+  const drafts: Draft[] = [];
+  const checkouts: Record<string, InstanceRepoRecord> = {};
+  const selected = record !== undefined && record.apps.length > 0 ? new Set(record.apps) : undefined;
+  const label = (what: string): string => (isBase ? what : `instance "${instanceName}": ${what}`);
+
+  if (record !== undefined) {
+    for (const repoName of Object.keys(record.repos)) {
+      if (raw.repos[repoName] === undefined) {
+        warnings.push(label(`repo "${repoName}" is no longer in the config and is ignored`));
+      }
+    }
+  }
+
+  const workspaceLayer = { at: "env", values: raw.env };
+
+  for (const [repoName, entry] of Object.entries(raw.repos)) {
+    const basePath = resolvePath(entry.path, rootDir);
+    const checkout = record?.repos[repoName];
+    if (record !== undefined && checkout === undefined) continue;
+    const repoPath = checkout?.path ?? basePath;
+    const repoAt = `repos.${repoName}`;
+    const appEntries = Object.entries(entry.apps ?? {});
+
+    const repo: NormalizedRepo = {
+      name: qualify(repoName, instanceName),
+      baseName: repoName,
+      instance: instanceName,
+      path: repoPath,
+      basePath,
+      template: entry.template,
+      lifecycle: {
+        copy: [...(entry.instance?.copy ?? [])],
+        init: toArray(entry.instance?.init),
+        teardown: toArray(entry.instance?.teardown),
+      },
+      apps: [],
+    };
+    if (checkout !== undefined) checkouts[repo.name] = { ...checkout };
+
+    if (isBase && appEntries.length > 0 && entry.ports !== undefined) {
+      issues.push({
+        path: `${repoAt}.ports`,
+        message:
+          "a port belongs to one process, so it cannot be a default for several apps: " +
+          `declare it on the app that listens on it (${repoAt}.apps.<app>.ports)`,
+      });
+    }
+
+    const add = (spec: {
+      baseId: TargetId;
+      name: string;
+      implicit: boolean;
+      cwd: string;
+      at: string;
+      defaults?: RawRunnable;
+      entry: RawRunnable;
+      ports: Record<string, number> | undefined;
+      lifecycle: { init?: string | string[]; teardown?: string | string[] } | undefined;
+    }): void => {
+      if (selected !== undefined && !selected.has(spec.baseId)) return;
+      const repoLayer = spec.defaults === undefined ? undefined : { at: `${repoAt}.env`, values: spec.defaults.env };
+      const env = mergeTracked([workspaceLayer, repoLayer, { at: `${spec.at}.env`, values: spec.entry.env }]);
+      const health = spec.entry.health ?? spec.defaults?.health;
+      const app: NormalizedApp = {
+        id: qualify(spec.baseId, instanceName),
+        baseId: spec.baseId,
+        instance: instanceName,
+        repoName: repo.name,
+        name: spec.name,
+        implicit: spec.implicit,
+        cwd: spec.cwd,
+        scripts: { ...spec.defaults?.scripts, ...spec.entry.scripts },
+        env: env.values,
+        ports: instancePorts(spec.baseId, spec.ports, record, warnings),
+        // Left empty here and filled once every app is known, since a
+        // dependency may name a repo declared later in the document.
+        dependsOn: [],
+        health: normalizeHealth(health),
+        restart: spec.entry.restart ?? spec.defaults?.restart ?? "no",
+        template: spec.entry.template,
+        readyTimeoutMs: spec.entry.readyTimeout ?? spec.defaults?.readyTimeout ?? limits.readyTimeoutMs,
+        stopTimeoutMs: spec.entry.stopTimeout ?? spec.defaults?.stopTimeout ?? limits.stopTimeoutMs,
+        lifecycle: { init: toArray(spec.lifecycle?.init), teardown: toArray(spec.lifecycle?.teardown) },
+      };
+      repo.apps.push(app);
+      const ownDeps = spec.entry.dependsOn !== undefined;
+      drafts.push({
+        app,
+        repo,
+        vars: { ...raw.vars, ...spec.defaults?.vars, ...spec.entry.vars, ...record?.vars },
+        envAt: env.at,
+        healthAt:
+          health === undefined
+            ? undefined
+            : spec.entry.health !== undefined
+              ? `${spec.at}.health`
+              : `${repoAt}.health`,
+        depSpecs: spec.entry.dependsOn ?? spec.defaults?.dependsOn ?? [],
+        depsAt: ownDeps || spec.defaults === undefined ? `${spec.at}.dependsOn` : `${repoAt}.dependsOn`,
+      });
+    };
+
+    if (appEntries.length === 0) {
+      // Implicit app: the repo entry *is* the app definition, and its lifecycle
+      // steps are the repo's — there is no second directory to run any in.
+      add({
+        baseId: repoName,
+        name: repoName,
+        implicit: true,
+        cwd: repoPath,
+        at: repoAt,
+        entry,
+        ports: entry.ports,
+        lifecycle: undefined,
+      });
+    } else {
+      for (const [appName, appEntry] of appEntries) {
+        const appCwd = resolvePath(appEntry.path ?? ".", repoPath);
+        add({
+          baseId: `${repoName}.${appName}`,
+          name: appName,
+          implicit: false,
+          cwd: appCwd,
+          at: `${repoAt}.apps.${appName}`,
+          defaults: entry,
+          entry: appEntry,
+          ports: appEntry.ports,
+          lifecycle: appEntry.instance,
+        });
+      }
+    }
+
+    // A checkout none of whose apps this instance runs has nothing to show or
+    // start; it stays in `checkouts`, which is what destroying the instance reads.
+    if (repo.apps.length === 0) continue;
+
+    dirChecks.push({ at: label(`${repoAt}.path`), dir: repoPath });
+    for (const app of repo.apps) {
+      // An app that inherits the repo directory is already covered by the
+      // repo's own check; only a `path` of its own is a second place to be wrong.
+      if (app.cwd !== repoPath) {
+        dirChecks.push({ at: label(`${repoAt}.apps.${app.name}.path`), dir: app.cwd, under: repoPath });
+      }
+    }
+    repos.push(repo);
+  }
+
+  if (selected !== undefined) {
+    const built = new Set(drafts.map((d) => d.app.baseId));
+    for (const id of selected) {
+      if (!built.has(id)) warnings.push(label(`app "${id}" is not in the config or its repo has no checkout`));
+    }
+  }
+
+  return {
+    instance: {
+      name: instanceName,
+      isBase,
+      createdAt: record?.createdAt ?? 0,
+      repoNames: repos.map((r) => r.name),
+      appIds: repos.flatMap((r) => r.apps.map((a) => a.id)),
+      checkouts,
+      initialized: isBase || record.initializedAt !== undefined,
+    },
+    repos,
+    drafts,
+  };
+}
+
+/**
+ * Base listens where the document says. Any other instance uses what it was
+ * allocated, and a port it has not been allocated yet is `0` with a warning:
+ * falling back to the declared number would put a second process on base's
+ * port, which is the one collision instances exist to prevent.
+ */
+function instancePorts(
+  baseId: TargetId,
+  declared: Record<string, number> | undefined,
+  record: InstanceRecord | undefined,
+  warnings: string[],
+): Record<string, number> {
+  if (record === undefined) return { ...declared };
+  const allocated = record.ports[baseId] ?? {};
+  const out: Record<string, number> = {};
+  for (const name of Object.keys(declared ?? {})) {
+    const port = allocated[name];
+    if (port === undefined) {
+      warnings.push(`instance "${record.name}": no port allocated yet for "${name}" of ${baseId}`);
+    }
+    out[name] = port ?? 0;
+  }
+  return out;
+}
+
+/** `undefined` when the name can be used for an instance. */
+export function instanceNameProblem(name: string): string | undefined {
+  if (name === BASE_INSTANCE) return `"${BASE_INSTANCE}" is the name of the instance the config itself describes`;
+  if (!NAME_PATTERN.test(name)) {
+    return 'invalid instance name: use letters, digits, "_" or "-", starting with a letter or digit';
+  }
+  return undefined;
+}
+
+/** Deepest layer wins, and each key remembers which layer that was. */
+function mergeTracked(
+  layers: ReadonlyArray<{ at: string; values: Record<string, string> | undefined } | undefined>,
+): { values: Record<string, string>; at: Record<string, string> } {
+  const values: Record<string, string> = {};
+  const at: Record<string, string> = {};
+  for (const layer of layers) {
+    for (const [key, value] of Object.entries(layer?.values ?? {})) {
+      values[key] = value;
+      at[key] = `${layer?.at ?? "env"}.${key}`;
+    }
+  }
+  return { values, at };
+}
+
+/** Lowercase with everything but letters and digits folded to `_`: safe in a database name. */
+function instanceSlug(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "_");
+}
+
+interface ResolverArgs {
+  draft: Draft;
+  workspaceName: string;
+  rootDir: string;
+  expand: (spec: string) => TargetId[] | undefined;
+  inInstance: (baseId: TargetId, instance: string) => NormalizedApp | undefined;
+}
+
+/** What each `${…}` is worth for one app. Errors are messages; the caller knows the path. */
+function referenceResolver(args: ResolverArgs): (ref: Ref) => Resolution {
+  const { draft, workspaceName, rootDir, expand, inInstance } = args;
+  const { app, repo } = draft;
+  const isBase = app.instance === BASE_INSTANCE;
+
+  const portOf = (owner: NormalizedApp, name: string, written: string): Resolution => {
+    const port = owner.ports[name];
+    if (port !== undefined) return { value: String(port) };
+    const declared = Object.keys(owner.ports);
+    return {
+      error:
+        `\${${written}}: "${owner.baseId}" declares no port "${name}"` +
+        (declared.length > 0 ? ` (it has ${declared.map((p) => `"${p}"`).join(", ")})` : ' — add it under "ports"'),
+    };
+  };
+
+  return (ref) => {
+    switch (ref.kind) {
+      case "port": {
+        if (ref.target === undefined) return portOf(app, ref.name, `ports.${ref.name}`);
+        const written = `${ref.target}.ports.${ref.name}`;
+        const ids = expand(ref.target);
+        if (!ids) return { error: `\${${written}}: ${unknownTarget(ref.target)}` };
+        const [only, ...rest] = ids;
+        if (only === undefined || rest.length > 0) {
+          return { error: `\${${written}}: "${ref.target}" has several apps — name one: ${ids.join(", ")}` };
+        }
+        const owner = inInstance(only, app.instance);
+        return owner ? portOf(owner, ref.name, written) : { error: `\${${written}}: ${unknownTarget(ref.target)}` };
+      }
+      case "var": {
+        const value = draft.vars[ref.name];
+        if (value !== undefined) return { value };
+        return { error: `\${vars.${ref.name}}: no var "${ref.name}" is declared under "vars"` };
+      }
+      case "builtin": {
+        const slug = instanceSlug(app.instance);
+        const values: Record<string, Record<string, string>> = {
+          instance: { name: app.instance, slug, suffix: isBase ? "" : `_${slug}` },
+          workspace: { name: workspaceName, root: rootDir },
+          repo: { name: repo.baseName, path: repo.path },
+          base: { path: repo.basePath },
+          app: { id: app.id, name: app.name, path: app.cwd },
+        };
+        const value = values[ref.scope]?.[ref.field];
+        return value === undefined ? { error: `unknown reference "\${${ref.scope}.${ref.field}}"` } : { value };
+      }
+    }
+  };
+}
+
+/**
+ * Two base apps declaring one port is almost always a copy-paste, and the
+ * second of them to start fails with an EADDRINUSE that names neither. A
+ * warning rather than an error: two apps that are never run together may share
+ * a port on purpose.
+ */
+function portWarnings(baseApps: readonly NormalizedApp[]): string[] {
+  const out: string[] = [];
+  const owners = new Map<number, string>();
+  for (const app of baseApps) {
+    for (const [name, port] of Object.entries(app.ports)) {
+      const owner = owners.get(port);
+      if (owner !== undefined) out.push(`port ${port} is declared by both ${owner} and ${app.id} ("${name}")`);
+      else owners.set(port, `${app.id} ("${name}")`);
+    }
+  }
+  return out;
+}
+
+function dedupeIssues(issues: readonly ConfigIssue[]): ConfigIssue[] {
+  const seen = new Set<string>();
+  return issues.filter((issue) => {
+    const key = `${issue.path}\u0000${issue.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -315,43 +725,6 @@ function isInside(dir: string, parent: string): boolean {
 // ---------------------------------------------------------------------------
 // Apps
 // ---------------------------------------------------------------------------
-
-interface BuildAppArgs {
-  id: TargetId;
-  repoName: string;
-  name: string;
-  implicit: boolean;
-  cwd: string;
-  /** Workspace-level env; the bottom of the merge order. */
-  baseEnv: Record<string, string>;
-  /** The repo entry, when it acts as a defaults layer for an explicit app. */
-  defaults?: RawRunnable;
-  entry: RawRunnable;
-  limits: Limits;
-}
-
-/**
- * `dependsOn` is left empty here and filled once every app is known, since a
- * dependency may name a repo declared later in the document.
- */
-function buildApp(args: BuildAppArgs): NormalizedApp {
-  const { defaults, entry, limits } = args;
-  return {
-    id: args.id,
-    repoName: args.repoName,
-    name: args.name,
-    implicit: args.implicit,
-    cwd: args.cwd,
-    scripts: { ...defaults?.scripts, ...entry.scripts },
-    env: { ...args.baseEnv, ...defaults?.env, ...entry.env },
-    dependsOn: [],
-    health: normalizeHealth(entry.health ?? defaults?.health),
-    restart: entry.restart ?? defaults?.restart ?? "no",
-    template: entry.template,
-    readyTimeoutMs: entry.readyTimeout ?? defaults?.readyTimeout ?? limits.readyTimeoutMs,
-    stopTimeoutMs: entry.stopTimeout ?? defaults?.stopTimeout ?? limits.stopTimeoutMs,
-  };
-}
 
 /** Replaced wholesale rather than merged: `http` and `cmd` are mutually exclusive. */
 function normalizeHealth(health: RawHealth | undefined): HealthCheckDef | undefined {
@@ -500,7 +873,7 @@ function templateWarnings(
  * instead. A copy of the list in `src/indicators/core.ts`: config sits below
  * the indicator layer and cannot ask it.
  */
-const REPO_ROW_TOKENS = "{repo@name}, {repo@dirname}, {repo@path} or {repo@status}";
+const REPO_ROW_TOKENS = "{repo@name}, {repo@dirname}, {repo@path}, {repo@instance} or {repo@status}";
 
 /** Core, the enabled built-ins, and whatever the declared plugins are likely called. */
 function knownNamespaces({

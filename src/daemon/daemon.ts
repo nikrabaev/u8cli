@@ -51,7 +51,8 @@ import type {
   WorkspaceHolder,
 } from "./contracts.js";
 import { buildSnapshot, createHandlers, type HandlerDeps, type ReloadOutcome } from "./handlers.js";
-import { createStateStore, createSupervisedJournal, supervisedFile } from "./state.js";
+import { createInstanceManager, createInstanceStore } from "./instances.js";
+import { createStateStore, createSupervisedJournal, supervisedFile, writeWorkspaceIndex } from "./state.js";
 import { createSupervisor, type ReconcileReport } from "./supervisor.js";
 import { configSignature, watchConfig } from "./watch.js";
 
@@ -97,6 +98,13 @@ const DRAIN_GRACE_MS = 2_000;
  */
 export const STATE_WATCH_MS = 500;
 
+/**
+ * How often adopted instances are checked for checkouts that have disappeared.
+ * A worktree another tool removed leaves services running on ports nobody will
+ * ever free by hand; two passes of this are what notices.
+ */
+export const PRUNE_INTERVAL_MS = 15_000;
+
 export interface DaemonOptions {
   /** Path to `u8.jsonc`. Symlink-resolved before the state dir is derived. */
   configPath: string;
@@ -105,6 +113,8 @@ export interface DaemonOptions {
   idleMs?: number;
   /** Overrides {@link RUN_IDLE_CEILING_MS}; a test shrinks it to milliseconds. */
   runCeilingMs?: number;
+  /** Overrides {@link PRUNE_INTERVAL_MS}; a test shrinks it. `0` disables pruning. */
+  pruneMs?: number;
   /**
    * Replaces the host built from `ws.plugins` and the built-ins. A test passes
    * a fake (`emptyPluginHost` in `contracts.ts`) to keep a workspace's real
@@ -234,7 +244,23 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     activeProfile: () => activeProfile,
   });
 
+  /**
+   * Declared before `requestReload` exists because creating or destroying an
+   * instance *is* a reload: the record is saved, and the workspace re-read.
+   * It only ever calls the gate, never the reload itself, so the "reloads are
+   * serial" rule holds for it like for everything else.
+   */
+  const instances = createInstanceManager({
+    workspace,
+    store: createInstanceStore({ file: paths.instancesFile, logger }),
+    engine,
+    logger,
+    activeProfile: () => activeProfile,
+    reload: () => requestReload(),
+  });
+
   const idleMs = resolveIdleMs(opts.idleMs, ws.limits.daemonIdleMs, logger);
+  const pruneMs = resolvePruneMs(opts.pruneMs, logger);
   const runCeilingMs = Math.max(0, opts.runCeilingMs ?? RUN_IDLE_CEILING_MS);
   const startedAt = Date.now();
 
@@ -245,6 +271,7 @@ export function createDaemon(opts: DaemonOptions): Daemon {
   let idleTimer: NodeJS.Timeout | undefined;
   let idleDeadline: number | undefined;
   let stateTimer: NodeJS.Timeout | undefined;
+  let pruneTimer: NodeJS.Timeout | undefined;
   let activeRuns = 0;
   let listening = false;
   let shutdownPromise: Promise<void> | undefined;
@@ -495,6 +522,8 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     ws = next;
     configError = undefined;
     reportConfigWarnings(ws);
+    publishIndex();
+    allocateMissingPorts(ws);
     if (!findProfile(ws, activeProfile)) {
       const fallback = ws.defaultProfile;
       logger.warn(`active profile "${activeProfile}" is gone; falling back to "${fallback}"`);
@@ -518,6 +547,35 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       snapshot: buildSnapshot(handlerDeps),
     });
     return { ok: true };
+  };
+
+  /**
+   * A config edit can give an app a port its instances were never allocated.
+   * Handing them out is not done inside the reload: allocation queues behind
+   * whatever the instance manager is doing, and that may itself be waiting on
+   * this very reload. So the reload finishes with the port unset — and says so
+   * in a warning — and a second one follows once the numbers are saved.
+   */
+  const allocateMissingPorts = (loaded: NormalizedWorkspace): void => {
+    const missing = loaded.apps.some((a) => Object.values(a.ports).includes(0));
+    if (!missing || shutdownPromise !== undefined) return;
+    void instances
+      .ensurePorts(loaded)
+      .then((changed) => (changed ? requestReload() : undefined))
+      .catch((err: unknown) => {
+        logger.error(`allocating instance ports failed: ${errorMessage(err)}`);
+      });
+  };
+
+  /**
+   * Where a client that starts somewhere inside one of this workspace's
+   * checkouts finds its way back to it. Best-effort: discovery from the config
+   * file still works without it.
+   */
+  const publishIndex = (): void => {
+    void writeWorkspaceIndex(paths, ws).catch((err: unknown) => {
+      logger.debug(`could not write ${paths.workspaceFile}: ${errorMessage(err)}`);
+    });
   };
 
   /** Resumes after the in-flight reload, so a burst ends on the last save. */
@@ -612,6 +670,7 @@ export function createDaemon(opts: DaemonOptions): Daemon {
       activeProfile = name;
     },
     track,
+    instances,
     shuttingDown: () => shutdownPromise !== undefined,
     requestShutdown: (reason: string) => {
       // After the current turn, so the `{ ok: true }` response is written before
@@ -638,6 +697,8 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     // change the watchdog exists to notice.
     if (stateTimer !== undefined) clearInterval(stateTimer);
     stateTimer = undefined;
+    if (pruneTimer !== undefined) clearInterval(pruneTimer);
+    pruneTimer = undefined;
     // Before anything is torn down: a save landing mid-shutdown must not start
     // re-binding indicators that are on their way out.
     stopWatching?.();
@@ -711,6 +772,19 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     if (listening) return;
     await mkdir(paths.dir, { recursive: true });
 
+    // Before anything reads `ws`: an instance whose app gained a port while no
+    // daemon was running would otherwise come up with that port unset, and be
+    // re-read a moment later for no better reason than ordering.
+    try {
+      if (await instances.ensurePorts(ws)) {
+        ws = loadWorkspaceFrom(configPath);
+        reportConfigWarnings(ws);
+      }
+    } catch (err) {
+      logger.error(`allocating instance ports failed: ${errorMessage(err)}`);
+    }
+    publishIndex();
+
     // First of all, and before anything can be spawned: services a previous
     // daemon left running are either taken back or stopped here, so no plugin,
     // indicator or client ever sees a target reported `stopped` while its
@@ -765,6 +839,14 @@ export function createDaemon(opts: DaemonOptions): Daemon {
     // Background, like every other daemon timer: the listening socket is what
     // keeps the process alive, and `doShutdown` clears this one first.
     stateTimer.unref();
+
+    if (pruneMs > 0) {
+      pruneTimer = setInterval(() => {
+        if (shutdownPromise !== undefined) return;
+        for (const run of instances.prune()) track(run);
+      }, pruneMs);
+      pruneTimer.unref();
+    }
 
     // Last: a reload that ran before the socket was bound would have nobody to
     // tell, and `config.reloaded` is how a client learns its snapshot moved.
@@ -877,6 +959,18 @@ interface LogBudget {
 function pickProfile(ws: NormalizedWorkspace, saved: string | undefined): string {
   if (saved !== undefined && findProfile(ws, saved)) return saved;
   return ws.defaultProfile;
+}
+
+/** `opts.pruneMs` beats `U8_PRUNE_MS`, which beats the default; `0` turns pruning off. */
+function resolvePruneMs(override: number | undefined, logger: Logger): number {
+  if (override !== undefined) return Math.max(0, Math.floor(override));
+  const raw = process.env.U8_PRUNE_MS;
+  if (raw !== undefined && raw.length > 0) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed)) return Math.max(0, Math.floor(parsed));
+    logger.warn(`ignoring U8_PRUNE_MS="${raw}": not a number`);
+  }
+  return PRUNE_INTERVAL_MS;
 }
 
 /**

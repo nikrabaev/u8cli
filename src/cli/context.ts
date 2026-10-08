@@ -21,9 +21,10 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { discoverConfig, loadWorkspaceFrom } from "../config/index.js";
+import { BASE_INSTANCE, discoverConfig, loadWorkspaceFrom, locateWorkspace } from "../config/index.js";
 import { attach, ensureDaemon, type AttachedClient } from "../daemon/index.js";
 import type { RpcClient } from "../ipc/index.js";
+import type { Snapshot, SnapshotInstance } from "../ipc/protocol.js";
 import { ConfigError, isU8Error, U8Error } from "../util/errors.js";
 import type { Logger } from "../util/logger.js";
 import { CONFIG_FILENAME, statePaths, type StatePaths } from "../util/paths.js";
@@ -35,6 +36,8 @@ export interface GlobalOptions {
   config?: string;
   color?: boolean;
   cwd?: string;
+  /** `-i`: act on this instance, whatever directory this is. */
+  instance?: string;
 }
 
 export interface CliContext {
@@ -58,19 +61,110 @@ export function createContext(io: CliIo, globals: GlobalOptions): CliContext {
   };
 }
 
+/** Which workspace, and which instance of it, an invocation acts on. */
+export interface Scope {
+  /** Symlink-resolved, so it matches the daemon's state dir. */
+  configPath: string;
+  /** `"base"` unless something says otherwise. */
+  instance: string;
+  /** How {@link instance} was decided — the difference matters to an error message. */
+  source: "flag" | "env" | "directory" | "default";
+  /**
+   * Root of the git worktree this directory is in, when it is a worktree of the
+   * workspace that no instance covers and nothing named an instance either.
+   * {@link instance} is base then, but only for lack of a better answer.
+   */
+  unregistered?: string;
+}
+
+/**
+ * The workspace config and the instance this invocation acts on.
+ *
+ * The instance is whatever was said most explicitly: `-i`, then `U8_INSTANCE`,
+ * then the directory itself — a command typed inside an instance's checkout
+ * means that instance, which is what lets a tool working in a worktree use
+ * plain `u8 status` and `u8 restart api` without ever touching base.
+ *
+ * Throws `CONFIG_NOT_FOUND` with the `u8 init` hint.
+ */
+export function scopeOf(ctx: CliContext): Scope {
+  const given = ctx.globals.config;
+  const located = locateWorkspace(ctx.cwd);
+
+  let configPath: string;
+  if (given === undefined) {
+    // `discoverConfig` only to throw the one "run `u8 init`" message.
+    configPath = located?.configPath ?? discoverConfig(ctx.cwd);
+  } else {
+    const candidate = path.resolve(ctx.cwd, given);
+    try {
+      configPath = fs.realpathSync(candidate);
+    } catch {
+      throw new U8Error("CONFIG_NOT_FOUND", `config file not found: ${candidate}`, { configPath: candidate });
+    }
+  }
+  // What the directory says only counts for the workspace it says it about.
+  const here = located?.configPath === configPath ? located : undefined;
+
+  const flag = ctx.globals.instance;
+  if (flag !== undefined && flag.length > 0) return { configPath, instance: flag, source: "flag" };
+  const env = ctx.io.env["U8_INSTANCE"];
+  if (env !== undefined && env.length > 0) return { configPath, instance: env, source: "env" };
+  if (here?.instance !== undefined) return { configPath, instance: here.instance, source: "directory" };
+  return { configPath, instance: BASE_INSTANCE, source: "default", unregistered: here?.unregistered };
+}
+
 /**
  * The workspace config this invocation acts on, symlink-resolved so it matches
  * the daemon's state dir. Throws `CONFIG_NOT_FOUND` with the `u8 init` hint.
  */
 export function configPathOf(ctx: CliContext): string {
-  const given = ctx.globals.config;
-  if (given === undefined) return discoverConfig(ctx.cwd);
-  const candidate = path.resolve(ctx.cwd, given);
-  try {
-    return fs.realpathSync(candidate);
-  } catch {
-    throw new U8Error("CONFIG_NOT_FOUND", `config file not found: ${candidate}`, { configPath: candidate });
-  }
+  return scopeOf(ctx).configPath;
+}
+
+/**
+ * The instance a scope names, checked against what the daemon has. A typo in
+ * `-i` is answered with the names that exist rather than with every target in
+ * the command turning out to be unknown.
+ */
+export function instanceIn(snapshot: Snapshot, scope: Scope): SnapshotInstance {
+  const found = snapshot.instances.find((i) => i.name === scope.instance);
+  if (found) return found;
+  throw new U8Error("UNKNOWN_INSTANCE", `unknown instance "${scope.instance}"`, {
+    instance: scope.instance,
+    known: snapshot.instances.map((i) => i.name),
+  });
+}
+
+/**
+ * Refuses to change anything from a worktree that is neither base nor an
+ * instance.
+ *
+ * Without this the command would quietly mean base: `u8 restart api` typed in a
+ * fresh worktree would restart the api everybody else is using, by someone who
+ * believed they were restarting their own. Reading is still allowed there —
+ * {@link warnUnregistered} says what is being shown instead.
+ */
+export function requireRegistered(scope: Scope, action: string): void {
+  if (scope.unregistered === undefined) return;
+  throw new U8Error(
+    "UNKNOWN_INSTANCE",
+    `${scope.unregistered} is a git worktree of this workspace with no instance of its own, ` +
+      `so "${action}" here would act on the base checkouts — run \`u8 up\` to give it one, ` +
+      `or add \`-i ${BASE_INSTANCE}\` if base is what you meant`,
+    { worktree: scope.unregistered },
+  );
+}
+
+/** The read-only half of {@link requireRegistered}: show base, but say so. */
+export function warnUnregistered(ctx: CliContext, scope: Scope): void {
+  if (scope.unregistered === undefined) return;
+  writeLine(
+    ctx.io.stderr,
+    ctx.style.yellow(
+      `this worktree has no instance of its own, so this is the base instance — \`u8 up\` creates one for it`,
+    ),
+  );
 }
 
 /** A workspace's state dir, and whether its config is still on disk. */

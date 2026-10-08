@@ -26,8 +26,15 @@ export function skeletonConfig(name: string): string {
   //   "app": "  {app@status} {app@name:pad(22)} {health@status}"
   // },
 
-  // Env for every process. Merge order: workspace -> repo -> app.
+  // Env for every process. Merge order: workspace -> repo -> app. A value may
+  // reference a declared port or the instance it runs in — \${ports.http},
+  // \${api.ports.http}, \${instance.name}. Scripts are never interpolated:
+  // they read what they need from this env.
   // "env": { "NODE_ENV": "development" },
+
+  // Parallel copies of the workspace (\`u8 instance create\`, \`u8 up\`): where
+  // their git worktrees go and which ports they are allocated from.
+  // "instances": { "dir": ".u8/worktrees", "ports": { "from": 20000, "to": 20999 } },
 
   // Extra indicators, rendered as {x@version}. The command runs in each
   // target's cwd; trimmed stdout is the value.
@@ -68,11 +75,22 @@ export function skeletonConfig(name: string): string {
         "start": "echo 'replace me with your dev server' && sleep 3600"
       },
 
-      // "env": { "PORT": "3000" },
+      // Declare a port once and reference it: base listens on the number
+      // written here, every other instance is allocated its own.
+      // "ports": { "http": 3000 },
+      // "env": { "PORT": "\${ports.http}" },
       // "restart": "on-crash",
-      // "health": { "http": "http://localhost:3000/healthz" },
+      // "health": { "http": "http://localhost:\${ports.http}/healthz" },
       // "health": { "cmd": "pg_isready -q", "interval": 5000, "threshold": 2 },
       // "dependsOn": ["db"],
+
+      // What a fresh checkout of this repo needs before it can run, and what
+      // to undo when its instance is destroyed.
+      // "instance": {
+      //   "copy": [".env"],
+      //   "init": ["pnpm install"],
+      //   "teardown": ["echo bye"]
+      // },
 
       // A monorepo declares apps instead — each one is separately runnable
       // as "example.web" / "example.api". Anything set on the repo above becomes

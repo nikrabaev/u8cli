@@ -14,7 +14,7 @@
  */
 import { loadWorkspaceFrom } from "../config/index.js";
 import { ConfigError, isU8Error } from "../util/errors.js";
-import { configPathOf, type CliContext } from "./context.js";
+import { scopeOf, type CliContext } from "./context.js";
 import { writeLine, type OutputStream } from "./io.js";
 import { statusCommand, type StatusOptions } from "./status.js";
 
@@ -39,10 +39,11 @@ export async function dashboardCommand(ctx: CliContext, opts: StatusOptions = {}
   // Loaded on demand: Ink and React cost ~150ms to import, and `u8 status` in a
   // shell loop must not pay for a screen it will never draw.
   const { runDashboard } = await import("../tui/index.js");
-  const configPath = configPathOf(ctx);
+  const { configPath, instance } = scopeOf(ctx);
   try {
     return await runDashboard({
       configPath,
+      instance,
       ...terminal,
       color: ctx.color,
       signal: ctx.io.signal,

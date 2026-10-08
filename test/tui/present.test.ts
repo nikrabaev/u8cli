@@ -42,6 +42,7 @@ function state(overrides: Partial<DashboardState> = {}): DashboardState {
     logViewport: 10,
     running: 1,
     total: 3,
+    instances: 1,
     pluginErrors: [],
     progress: {},
     activeRuns: 0,
@@ -55,6 +56,12 @@ describe("header", () => {
     expect(headerText(state())).toBe("fixture · profile all · 1/3 running · daemon 0.1.0");
   });
 
+  it("says how many instances the count covers once there is more than base", () => {
+    expect(headerText(state({ instances: 3, running: 4, total: 7 }))).toBe(
+      "fixture · profile all · 3 instances · 4/7 running · daemon 0.1.0",
+    );
+  });
+
   it("replaces the daemon version with its state once it stops answering", () => {
     expect(headerText(state({ connection: "reconnecting" }))).toContain("daemon reconnecting");
     expect(headerText(state({ connection: "lost" }))).toContain("daemon lost");
@@ -65,6 +72,7 @@ describe("header", () => {
       kind: "app" as const,
       id: `a.${i}`,
       repoName: "a",
+      instance: "base",
       text: "",
       targets: [`a.${i}`],
     }));

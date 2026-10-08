@@ -111,7 +111,7 @@ function indicatorContext(cwd: string): IndicatorContext {
     store: new Map<string, unknown>(),
     exec: () => Promise.reject(new Error("protos indicators must not shell out")),
     scope: "app",
-    repo: { name: "api", path: cwd },
+    repo: { name: "api", baseName: "api", instance: "base", path: cwd },
     cwd,
   };
 }
@@ -141,12 +141,15 @@ function command(def: PluginDefinition, name: string): PluginCommandDef {
 function targetAt(cwd: string, id = "api"): TargetInfo {
   return {
     id,
+    baseId: id,
+    instance: "base",
     repoName: id,
     name: id,
     implicit: true,
     cwd,
     scripts: {},
     env: {},
+    ports: {},
     dependsOn: [],
     hasHealth: false,
   };

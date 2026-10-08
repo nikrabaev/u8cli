@@ -49,9 +49,10 @@ export function fixtureSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     workspace: { id: "wsid", name: "fixture", rootDir: "/ws", configPath: "/ws/u8.jsonc" },
     templates: { repo: "REPO {repo@name}", app: "APP {app@name} {app@status}" },
     repos: [
-      { name: "api", path: "/ws/api", apps: [api] },
-      { name: "platform", path: "/ws/platform", apps: [web, admin] },
+      { name: "api", baseName: "api", instance: "base", path: "/ws/api", apps: [api] },
+      { name: "platform", baseName: "platform", instance: "base", path: "/ws/platform", apps: [web, admin] },
     ],
+    instances: [{ name: "base", isBase: true, createdAt: 0, appIds: ids, checkouts: {}, initialized: true }],
     profiles: [
       { name: "all", isDefault: true, appIds: ids },
       { name: "frontend", isDefault: false, appIds: [web.id] },
@@ -78,12 +79,16 @@ export function fixtureSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
 
 export function app(repoName: string, name?: string): SnapshotApp {
   const implicit = name === undefined;
+  const id = implicit ? repoName : `${repoName}.${name}`;
   return {
-    id: implicit ? repoName : `${repoName}.${name}`,
+    id,
+    baseId: id,
+    instance: "base",
     repoName,
     name: name ?? repoName,
     implicit,
     cwd: `/ws/${repoName}${implicit ? "" : `/${name}`}`,
+    ports: {},
     hasHealth: false,
     dependsOn: [],
     scripts: ["start"],

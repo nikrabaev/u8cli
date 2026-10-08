@@ -14,7 +14,7 @@
  *    unref'd — indicators must not keep the daemon alive — and `stop()` leaves
  *    none behind.
  */
-import type { NormalizedApp, NormalizedWorkspace, TargetId } from "../config/types.js";
+import { splitQualified, type NormalizedApp, type NormalizedWorkspace, type TargetId } from "../config/types.js";
 import type { IndicatorRegistration, IndicatorRegistry, Unsubscribe } from "../daemon/contracts.js";
 import type { IndicatorTone, IndicatorValue } from "../ipc/protocol.js";
 import type {
@@ -554,7 +554,7 @@ class Registry implements IndicatorRegistry {
         exec: execIn(repo.path, {}, signal),
         store,
         scope: "repo",
-        repo: { name: repo.name, path: repo.path },
+        repo: { name: repo.name, baseName: repo.baseName, instance: repo.instance, path: repo.path },
         cwd: repo.path,
       };
     }
@@ -568,7 +568,12 @@ class Registry implements IndicatorRegistry {
       exec: execIn(app.cwd, app.env, signal),
       store,
       scope: "app",
-      repo: { name: app.repoName, path: repo?.path ?? app.cwd },
+      repo: {
+        name: app.repoName,
+        baseName: repo?.baseName ?? splitQualified(app.repoName).name,
+        instance: app.instance,
+        path: repo?.path ?? app.cwd,
+      },
       target: toTargetInfo(app),
       cwd: app.cwd,
       service: this.deps.services.state(app.id),
@@ -617,12 +622,15 @@ function repoOwnersOf(ws: NormalizedWorkspace, ids: ReadonlySet<TargetId>): Set<
 function toTargetInfo(app: NormalizedApp): TargetInfo {
   return {
     id: app.id,
+    baseId: app.baseId,
+    instance: app.instance,
     repoName: app.repoName,
     name: app.name,
     implicit: app.implicit,
     cwd: app.cwd,
     scripts: { ...app.scripts },
     env: { ...app.env },
+    ports: { ...app.ports },
     dependsOn: [...app.dependsOn],
     hasHealth: app.health !== undefined,
   };

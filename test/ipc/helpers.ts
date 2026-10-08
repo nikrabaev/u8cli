@@ -89,6 +89,7 @@ export function fakeSnapshot(): Snapshot {
     workspace: { id: "wsid", name: "ws", rootDir: "/tmp/ws", configPath: "/tmp/ws/u8.jsonc" },
     templates: DEFAULT_TEMPLATES,
     repos: [],
+    instances: [{ name: "base", isBase: true, createdAt: 0, appIds: [], checkouts: {}, initialized: true }],
     profiles: [],
     activeProfile: "default",
     commands: [],

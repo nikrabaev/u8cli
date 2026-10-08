@@ -20,8 +20,10 @@ import {
   commandTargets,
   coreStartScript,
   findApp,
+  findInstance,
   findProfile,
   type NormalizedCommand,
+  type NormalizedInstance,
   type NormalizedWorkspace,
   type TargetId,
 } from "../config/index.js";
@@ -34,10 +36,12 @@ import {
   type Snapshot,
   type SnapshotApp,
   type SnapshotCommand,
+  type SnapshotInstance,
   type SnapshotRepo,
 } from "../ipc/protocol.js";
 import { errorMessage, U8Error } from "../util/errors.js";
 import type { BoundCommand, DaemonContext, RunHandle } from "./contracts.js";
+import type { InstanceManager } from "./instances.js";
 
 /** Backfill size when a client does not ask for one. */
 export const DEFAULT_LOG_LINES = 200;
@@ -75,6 +79,7 @@ export interface HandlerDeps extends DaemonContext {
   saveProfile(name: string): Promise<void>;
   /** Registers an in-flight run so idle exit cannot fire underneath it. */
   track(handle: RunHandle): void;
+  instances: InstanceManager;
   /** Schedules a graceful shutdown *after* the current response is written. */
   requestShutdown(reason: string): void;
   /** True from the moment shutdown begins; see {@link refuseWhileStopping}. */
@@ -164,12 +169,15 @@ export function createHandlers(deps: HandlerDeps): RpcHandlerMap {
 
     "service.start": (params) => {
       refuseWhileStopping("service.start");
-      return launch(deps.engine.startTargets(readTargets(params)));
+      return launch(deps.engine.startTargets(readTargets(params), readStartScope(deps, params)));
     },
-    "service.stop": (params) => launch(deps.engine.stopTargets(readTargets(params))),
+    "service.stop": (params) =>
+      // Not validated against the workspace: stopping what a vanished instance
+      // left running is exactly what this has to be able to do.
+      launch(deps.engine.stopTargets(readTargets(params), { instance: readString(params, "instance") })),
     "service.restart": (params) => {
       refuseWhileStopping("service.restart");
-      return launch(deps.engine.restartTargets(readTargets(params)));
+      return launch(deps.engine.restartTargets(readTargets(params), readStartScope(deps, params)));
     },
 
     "command.run": (params) => {
@@ -184,11 +192,44 @@ export function createHandlers(deps: HandlerDeps): RpcHandlerMap {
         deps.engine.runCommand({
           command,
           targets: readTargets(params),
+          ...readStartScope(deps, params),
           serial: readBoolean(params, "serial"),
           concurrency: concurrency !== undefined && concurrency > 0 ? Math.floor(concurrency) : undefined,
         }),
       );
     },
+
+    "instance.create": async (params) => {
+      refuseWhileStopping("instance.create");
+      const name = readString(params, "name");
+      if (name === undefined || name.length === 0) {
+        throw new U8Error("INSTANCE_INVALID", 'instance.create requires a "name"');
+      }
+      const { run } = await deps.instances.create({
+        name,
+        targets: readTargets(params),
+        adopt: readStringList(params, "adopt"),
+        paths: readStringMap(params, "paths"),
+        branch: readString(params, "branch"),
+        from: readString(params, "from"),
+        vars: readStringMap(params, "vars"),
+      });
+      const instance = findInstance(ws(), name);
+      if (!instance) throw new U8Error("INTERNAL", `instance "${name}" vanished right after it was created`);
+      return { instance: toSnapshotInstance(instance), ...launch(run) };
+    },
+
+    "instance.init": (params) => {
+      refuseWhileStopping("instance.init");
+      return launch(deps.instances.init(requireName(params, "instance.init")));
+    },
+
+    "instance.destroy": (params) =>
+      launch(
+        deps.instances.destroy(requireName(params, "instance.destroy"), {
+          force: readBoolean(params, "force") === true,
+        }),
+      ),
 
     "run.await": (params) => {
       const runId = readString(params, "runId");
@@ -243,6 +284,7 @@ export function buildSnapshot(deps: HandlerDeps): Snapshot {
     workspace: { id: ws.id, name: ws.name, rootDir: ws.rootDir, configPath: ws.configPath },
     templates: { ...ws.templates },
     repos: ws.repos.map(toSnapshotRepo),
+    instances: ws.instances.map(toSnapshotInstance),
     profiles: ws.profiles.map((p) => ({
       name: p.name,
       isDefault: p.isDefault,
@@ -257,18 +299,34 @@ export function buildSnapshot(deps: HandlerDeps): Snapshot {
   };
 }
 
+export function toSnapshotInstance(instance: NormalizedInstance): SnapshotInstance {
+  return {
+    name: instance.name,
+    isBase: instance.isBase,
+    createdAt: instance.createdAt,
+    appIds: [...instance.appIds],
+    checkouts: Object.fromEntries(Object.entries(instance.checkouts).map(([repo, c]) => [repo, { ...c }])),
+    initialized: instance.initialized,
+  };
+}
+
 function toSnapshotRepo(repo: NormalizedWorkspace["repos"][number]): SnapshotRepo {
   return {
     name: repo.name,
+    baseName: repo.baseName,
+    instance: repo.instance,
     path: repo.path,
     template: repo.template,
     apps: repo.apps.map(
       (s): SnapshotApp => ({
         id: s.id,
+        baseId: s.baseId,
+        instance: s.instance,
         repoName: s.repoName,
         name: s.name,
         implicit: s.implicit,
         cwd: s.cwd,
+        ports: { ...s.ports },
         template: s.template,
         hasHealth: s.health !== undefined,
         dependsOn: [...s.dependsOn],
@@ -354,6 +412,33 @@ function readBoolean(params: unknown, field: string): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
+function requireName(params: unknown, method: string): string {
+  const name = readString(params, "name");
+  if (name === undefined || name.length === 0) {
+    throw new U8Error("UNKNOWN_INSTANCE", `${method} requires a "name"`);
+  }
+  return name;
+}
+
+function readStringList(params: unknown, field: string): string[] | undefined {
+  const value = asRecord(params)?.[field];
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.some((v) => typeof v !== "string")) {
+    throw new U8Error("RPC_ERROR", `"${field}" must be an array of strings`);
+  }
+  return value as string[];
+}
+
+function readStringMap(params: unknown, field: string): Record<string, string> | undefined {
+  const value = asRecord(params)?.[field];
+  if (value === undefined || value === null) return undefined;
+  const record = asRecord(value);
+  if (!record || Object.values(record).some((v) => typeof v !== "string")) {
+    throw new U8Error("RPC_ERROR", `"${field}" must be an object of strings`);
+  }
+  return record as Record<string, string>;
+}
+
 /** `undefined` (or an empty list) means "the active profile", per the protocol. */
 function readTargets(params: unknown): string[] | undefined {
   const value = asRecord(params)?.["targets"];
@@ -362,6 +447,21 @@ function readTargets(params: unknown): string[] | undefined {
     throw new U8Error("UNKNOWN_TARGET", '"targets" must be an array of target strings');
   }
   return value.length === 0 ? undefined : (value as string[]);
+}
+
+/**
+ * The instance a request is scoped to, checked here so a typo is answered with
+ * the list of instances rather than with "unknown target" for every name in it.
+ */
+function readStartScope(deps: HandlerDeps, params: unknown): { instance?: string; wait?: boolean } {
+  const instance = readString(params, "instance");
+  if (instance !== undefined && !findInstance(deps.workspace.current(), instance)) {
+    throw new U8Error("UNKNOWN_INSTANCE", `unknown instance "${instance}"`, {
+      instance,
+      known: deps.workspace.current().instances.map((i) => i.name),
+    });
+  }
+  return { instance, wait: readBoolean(params, "wait") };
 }
 
 /**

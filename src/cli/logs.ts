@@ -12,10 +12,11 @@
  * and never when there is only one, because that prefix would just be noise in
  * front of every line of a `grep`.
  */
+import { qualifyTarget } from "../config/index.js";
 import type { AttachedClient } from "../daemon/index.js";
 import type { LogLine, Snapshot } from "../ipc/protocol.js";
 import { U8Error } from "../util/errors.js";
-import { withAttached, type CliContext } from "./context.js";
+import { instanceIn, scopeOf, warnUnregistered, withAttached, type CliContext } from "./context.js";
 import { EXIT_INTERRUPTED } from "./errors.js";
 import { writeLine } from "./io.js";
 
@@ -28,8 +29,11 @@ export interface LogsOptions {
 }
 
 export async function logsCommand(ctx: CliContext, target: string, opts: LogsOptions): Promise<number> {
+  const scope = scopeOf(ctx);
+  warnUnregistered(ctx, scope);
   return withAttached(ctx, {}, async (attached) => {
-    const ids = expandTarget(attached.snapshot(), target);
+    const instance = instanceIn(attached.snapshot(), scope);
+    const ids = expandTarget(attached.snapshot(), target, instance.name);
     const prefixed = ids.length > 1;
     const print = (line: LogLine): void => {
       const prefix = prefixed ? `${ctx.style.dim(`${line.targetId} |`)} ` : "";
@@ -57,18 +61,31 @@ function emptyNote(target: string, opts: LogsOptions): string {
     : `no log lines for "${target}" in run ${opts.run}`;
 }
 
-/** App ids a target string covers — the client-side twin of `expandTarget`. */
-function expandTarget(snapshot: Snapshot, spec: string): string[] {
+/**
+ * App ids a target string covers — the client-side twin of `expandTarget`, read
+ * from inside `instance` the same way: a bare name is that instance's copy.
+ */
+export function expandTarget(snapshot: Snapshot, spec: string, instance: string): string[] {
+  const wanted = qualifyTarget(spec, instance);
   const apps = snapshot.repos.flatMap((repo) => repo.apps);
-  if (apps.some((a) => a.id === spec)) return [spec];
-  const repo = snapshot.repos.find((r) => r.name === spec);
+  if (apps.some((a) => a.id === wanted)) return [wanted];
+  const repo = snapshot.repos.find((r) => r.name === wanted);
   if (repo) return repo.apps.map((a) => a.id);
-  throw new U8Error("UNKNOWN_TARGET", `unknown target "${spec}" — expected a repo name or "repo.app"`, {
-    spec,
-    // De-duplicated: an implicit app's id *is* its repo name, and listing
-    // "example, example" as the alternatives reads like a bug.
-    known: [...new Set([...snapshot.repos.map((r) => r.name), ...apps.map((a) => a.id)])],
-  });
+
+  const inBase = !spec.includes("@") && apps.some((a) => a.id === spec || a.repoName === spec);
+  const here = snapshot.repos.filter((r) => r.instance === instance);
+  throw new U8Error(
+    "UNKNOWN_TARGET",
+    inBase
+      ? `"${spec}" is not part of instance "${instance}", which uses base's — name it as "${spec}@base"`
+      : `unknown target "${spec}" — expected a repo name or "repo.app"`,
+    {
+      spec,
+      // De-duplicated: an implicit app's id *is* its repo name, and listing
+      // "example, example" as the alternatives reads like a bug.
+      known: [...new Set([...here.map((r) => r.baseName), ...here.flatMap((r) => r.apps.map((a) => a.baseId))])],
+    },
+  );
 }
 
 /**

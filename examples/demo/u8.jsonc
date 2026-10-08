@@ -2,6 +2,7 @@
 // Run from this directory:  u8            (dashboard)
 //                           u8 start      (start the active profile)
 //                           u8 run test   (task command across targets)
+//                           u8 -i try up  (a second copy, on its own ports)
 {
   "$schema": "../../schema.json",
   "name": "u8-demo",
@@ -9,6 +10,12 @@
   // Applied to every spawned process, then overridden per repo / per app.
   "env": {
     "NODE_ENV": "development"
+  },
+
+  // Where instances other than base get their ports from. Base keeps the
+  // numbers written under each app's "ports".
+  "instances": {
+    "ports": { "from": 3200, "to": 3299 }
   },
 
   "templates": {
@@ -30,11 +37,15 @@
     // Non-HTTP dependency, probed with a shell healthcheck, auto-restarted.
     "db": {
       "path": "./services/infra",
+      // ${instance.suffix} is empty in base and "_<name>" elsewhere, so every
+      // instance that runs its own db gets its own ready-file.
+      "env": { "DB_READY_FILE": "/tmp/u8-demo-db${instance.suffix}.ready" },
       "scripts": {
         "start": "node fake-db.js"
       },
+      // A shell probe reads what it needs from the app's env.
       "health": {
-        "cmd": "test -f ${TMPDIR:-/tmp}/u8-demo-db.ready",
+        "cmd": "test -f \"$DB_READY_FILE\"",
         "interval": 2000
       },
       "restart": "on-crash"
@@ -43,13 +54,20 @@
     // Single-service repo: no apps, so it becomes one implicit app.
     "api": {
       "path": "./services/api",
-      "env": { "PORT": "3000", "SERVICE_NAME": "api" },
+      // The port is declared once and referenced everywhere else.
+      "ports": { "http": 3000 },
+      "env": { "PORT": "${ports.http}", "SERVICE_NAME": "api" },
       "scripts": {
         "start": "node server.js",
         "test": "node -e \"console.log('api tests ok')\""
       },
-      "health": { "http": "http://localhost:3000/healthz" },
-      "dependsOn": ["db"]
+      "health": { "http": "http://localhost:${ports.http}/healthz" },
+      "dependsOn": ["db"],
+      // What a fresh checkout of this repo needs, and what to undo afterwards.
+      "instance": {
+        "init": ["echo \"preparing $U8_REPO for instance $U8_INSTANCE\""],
+        "teardown": ["echo \"cleaning up after $U8_INSTANCE\""]
+      }
     },
 
     // Monorepo: FE shell plus a micro-frontend, each its own process.
@@ -59,15 +77,19 @@
       "apps": {
         "shell": {
           "path": "apps/shell",
-          "env": { "PORT": "3100" },
+          "ports": { "http": 3100 },
+          "env": { "PORT": "${ports.http}" },
           "scripts": { "start": "node server.js" },
-          "health": { "http": "http://localhost:3100/healthz" }
+          "health": { "http": "http://localhost:${ports.http}/healthz" }
         },
         "auth-mfe": {
           "path": "apps/auth-mfe",
-          "env": { "PORT": "3101" },
+          "ports": { "http": 3101 },
+          // Another app's port: the instance's own api when it has one,
+          // base's otherwise.
+          "env": { "PORT": "${ports.http}", "API_URL": "http://localhost:${api.ports.http}" },
           "scripts": { "start": "node server.js" },
-          "health": { "http": "http://localhost:3101/healthz" },
+          "health": { "http": "http://localhost:${ports.http}/healthz" },
           "dependsOn": ["api"]
         }
       }

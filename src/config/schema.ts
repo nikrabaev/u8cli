@@ -58,6 +58,30 @@ const posInt = z.number().int().positive();
 
 const envMap = z.record(z.string().min(1), z.string());
 
+/**
+ * Inputs for `${vars.<name>}`. Literal strings: a var that could itself hold a
+ * reference would need an evaluation order, and every case that wants one is
+ * already served by writing the reference where the var would have been used.
+ */
+const varMap = z.record(
+  z.string().regex(NAME_PATTERN, 'invalid var name: use letters, digits, "_" or "-"'),
+  z.string(),
+);
+
+/**
+ * Named ports. The number written here is the one the *base* instance listens
+ * on; every other instance is allocated its own, which is the whole reason a
+ * port is declared rather than typed into `env` three times.
+ */
+const portMap = z.record(
+  z.string().regex(NAME_PATTERN, 'invalid port name: use letters, digits, "_" or "-"'),
+  z
+    .number({ error: "expected a port number" })
+    .int("a port is a whole number")
+    .min(1, "a port is between 1 and 65535")
+    .max(65535, "a port is between 1 and 65535"),
+);
+
 const scriptMap = z.record(z.string().min(1), z.string());
 
 /** A repo name or `repo.app`; resolved against the document in `normalize.ts`. */
@@ -79,10 +103,37 @@ export const healthSchema = z
 
 export const restartSchema = z.enum(["no", "on-crash"]);
 
+const scriptList = z.union([z.string().min(1), z.array(z.string().min(1))], {
+  error: "expected a shell command string, or an array of them",
+});
+
+/**
+ * What a fresh checkout needs before its apps can run, and what to undo when the
+ * instance goes away. Shell strings like every other script: run in order, in
+ * the checkout root (on a repo) or the app's directory (on an app), and a
+ * failing step stops the ones after it.
+ */
+const appLifecycleSchema = z.strictObject({
+  init: scriptList.optional(),
+  teardown: scriptList.optional(),
+});
+
+const repoLifecycleSchema = z.strictObject({
+  /**
+   * Files copied from the base checkout before `init` runs, relative to the repo
+   * root. For what git does not carry into a worktree — `.env` and its kind. A
+   * path the base checkout does not have is skipped, not an error.
+   */
+  copy: z.array(z.string().min(1)).optional(),
+  init: scriptList.optional(),
+  teardown: scriptList.optional(),
+});
+
 /** Fields a repo shares with its apps: on a repo they are per-app defaults. */
 const runnableFields = {
   template: z.string().optional(),
   env: envMap.optional(),
+  vars: varMap.optional(),
   scripts: scriptMap.optional(),
   health: healthSchema.optional(),
   restart: restartSchema.optional(),
@@ -94,12 +145,21 @@ const runnableFields = {
 export const appSchema = z.strictObject({
   /** Relative to the repo's `path`; defaults to the repo directory. */
   path: z.string().min(1).optional(),
+  ports: portMap.optional(),
+  instance: appLifecycleSchema.optional(),
   ...runnableFields,
 });
 
 export const repoSchema = z.strictObject({
   /** Absolute, `~`-prefixed, or relative to the workspace root. */
   path: z.string().min(1),
+  /**
+   * Only for a repo that is its own (implicit) app: a port belongs to one
+   * process, so unlike the other fields it is never a default for several apps.
+   * `normalize.ts` rejects it beside `apps` with a message that says so.
+   */
+  ports: portMap.optional(),
+  instance: repoLifecycleSchema.optional(),
   ...runnableFields,
   apps: z.record(nameKey("app"), appSchema).optional(),
 });
@@ -221,10 +281,27 @@ export const limitsSchema = z.strictObject({
   daemonIdle: posInt.optional(),
 });
 
+const portNumber = z.number().int().min(1).max(65535);
+
+/** Workspace-wide settings for instances other than base. */
+export const instancesSchema = z.strictObject({
+  /**
+   * Where u8 creates worktrees: `<dir>/<instance>/<repo>`. Relative to the
+   * workspace root; defaults to `.u8/worktrees` inside it.
+   */
+  dir: z.string().min(1).optional(),
+  /** Inclusive range instances are allocated ports from. */
+  ports: z
+    .strictObject({ from: portNumber, to: portNumber })
+    .refine((r) => r.from <= r.to, { message: '"from" must not be greater than "to"' })
+    .optional(),
+});
+
 export const workspaceConfigSchema = z.strictObject({
   $schema: z.string().optional(),
   name: z.string().optional(),
   env: envMap.optional(),
+  vars: varMap.optional(),
   templates: z
     .strictObject({
       repo: z.string().optional(),
@@ -235,6 +312,7 @@ export const workspaceConfigSchema = z.strictObject({
   plugins: z.array(pluginSchema).optional(),
   builtins: builtinsSchema.optional(),
   limits: limitsSchema.optional(),
+  instances: instancesSchema.optional(),
   /**
    * Keys are validated in `normalize.ts` so the reserved-namespace rule can be
    * explained rather than surfaced as a pattern mismatch.
@@ -256,8 +334,12 @@ export type RawProfile = z.infer<typeof profileSchema>;
 export type RawHealth = z.infer<typeof healthSchema>;
 export type RawLimits = z.infer<typeof limitsSchema>;
 
-/** Everything a repo and an app have in common — the inheritance surface. */
-export type RawRunnable = Omit<RawRepo, "apps" | "path"> & { path?: string };
+/**
+ * Everything a repo and an app have in common — the inheritance surface.
+ * `instance` is left out on purpose: a repo's lifecycle steps run once in the
+ * checkout root and are not a default for each of its apps.
+ */
+export type RawRunnable = Omit<RawRepo, "apps" | "path" | "instance"> & { path?: string };
 
 /** JSON Schema for `$schema` editor support; emitted by `scripts/gen-schema.js`. */
 export const jsonSchema = () => z.toJSONSchema(workspaceConfigSchema);

@@ -13,18 +13,21 @@ export function toWorkspaceInfo(ws: NormalizedWorkspace): WorkspaceInfo {
 }
 
 export function toRepoInfo(repo: NormalizedRepo): RepoInfo {
-  return { name: repo.name, path: repo.path };
+  return { name: repo.name, baseName: repo.baseName, instance: repo.instance, path: repo.path };
 }
 
 export function toTargetInfo(app: NormalizedApp): TargetInfo {
   return {
     id: app.id,
+    baseId: app.baseId,
+    instance: app.instance,
     repoName: app.repoName,
     name: app.name,
     implicit: app.implicit,
     cwd: app.cwd,
     scripts: { ...app.scripts },
     env: { ...app.env },
+    ports: { ...app.ports },
     dependsOn: [...app.dependsOn],
     hasHealth: app.health !== undefined,
   };

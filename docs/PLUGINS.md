@@ -189,10 +189,35 @@ plugin keeps one `git status` monitor per repo in it.
 `TargetInfo` — what a "target" looks like to a plugin:
 
 ```ts
-{ id, repoName, name, implicit, cwd, scripts, env, dependsOn, hasHealth }
+{ id, baseId, instance, repoName, name, implicit, cwd, scripts, env, ports, dependsOn, hasHealth }
 ```
 
 These are copies. Mutating `scripts` or `env` changes nothing in the daemon.
+
+### Instances
+
+A workspace can run several [instances](CONFIG.md#instances) of its apps side by side, and a plugin
+sees each copy as a target of its own. Nothing has to be done to support that — but three fields
+exist so a plugin can tell copies apart when it needs to:
+
+| Field | Base | Instance `feat-x` |
+| --- | --- | --- |
+| `target.id` / `repo.name` | `api` / `platform` | `api@feat-x` / `platform@feat-x` — unique, use these as keys |
+| `target.baseId` / `repo.baseName` | `api` / `platform` | `api` / `platform` — what the config calls it |
+| `target.instance` / `repo.instance` | `"base"` | `"feat-x"` |
+
+`target.cwd`, `repo.path`, `target.env` and `target.ports` are already the instance's own: a plugin
+that probes `target.ports.http` or runs something in `ctx.cwd` is talking to the right copy without
+knowing instances exist. Do not rebuild an id from a name — key a cache by `target.id`.
+
+An instance's `init` and `teardown` steps run as the commands `instance:init` and
+`instance:teardown`, so a plugin can take part in preparing a fresh checkout with an ordinary hook:
+
+```ts
+hooks: {
+  "instance:init": { async post(ctx) { if (ctx.result?.ok) await linkSharedPackages(ctx); } },
+}
+```
 
 ---
 

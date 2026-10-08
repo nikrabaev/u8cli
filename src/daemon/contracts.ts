@@ -141,22 +141,65 @@ export interface RunHandle {
   done: Promise<TaskResult>;
 }
 
-export interface RunCommandOptions {
+/**
+ * Where a run's target strings are read from. A bare name is that instance's
+ * copy, and nothing in an instance ever resolves to base by accident — reaching
+ * another instance takes an explicit `name@instance`.
+ */
+export interface TargetScope {
+  /** Defaults to base. */
+  instance?: string;
+}
+
+export interface StartScope extends TargetScope {
+  /**
+   * Hold each target's result until it is *ready* — healthy, when it declares a
+   * health check — instead of merely running. What a caller that is about to
+   * send it requests needs; an interactive start does not, since the dashboard
+   * shows health arriving.
+   */
+  wait?: boolean;
+}
+
+export interface RunCommandOptions extends StartScope {
   command: string;
-  /** Raw target strings; omitted means the active profile. */
+  /** Raw target strings; omitted means the scope's default selection. */
   targets?: string[];
   serial?: boolean;
   concurrency?: number;
+}
+
+export type LifecyclePhase = "init" | "teardown";
+
+export interface LifecycleOptions {
+  /**
+   * Stop the instance's services before any step runs. Teardown undoes what
+   * the apps are still using — a database, a compose project — so it must never
+   * run underneath them.
+   */
+  stopFirst?: boolean;
+  /**
+   * Runs inside the run once every step has, and is told whether they all
+   * succeeded. What it does is part of the run: a client awaiting the run id
+   * sees it finished only after this resolves, and a rejection fails the run.
+   */
+  finalize?(ok: boolean): Promise<void>;
 }
 
 export interface Engine {
   /** Runs any command (core, config or plugin) across the resolved targets. */
   runCommand(opts: RunCommandOptions): RunHandle;
   /** dependsOn-ordered service start, gated on readiness of each dependency. */
-  startTargets(targets?: string[]): RunHandle;
+  startTargets(targets?: string[], scope?: StartScope): RunHandle;
   /** Reverse-dependency-ordered stop. */
-  stopTargets(targets?: string[]): RunHandle;
-  restartTargets(targets?: string[]): RunHandle;
+  stopTargets(targets?: string[], scope?: TargetScope): RunHandle;
+  restartTargets(targets?: string[], scope?: StartScope): RunHandle;
+  /**
+   * Runs an instance's `init` or `teardown` steps as the command
+   * `instance:<phase>`: a repo's own steps once in its checkout root, each
+   * app's in its directory, with the same logs, progress and hooks as any run.
+   */
+  runLifecycle(phase: LifecyclePhase, instance: string, opts?: LifecycleOptions): RunHandle;
 
   /** Resolves for a finished run too — results are retained for a while. */
   awaitRun(runId: string): Promise<TaskResult>;

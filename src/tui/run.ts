@@ -21,6 +21,8 @@ import { dashboardClient } from "./types.js";
 export interface DashboardOptions {
   /** Path to `u8.jsonc`; the daemon is spawned for it if none is running. */
   configPath: string;
+  /** The instance to land on; every instance is listed either way. */
+  instance?: string;
   stdin: NodeJS.ReadStream;
   stdout: NodeJS.WriteStream;
   stderr?: NodeJS.WriteStream;
@@ -51,6 +53,7 @@ export async function runDashboard(opts: DashboardOptions): Promise<number> {
   const controller = createController({
     client: dashboardClient(attached),
     color: opts.color ?? true,
+    instance: opts.instance,
   });
 
   const screen = enterAltScreen(opts.stdout, { enabled: opts.altScreen ?? true });

@@ -714,8 +714,8 @@ describe("template warnings", () => {
       },
     });
     expect(ws.warnings).toEqual([
-      "templates.repo: {app@name} is an app-row token — a repo header row reads {repo@name}, {repo@dirname}, {repo@path} or {repo@status}",
-      "repos.platform.template: {app@pid} is an app-row token — a repo header row reads {repo@name}, {repo@dirname}, {repo@path} or {repo@status}",
+      "templates.repo: {app@name} is an app-row token — a repo header row reads {repo@name}, {repo@dirname}, {repo@path}, {repo@instance} or {repo@status}",
+      "repos.platform.template: {app@pid} is an app-row token — a repo header row reads {repo@name}, {repo@dirname}, {repo@path}, {repo@instance} or {repo@status}",
     ]);
   });
 

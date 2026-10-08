@@ -272,6 +272,8 @@ export function createHarness(opts: HarnessOptions): Harness {
     pidFile: path.join(stateDir, "daemon.pid"),
     daemonLog: path.join(stateDir, "daemon.log"),
     stateFile: path.join(stateDir, "state.json"),
+    instancesFile: path.join(stateDir, "instances.json"),
+    workspaceFile: path.join(stateDir, "workspace.json"),
     serviceLogDir: path.join(stateDir, "logs", "services"),
     taskLogDir: path.join(stateDir, "logs", "tasks"),
   };

@@ -24,7 +24,9 @@ rejected everywhere, so a typo is an error at load rather than a setting that si
 | --- | --- | --- | --- |
 | `$schema` | string | — | Editor completion/validation. The package ships `schema.json`. |
 | `name` | string | basename of the workspace directory | Workspace label in the dashboard header and `u8 status`. |
-| `env` | `{ [k: string]: string }` | `{}` | Environment for every spawned process; the bottom layer of the merge. |
+| `env` | `{ [k: string]: string }` | `{}` | Environment for every spawned process; the bottom layer of the merge. Values may hold [`${…}` references](#references). |
+| `vars` | `{ [k: string]: string }` | `{}` | Inputs for `${vars.<name>}`; overridable per repo, per app and per instance. |
+| `instances` | object | see [Instances](#instances) | Where instances get their worktrees and ports from. |
 | `templates` | object | see [Templates](#templates) | Row templates for repo and app rows. |
 | `plugins` | `(string \| { spec, options })[]` | `[]` | npm package names, or paths (`./`, `/`, `~`) to local files — each optionally with options. |
 | `builtins` | object | `git` and `health` on, `protos` off | Switches a built-in off, or configures one. |
@@ -35,8 +37,8 @@ rejected everywhere, so a typo is an error at load rather than a setting that si
 | `commands` | `{ [name: string]: Command }` | `{}` | Extra commands, plus hooks. |
 
 Repo, app and profile names must match `^[A-Za-z0-9][A-Za-z0-9_-]*$` — no `.`, `:` or `@`, because
-those are the separators for target ids (`repo.app`), command namespaces (`git:pull`) and
-indicators (`{git@branch}`). Command and `x@` indicator names may additionally contain `.`
+those are the separators for target ids (`repo.app`, `repo.app@instance`), command namespaces
+(`git:pull`) and indicators (`{git@branch}`). Command and `x@` indicator names may additionally contain `.`
 (`db.migrate`).
 
 ---
@@ -51,6 +53,9 @@ indicators (`{git@branch}`). Command and `x@` indicator names may additionally c
 | `apps` | `{ [name: string]: App }` | no | — | Omit for a single-service repo; see below. |
 | `template` | string | no | `templates.repo` | Overrides the repo header row. |
 | `env` | map | no | — | Layered over `env`; inherited by every app. |
+| `vars` | map | no | — | Layered over the workspace's `vars`; inherited by every app. |
+| `ports` | `{ [name: string]: int }` | no | — | [Named ports](#ports). Only on a repo **without** `apps`. |
+| `instance` | object | no | — | [Lifecycle steps](#lifecycle-init-and-teardown) for an instance's checkout of this repo. Not inherited. |
 | `scripts` | `{ [name: string]: string }` | no | — | Inherited by every app. |
 | `health` | object | no | — | Inherited by every app. |
 | `restart` | `"no" \| "on-crash"` | no | `"no"` | Inherited by every app. |
@@ -65,6 +70,8 @@ Same keys minus `apps`, plus:
 | Key | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `path` | string | no | the repo's `path` | Relative to the **repo's** path (`~` and absolute also work). |
+| `ports` | `{ [name: string]: int }` | no | — | [Named ports](#ports) this app listens on. |
+| `instance` | object | no | — | `init` / `teardown` steps run in this app's directory, after the repo's. |
 
 ### Implicit apps
 
@@ -85,8 +92,8 @@ A repo **with** `apps` is not runnable itself; each app is a target named `repo.
 When a repo declares `apps`, the repo-level `scripts`, `env`, `health`, `restart`, `dependsOn`,
 `readyTimeout` and `stopTimeout` become per-app defaults:
 
-- `scripts` and `env` are **merged key by key** (repo first, app second — an app overrides only
-  the keys it names).
+- `scripts`, `env` and `vars` are **merged key by key** (repo first, app second — an app overrides
+  only the keys it names).
 - `health`, `restart`, `readyTimeout`, `stopTimeout` are **replaced wholesale** when the app sets
   them. In particular an app's `health` never inherits the repo's `interval`/`threshold`: `http` and
   `cmd` are mutually exclusive, so merging two checks would produce an invalid one.
@@ -103,6 +110,62 @@ process env of the daemon  →  workspace env  →  repo env  →  app env
 
 The daemon's environment is applied at spawn time, so `PATH` and friends are always present. u8 does
 **not** read `.env` files.
+
+### Ports
+
+A port an app listens on is declared once, by name, and referenced everywhere else:
+
+```jsonc
+"api": {
+  "path": "./services/api",
+  "ports": { "http": 3000, "debug": 9229 },
+  "env": { "PORT": "${ports.http}" },
+  "scripts": { "start": "node server.js" },            // reads $PORT, like any shell would
+  "health": { "http": "http://localhost:${ports.http}/healthz" }
+}
+```
+
+The number written is the one the **base** instance uses. Every other [instance](#instances) is
+allocated its own from `instances.ports`, which is the reason to declare a port rather than type it
+into `env`, the start script and the health URL: the three then move together.
+
+- A port belongs to one process. `ports` on a repo that has `apps` is an error — declare it on the
+  app that listens on it.
+- Two base apps declaring the same number is a warning, not an error: apps that are never run
+  together may share one on purpose.
+- The first declared port is the app's primary one: `{app@port}` and `{app@url}` show it.
+
+### References
+
+`env` values and `health.http` may contain `${…}` references, resolved when the config is loaded —
+separately for each app, and for each instance of it.
+
+| Reference | Value |
+| --- | --- |
+| `${ports.<name>}` | This app's own port |
+| `${<target>.ports.<name>}` | Another app's port: `${api.ports.http}`, `${platform.shell.ports.http}` |
+| `${vars.<name>}` | A var, merged workspace → repo → app → instance |
+| `${instance.name}` | `base`, or the instance's name |
+| `${instance.slug}` | The name lowercased with everything but letters and digits as `_` |
+| `${instance.suffix}` | Empty in base, `_<slug>` elsewhere — for names that must differ per instance |
+| `${workspace.name}` / `${workspace.root}` | The workspace's name and directory |
+| `${repo.name}` / `${repo.path}` | The repo's name, and the root of **this instance's** checkout |
+| `${base.path}` | The root of the base checkout of the same repo |
+| `${app.id}` / `${app.name}` / `${app.path}` | The app's qualified id, name and working directory |
+
+Rules worth knowing:
+
+- **Only where there is no shell.** Scripts, `health.cmd`, hooks and indicator commands are handed to
+  `$SHELL -c` untouched and read what they need from the environment — so a config never has two
+  layers of `$` expansion in one string. Put the value in `env` and use `$NAME` in the script.
+- **`$${` is a literal `${`.** Every other `$` is literal already (`$PATH`, `a$b`).
+- **A reference to another app follows the instance.** `${api.ports.http}` written on `web` is base's
+  api in base. In an instance that has its own api it is that one; in an instance that does not, it is
+  base's. That single rule is what lets an instance hold only the apps being worked on.
+- **A repo name is only a target when it has one app.** `${platform.ports.http}` is an error that
+  lists the apps to choose from.
+- **A bad reference is a config error**, reported at the line that wrote it — including `${HOME}`,
+  since values are not shell-expanded.
 
 ### Path resolution
 
@@ -420,7 +483,12 @@ plugin.
 | `{app@pid}` | app | Process id while up, else empty |
 | `{app@uptime}` | app | `12s`, `4m`, `1h3m`, `2d5h`; empty unless running |
 | `{app@exitcode}` | app | Exit code of the last finished run |
-| `{repo@name}` | repo | Repo name |
+| `{app@port}` | app | The app's first declared port, as this instance has it; empty without one |
+| `{app@ports}` | app | Every declared port as `name:number` |
+| `{app@url}` | app | `http://localhost:<port>` on the first declared port |
+| `{app@instance}` | app | `base`, or the instance this copy runs in |
+| `{repo@name}` | repo | Repo name, as the config spells it (no instance suffix) |
+| `{repo@instance}` | repo | `base`, or the instance this checkout belongs to |
 | `{repo@dirname}` | repo | Basename of the repo root |
 | `{repo@path}` | repo | Absolute repo root |
 | `{repo@status}` | repo | The worst state among the repo's apps: `crashed` if any crashed, `running` only when all run. Renders as `●`. |
@@ -679,6 +747,115 @@ The details that decide which state you see:
 
 ---
 
+## Instances
+
+An **instance** is a parallel copy of part of the workspace: its own checkout of some repos, its own
+ports, its own processes. The workspace as `u8.jsonc` describes it is the **base** instance; any
+number of others can run beside it, which is what makes it possible to work on several branches —
+or have several tools work on several branches — at once.
+
+Instances are created from the command line (`u8 instance create`, `u8 up`), not declared in the
+config: which worktrees exist on a machine is local state, like the active profile, and lives in the
+state dir. The config only says how they are made:
+
+```jsonc
+"instances": {
+  "dir": ".u8/worktrees",                  // worktrees go to <dir>/<instance>/<repo>
+  "ports": { "from": 20000, "to": 20999 }  // every non-base port comes from here
+}
+```
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `dir` | string | `.u8/worktrees` | Relative to the workspace directory. Add it to `.gitignore` when the workspace is itself a repo. |
+| `ports.from` / `ports.to` | int | `20000` / `20999` | Inclusive. Allocation skips ports base declares, ports another instance holds, and ports in use. |
+
+### What an instance contains
+
+An instance is given a checkout of one or more repos and runs some or all of their apps. Its apps are
+ordinary targets with the instance in their id:
+
+| | Base | Instance `feat-x` |
+| --- | --- | --- |
+| Target id | `api`, `platform.shell` | `api@feat-x`, `platform.shell@feat-x` |
+| Working directory | the repo's `path` | the instance's checkout of that repo |
+| Ports | as declared | allocated once, kept until the instance is destroyed |
+| `env` | as written | the same document, with references resolved for the instance |
+
+Everything else — scripts, health checks, restart policy, command entries, hooks — is the same
+definition. An instance is not configured separately; it is the config, read again with different
+directories and different ports.
+
+**An instance may be partial.** One created for `platform.auth-mfe` alone has no api of its own, so
+its `dependsOn: ["api"]` and its `${api.ports.http}` both point at base's api. Nothing in an instance
+is ever *started* in base on its behalf: when what it leans on is not running, `u8 start` says so and
+names the command that starts it.
+
+**Commands are scoped.** A target typed inside an instance means that instance's copy, and a name
+the instance has no copy of is an error rather than a fallback to base. Reaching another instance
+takes an explicit `api@base` or `api@other`.
+
+### Lifecycle: init and teardown
+
+A fresh worktree has none of what git does not track — no `node_modules`, no `.env`. `instance` on a
+repo says what to do about that, and what to undo when the instance goes away:
+
+```jsonc
+"api": {
+  "path": "./services/api",
+  "instance": {
+    "copy": [".env", ".env.local"],              // from the base checkout, if present
+    "init": ["pnpm install --frozen-lockfile"],  // in the new checkout's root
+    "teardown": ["dropdb --if-exists \"app_$U8_INSTANCE\""]
+  },
+  "apps": {
+    "server": {
+      "instance": { "init": ["pnpm prisma migrate deploy"] }   // in the app's directory
+    }
+  }
+}
+```
+
+| Key | Where | Notes |
+| --- | --- | --- |
+| `copy` | repo | Repo-relative files or directories copied from the base checkout before `init`. Missing in base → skipped. Already in the checkout → kept, never overwritten. |
+| `init` | repo, app | A shell string or a list of them, run in order. A failing step stops the ones after it. |
+| `teardown` | repo, app | Same shape. Every step runs even when one fails; a failure keeps the instance unless forced. |
+
+Order within a repo: `copy`, the repo's `init` steps in the checkout root, then each app's `init` in
+the app's directory. Teardown is the mirror image. Repos run side by side.
+
+Steps run as the commands `instance:init` and `instance:teardown`, through the same pipeline as any
+run: per-target logs (`u8 logs <target> --run <id>`), the summary table, and plugin hooks bound to
+those names. An app's steps get the app's resolved `env`; a repo's steps get the daemon's — plus the
+env of the app, for a repo that is its own app. All of them additionally get:
+
+| Variable | Value |
+| --- | --- |
+| `U8_INSTANCE` | The instance's name |
+| `U8_REPO` / `U8_REPO_PATH` | The repo's name, and the root of this instance's checkout |
+| `U8_BASE_PATH` | The root of the base checkout of the same repo |
+| `U8_WORKSPACE_ROOT` | The workspace directory |
+| `U8_TARGET` / `U8_APP` | App steps only: the app's qualified id and its name |
+
+When a checkout is already gone at teardown — the tool that made the worktree removed it — the steps
+run from the base checkout instead, with the instance's environment: what teardown undoes is usually
+outside the checkout anyway.
+
+### Checkouts: created or adopted
+
+- **Created.** `u8 instance create <name> [targets…]` adds a git worktree per repository on a branch
+  named after the instance (`--branch` to choose; `--from` for where a new branch starts). Repos that
+  live in the same git repository share one worktree. `u8 instance destroy` removes these worktrees.
+  A branch u8 created goes with them only if nothing was committed to it; a branch that existed
+  before, or that has commits of its own, is never deleted.
+- **Adopted.** `u8 up` typed inside a worktree some other tool made (`--adopt <dir>` on
+  `instance create`) uses that directory as it is. u8 never removes an adopted checkout — and once
+  every checkout of an adopted instance has disappeared, the daemon stops its services, runs its
+  teardown and frees its ports on its own.
+
+---
+
 ## Config reload
 
 The daemon watches `u8.jsonc` (a directory watch plus a stat poll, so editor rename-on-save is
@@ -691,6 +868,8 @@ caught) and re-validates on change.
 - **Running processes are never touched.** They keep their spawn-time definition; if the effective
   script, cwd or env changed, the target's status becomes `stale` and the change takes effect on the
   next restart.
+- **Instances follow the config.** They are re-read with it: an app that gains a port is allocated one
+  in every instance that runs it, and a repo or app the config drops disappears from them too.
 - An invalid config keeps the last-good one in service. The error is surfaced in the dashboard header
   and on stderr from `u8 status`, and in `configError` in `u8 status --json`.
 
@@ -727,6 +906,9 @@ caught) and re-validates on change.
 
   "limits": { "taskConcurrency": 4, "readyTimeout": 60000, "daemonIdle": 600000 },
 
+  // Instances other than base: where their worktrees go, and where their ports come from.
+  "instances": { "dir": ".u8/worktrees", "ports": { "from": 20000, "to": 20999 } },
+
   // {x@port}: a shell command polled per target, in that target's cwd.
   "indicators": {
     "port": { "cmd": "printf '%s' \"${PORT:--}\"", "interval": 30000 }
@@ -743,13 +925,22 @@ caught) and re-validates on change.
 
     "api": {
       "path": "~/Work/acme/api",               // ~ expands
-      "env": { "PORT": "3000" },               // over the workspace env
+      "ports": { "http": 3000 },               // base's port; instances get their own
+      "env": {
+        "PORT": "${ports.http}",               // over the workspace env
+        "DATABASE_NAME": "acme${instance.suffix}"   // "acme" in base, "acme_feat_x" in feat-x
+      },
       "scripts": {
-        "start": "pnpm dev",
+        "start": "pnpm dev",                   // reads $PORT; scripts are never interpolated
         "test": "pnpm test"                    // inert until a command reads it
       },
-      "health": { "http": "http://localhost:3000/healthz" },
-      "dependsOn": ["db"]                      // waits for db to probe healthy
+      "health": { "http": "http://localhost:${ports.http}/healthz" },
+      "dependsOn": ["db"],                     // waits for db to probe healthy
+      "instance": {
+        "copy": [".env.local"],                // what git does not carry into a worktree
+        "init": ["pnpm install --frozen-lockfile", "createdb \"$DATABASE_NAME\" || true"],
+        "teardown": ["dropdb --if-exists \"$DATABASE_NAME\""]
+      }
     },
 
     // Monorepo: the repo is not runnable; each app is.
@@ -760,14 +951,17 @@ caught) and re-validates on change.
       "apps": {
         "shell": {
           "path": "apps/shell",                // relative to the repo's path
-          "env": { "PORT": "3100" },
-          "health": { "http": "http://localhost:3100/healthz" }
+          "ports": { "http": 3100 },
+          "env": { "PORT": "${ports.http}" },
+          "health": { "http": "http://localhost:${ports.http}/healthz" }
         },
         "auth-mfe": {
           "path": "apps/auth-mfe",
-          "env": { "PORT": "3101" },
-          "scripts": { "start": "pnpm dev --port 3101" },
-          "health": { "http": "http://localhost:3101/healthz" },
+          "ports": { "http": 3101 },
+          // Another app's port: the instance's own api when it has one, base's otherwise.
+          "env": { "PORT": "${ports.http}", "API_URL": "http://localhost:${api.ports.http}" },
+          "scripts": { "start": "pnpm dev --port \"$PORT\"" },
+          "health": { "http": "http://localhost:${ports.http}/healthz" },
           "dependsOn": ["api"],                // "api" = that repo's implicit app
           "readyTimeout": 90000
         }

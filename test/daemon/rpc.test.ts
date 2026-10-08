@@ -57,7 +57,7 @@ describe("snapshot", () => {
 
     const snapshot = await client.request("client.attach", { clientVersion: "test", interactive: true });
 
-    expect(snapshot.protocolVersion).toBe(2);
+    expect(snapshot.protocolVersion).toBe(3);
     expect(snapshot.workspace.configPath).toBe(ws.configPath);
     expect(snapshot.workspace.id).toBe(ws.paths.id);
     expect(snapshot.repos.map((r) => r.name)).toEqual(["api", "web", "docs"]);

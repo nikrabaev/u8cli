@@ -45,7 +45,10 @@ A directory containing `u8.jsonc`. Discovered by walking upward from cwd (git-st
 
 - Config format: **JSONC** (comments + trailing commas), validated by zod; a JSON schema is published so `"$schema"` gives editor completion.
 - Workspace identity: hash of the config file's real (symlink-resolved) path.
-- State dir: `~/.u8/<workspace-hash>/` — daemon socket, daemon log, pid file, process logs, local state (active profile).
+- State dir: `~/.u8/<workspace-hash>/` — daemon socket, daemon log, pid file, process logs, local state (active profile, instance records).
+- A command is also placed by the **checkout** it is typed in: every daemon records its base repos and
+  its instances' checkouts in its state dir, so a directory inside one resolves to that workspace and
+  that instance even when no `u8.jsonc` lies above it — or when a copy of one does (§2.9).
 
 ### 2.2 Repo
 
@@ -59,7 +62,8 @@ The engine only knows apps. Every process, log stream, status, health probe, and
 - Fields: `path` (cwd relative to the repo's path), `scripts` (map of name → shell string), `env`, `dependsOn`, `health`, `restart`, `template` override.
 - Scripts are **arbitrary shell strings**, executed via the user's `$SHELL` in the app's cwd. No package-manager assumptions.
 
-Target addressing: `repoName` (all its apps, or its implicit one) or `repoName.appName`.
+Target addressing: `repoName` (all its apps, or its implicit one) or `repoName.appName` — with an
+`@instance` suffix outside base (§2.9).
 
 ### 2.4 Profile
 
@@ -103,6 +107,41 @@ A named, per-target (or per-repo) value rendered in templates as `{ns@name}`.
 
 An npm package (resolved from the workspace's `node_modules`) or a relative path to a local JS/TS file. Loaded **into the daemon**. A plugin exports `indicators`, `commands`, and `hooks` (all optional). Built-ins `git` and `health` ship inside u8cli, enabled by default, disable-able in config.
 
+### 2.9 Instance
+
+A parallel copy of part of the workspace: a checkout per repo, a port allocation, and the processes
+started from them. Added after v1; the rest of this document describes it where it changes a rule.
+
+- **Base** is the instance `u8.jsonc` itself describes — the checkouts at the configured paths, on the
+  declared ports. It always exists and cannot be created or destroyed.
+- Any other instance is **a record in the state dir**, not config: `{ name, repos → checkout, apps,
+  ports, vars }`. Which worktrees exist on a machine is local, like the active profile. The config
+  carries only the recipe — where worktrees go, the port range, each repo's `init` / `teardown`.
+- **Instances are a normalization-time expansion.** The same document is read once per instance with
+  different checkout roots and different ports, yielding ordinary apps whose id carries the instance:
+  `api@feat-x`. Nothing below the config layer has a separate notion of an instance — the supervisor,
+  the engine, plugins and the indicator registry see more targets, not a new dimension. That is what
+  lets one daemon run them all.
+- **Partial by default.** An instance holds the apps it was created for. A reference from one of its
+  apps to an app it has no copy of — in `dependsOn`, or in `${target.ports.x}` — resolves to base's.
+- **Never base by accident.** A target string is read from inside an instance: a bare name is that
+  instance's copy, and a name it has no copy of is an error, not a fallback. `name@base` reaches
+  across. An untargeted command covers the instance; in base that still means the active profile.
+- **Checkouts are created or adopted.** u8 creates git worktrees (one per git repository, shared by
+  every repo that lives in it) and removes only those. A worktree another tool made is adopted as it
+  is, and an instance made only of adopted checkouts is destroyed by the daemon once they are gone.
+- **Ports** are declared by name on an app. Base uses the declared number; every other instance is
+  allocated one from `instances.ports` — by the daemon, once, kept until the instance is destroyed.
+
+Values that differ per instance reach a process through one channel, `env`, by `${…}` references
+resolved at load: `${ports.http}`, `${api.ports.http}`, `${vars.x}`, `${instance.name}`. References
+are resolved only where no shell runs (`env` values, `health.http`); scripts read the environment.
+
+Lifecycle: `create` (checkouts → ports → record → reload) → `instance:init` (copy untracked files
+from base, the repo's steps, each app's steps) → start/stop any number of times → `destroy` (stop →
+`instance:teardown` → remove owned worktrees → drop the record). Init and teardown are engine runs
+like any command: per-target logs, progress, hooks.
+
 ---
 
 ## 3. Naming conventions
@@ -138,10 +177,10 @@ Row templates are strings of literal text + tokens with optional colon-chained m
 
 ### 5.1 Daemon (per workspace)
 
-- One daemon per workspace, owns all processes, indicator cache, and log files.
+- One daemon per workspace, owns all processes, indicator cache, and log files — for every instance of it (§2.9). Instances share a daemon so that port allocation has a single owner and the dashboard a single view.
 - **Spawn**: first `u8` invocation auto-spawns it (detached, stdout/stderr → `daemon.log` in the state dir). Version check: a client with a different u8cli version than the daemon prompts to restart the daemon (only if no services running, otherwise warns).
 - **Exit**: self-exits after ~10 min with no running services and no attached clients. `u8 daemon stop|status|logs` for manual control. Stale socket/pid detection: on connect failure, clean up and respawn.
-- On daemon shutdown (`u8 daemon stop`), running services are stopped gracefully (SIGTERM to process group → SIGKILL after timeout).
+- On daemon shutdown (`u8 daemon stop`), running services are stopped gracefully (SIGTERM to process group → SIGKILL after timeout). Because that is every instance's services, the CLI refuses it from inside an instance, or while another instance is running, without `--force`.
 
 ### 5.2 IPC
 
@@ -151,7 +190,7 @@ Row templates are strings of literal text + tokens with optional colon-chained m
 ### 5.3 Process management
 
 - Services spawn via `$SHELL -c <script>` in the target cwd, in their **own process group**; stop = SIGTERM to the group, SIGKILL after a timeout (default 10 s, configurable).
-- Env: processes inherit the daemon's environment, merged with `env` maps in order **workspace → repo → app**. u8 does **not** parse `.env` files; repos keep their own env story.
+- Env: processes inherit the daemon's environment, merged with `env` maps in order **workspace → repo → app**, with `${…}` references resolved per instance (§2.9). u8 does **not** parse `.env` files; repos keep their own env story.
 - Crash policy: default **no auto-restart** — status flips to `crashed` (exit code surfaced), logs preserved, one-key restart in the TUI. Per-app opt-in `restart: "on-crash"` with capped exponential backoff (1s → 2s → 4s … max 30s; give up after 10 consecutive failures → `crashed`).
 
 ### 5.4 Startup ordering
@@ -162,6 +201,8 @@ Row templates are strings of literal text + tokens with optional colon-chained m
 - no healthcheck → ready = `running`.
 
 Readiness wait has a timeout (default 60 s, per-app override); on timeout the dependent is not started and is marked with an error status.
+
+A start reports a target once it is *running*; `--wait` holds the report until it is *ready* by the same rule, which is what a caller about to send it a request needs. Dependencies outside the selection never gate a start and are never started on its behalf — in particular an instance does not start base's apps (§2.9); the CLI names the ones that are down.
 
 ### 5.5 Logs
 
@@ -261,7 +302,10 @@ The daemon watches `u8.jsonc`:
 ```bash
 u8 init                     # scaffold u8.jsonc
 u8                          # open TUI
-u8 start|stop|restart [target|--all]
+u8 start|stop|restart [target|--all] [--wait]
+u8 up [targets]             # this directory's instance: create, init, start, wait until ready
+u8 instance list|create|init|destroy
+u8 ports|env|exec           # where this instance's apps are; run a command in their environment
 u8 run <command> [target] [--serial] [--concurrency n]
 u8 status [--json]          # rendered from the same indicator cache
 u8 logs <target> [-f] [-n N]
@@ -332,14 +376,14 @@ u8 daemon status|stop|logs
 ## 11. v1 non-goals
 
 - Windows support (named pipes, job objects).
-- Per-profile overrides (env/args/templates) — profiles are selection only.
+- Per-profile overrides (env/args/templates) — profiles are selection only. (Per-*instance* values exist since §2.9: ports, `vars`, and what `${instance.*}` resolves to.)
 - Template conditionals/expressions; column-table layout.
 - Git mutation commands (checkout/branch sync).
 - Global cross-workspace daemon/registry; workspace picker.
 - `.env` file parsing; managed env as source of truth.
 - Plugin sandboxing / permissions; plugin API versioning beyond semver of `u8cli/plugin`.
 - Multi-pane simultaneous log view, log search (v2 candidates).
-- Auto-detection magic (repo scanning in `init`, port discovery).
+- Auto-detection magic (repo scanning in `init`, port discovery — ports are declared, and allocated per instance, never discovered).
 
 ## 12. Testing strategy
 

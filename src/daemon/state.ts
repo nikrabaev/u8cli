@@ -26,8 +26,11 @@ import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
+import { serializeWorkspaceIndex } from "../config/index.js";
+import { BASE_INSTANCE, type NormalizedWorkspace } from "../config/types.js";
 import { errorMessage } from "../util/errors.js";
 import { nullLogger, type Logger } from "../util/logger.js";
+import type { StatePaths } from "../util/paths.js";
 
 export interface LocalState {
   /** Profile selected with `u8 profile use`; absent means "the config default". */
@@ -89,6 +92,37 @@ export async function writeLocalState(file: string, state: LocalState): Promise<
   try {
     await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     await rename(tmp, file);
+  } catch (err) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
+/**
+ * Records which config a state dir belongs to and where its base repos are.
+ *
+ * The state dir is named after a hash, which cannot be turned back into a path:
+ * without this file a client standing in one of the workspace's checkouts —
+ * a worktree far from `u8.jsonc`, or a repo the config points at with an
+ * absolute path — has no way to learn which workspace it is in. Rewritten only
+ * when it would change, so a reload does not touch the disk for nothing.
+ */
+export async function writeWorkspaceIndex(paths: StatePaths, ws: NormalizedWorkspace): Promise<void> {
+  const text = serializeWorkspaceIndex({
+    configPath: ws.configPath,
+    name: ws.name,
+    repos: Object.fromEntries(ws.repos.filter((r) => r.instance === BASE_INSTANCE).map((r) => [r.name, r.path])),
+  });
+  try {
+    if (fs.readFileSync(paths.workspaceFile, "utf8") === text) return;
+  } catch {
+    // Missing or unreadable: write it.
+  }
+  await mkdir(path.dirname(paths.workspaceFile), { recursive: true });
+  const tmp = `${paths.workspaceFile}.${process.pid.toString(36)}${Date.now().toString(36)}.tmp`;
+  try {
+    await writeFile(tmp, text, { encoding: "utf8", mode: 0o600 });
+    await rename(tmp, paths.workspaceFile);
   } catch (err) {
     await rm(tmp, { force: true }).catch(() => undefined);
     throw err;

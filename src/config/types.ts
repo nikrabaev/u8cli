@@ -11,8 +11,37 @@
  *     (workspace → repo → app) by the time it lands here.
  */
 
-/** `"gateway"` (implicit app) or `"platform.shell"` (explicit app). */
+/**
+ * `"gateway"` (implicit app) or `"platform.shell"` (explicit app) in the base
+ * instance; the same with an instance suffix — `"gateway@feat-x"` — anywhere else.
+ */
 export type TargetId = string;
+
+/**
+ * The instance every workspace has: the checkouts and ports `u8.jsonc` itself
+ * declares. Its apps and repos carry no suffix, so a workspace that never
+ * creates another instance sees exactly the ids it always did.
+ */
+export const BASE_INSTANCE = "base";
+
+/**
+ * Joins an app or repo to the instance it belongs to (`api@feat-x`). Config
+ * names may not contain it (see `NAME_PATTERN`), so a qualified id never
+ * collides with an authored one and splits unambiguously at its last `@`.
+ */
+export const INSTANCE_SEPARATOR = "@";
+
+/** `api` + `feat-x` → `api@feat-x`; the base instance leaves the name bare. */
+export function qualify(name: string, instance: string): string {
+  return instance === BASE_INSTANCE ? name : `${name}${INSTANCE_SEPARATOR}${instance}`;
+}
+
+/** The inverse of {@link qualify}: a bare name belongs to the base instance. */
+export function splitQualified(qualified: string): { name: string; instance: string } {
+  const at = qualified.lastIndexOf(INSTANCE_SEPARATOR);
+  if (at <= 0 || at === qualified.length - 1) return { name: qualified, instance: BASE_INSTANCE };
+  return { name: qualified.slice(0, at), instance: qualified.slice(at + 1) };
+}
 
 export type RestartPolicy = "no" | "on-crash";
 
@@ -31,9 +60,25 @@ export interface HealthCheckDef {
   threshold: number;
 }
 
+/** Lifecycle steps of an instance checkout, in the order they run. */
+export interface Lifecycle {
+  init: string[];
+  teardown: string[];
+}
+
+export interface RepoLifecycle extends Lifecycle {
+  /** Repo-relative paths copied from the base checkout before `init`. */
+  copy: string[];
+}
+
 export interface NormalizedApp {
-  /** `repo` for implicit apps, `repo.app` otherwise. */
+  /** `repo` for implicit apps, `repo.app` otherwise — instance-qualified outside base. */
   id: TargetId;
+  /** The id as `u8.jsonc` spells it, whichever instance this copy belongs to. */
+  baseId: TargetId;
+  /** {@link BASE_INSTANCE}, or the name of the instance this copy runs in. */
+  instance: string;
+  /** {@link NormalizedRepo.name} of the owning repo, so instance-qualified too. */
   repoName: string;
   /** App name; equals the repo name when implicit. */
   name: string;
@@ -42,9 +87,22 @@ export interface NormalizedApp {
   cwd: string;
   /** Script name → shell string. `start`/`stop` feed the core commands. */
   scripts: Record<string, string>;
-  /** Fully merged: daemon env is applied at spawn time, not here. */
+  /**
+   * Fully merged and with every `${…}` reference resolved for this instance:
+   * daemon env is applied at spawn time, not here.
+   */
   env: Record<string, string>;
-  /** Resolved to concrete app ids (a repo dependency expands to its apps). */
+  /**
+   * Named ports as this instance has them: the declared number in base, an
+   * allocated one elsewhere. Declaration order is kept — the first is the one
+   * `{app@port}` shows.
+   */
+  ports: Record<string, number>;
+  /**
+   * Resolved to concrete app ids (a repo dependency expands to its apps). In an
+   * instance, a dependency the instance has a copy of points at that copy and
+   * any other points at base — the same rule `${target.ports.x}` follows.
+   */
   dependsOn: TargetId[];
   health?: HealthCheckDef;
   restart: RestartPolicy;
@@ -54,16 +112,104 @@ export interface NormalizedApp {
   readyTimeoutMs: number;
   /** SIGTERM → SIGKILL grace period. */
   stopTimeoutMs: number;
+  /** Steps run in this app's directory, after its repo's own. */
+  lifecycle: Lifecycle;
 }
 
 export interface NormalizedRepo {
+  /** Unique across instances: `platform`, or `platform@feat-x`. */
   name: string;
-  /** Absolute repo root. */
+  /** The repo's key in `u8.jsonc`. */
+  baseName: string;
+  instance: string;
+  /** Absolute root of *this instance's* checkout. */
   path: string;
+  /** Root of the base checkout; equal to {@link path} in the base instance. */
+  basePath: string;
   /** Overrides `templates.repo`. */
   template?: string;
+  /** Steps run once in the checkout root when an instance gains this repo. */
+  lifecycle: RepoLifecycle;
   apps: NormalizedApp[];
 }
+
+/**
+ * One checkout an instance was given. Persisted in the workspace's state dir
+ * rather than in `u8.jsonc`: which worktrees exist on this machine is a local
+ * fact, like the active profile.
+ */
+export interface InstanceRepoRecord {
+  /** Absolute checkout root. */
+  path: string;
+  /**
+   * Whether u8 created this checkout. Only an owned one is ever removed when
+   * the instance is destroyed; an adopted worktree belongs to whoever made it.
+   */
+  owned: boolean;
+  /** Branch u8 checked out, when it created the worktree. */
+  branch?: string;
+  /**
+   * Whether u8 also created {@link branch}. Such a branch is deleted with the
+   * instance if nothing was ever committed to it; a branch that existed before,
+   * or that gained commits, is never touched.
+   */
+  createdBranch?: boolean;
+  /**
+   * Root of the git worktree this checkout lives in, when u8 created it. Not
+   * always {@link path}: a repo may be a subdirectory of its git repository, and
+   * several repos of one repository then share a single worktree.
+   */
+  worktree?: string;
+}
+
+/**
+ * A parallel copy of part of the workspace, as stored. `normalize.ts` turns
+ * these into apps and repos; nothing below it knows instances were ever a
+ * separate input.
+ */
+export interface InstanceRecord {
+  name: string;
+  /** Epoch ms; also the order instances are listed in. */
+  createdAt: number;
+  /** Keyed by the repo's name in `u8.jsonc`. */
+  repos: Record<string, InstanceRepoRecord>;
+  /**
+   * Base app ids this instance runs. Empty means every app of its repos, so a
+   * record does not have to be rewritten when a repo grows an app.
+   */
+  apps: TargetId[];
+  /** Allocated ports: base app id → port name → number. */
+  ports: Record<TargetId, Record<string, number>>;
+  /** Overrides for `${vars.<name>}`, above every level of the config. */
+  vars: Record<string, string>;
+  /** Epoch ms of the last init run that succeeded; absent until one has. */
+  initializedAt?: number;
+}
+
+export interface NormalizedInstance {
+  name: string;
+  isBase: boolean;
+  createdAt: number;
+  /** Qualified names of the repos this instance has a checkout of. */
+  repoNames: string[];
+  /** Qualified ids of the apps this instance runs, in config order. */
+  appIds: TargetId[];
+  /** Checkout details by qualified repo name; empty for base. */
+  checkouts: Record<string, InstanceRepoRecord>;
+  /** Whether its init steps have completed. Base never needs them, so it is true. */
+  initialized: boolean;
+}
+
+/** Where instances that are not base get their ports from, inclusive. */
+export interface PortRange {
+  from: number;
+  to: number;
+}
+
+export const DEFAULT_PORT_RANGE: PortRange = { from: 20_000, to: 20_999 };
+
+/** Relative to the workspace root. */
+export const DEFAULT_INSTANCES_DIR = ".u8/worktrees";
 
 export interface NormalizedProfile {
   name: string;
@@ -162,8 +308,17 @@ export interface NormalizedWorkspace {
   id: string;
   templates: Templates;
   repos: NormalizedRepo[];
-  /** Flat list of every app across every repo, in config order. */
+  /**
+   * Flat list of every app across every repo: base first in config order, then
+   * each instance in creation order.
+   */
   apps: NormalizedApp[];
+  /** Base first, then the rest in creation order. Never empty. */
+  instances: NormalizedInstance[];
+  portRange: PortRange;
+  /** Absolute directory u8 creates worktrees under: `<dir>/<instance>/<repo>`. */
+  instancesDir: string;
+  /** Base app ids, like the targets they were written as. */
   profiles: NormalizedProfile[];
   defaultProfile: string;
   /** Config-declared commands plus the three core `app:*` commands. */
@@ -236,6 +391,10 @@ export function findRepo(ws: NormalizedWorkspace, name: string): NormalizedRepo 
 
 export function findApp(ws: NormalizedWorkspace, id: TargetId): NormalizedApp | undefined {
   return ws.apps.find((a) => a.id === id);
+}
+
+export function findInstance(ws: NormalizedWorkspace, name: string): NormalizedInstance | undefined {
+  return ws.instances.find((i) => i.name === name);
 }
 
 export function findProfile(ws: NormalizedWorkspace, name: string): NormalizedProfile | undefined {

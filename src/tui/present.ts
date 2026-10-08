@@ -60,6 +60,9 @@ export function headerText(state: DashboardState): string {
   return [
     state.workspace,
     `profile ${state.profile}`,
+    // Only once there is more than base: the count is across all of them then,
+    // and saying so is what stops it reading as the profile's own.
+    ...(state.instances > 1 ? [`${state.instances} instances`] : []),
     `${state.running}/${state.total} running`,
     state.connection === "connected" ? `daemon ${state.daemonVersion}` : `daemon ${state.connection}`,
   ].join(" · ");

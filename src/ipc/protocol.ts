@@ -8,10 +8,10 @@
  * This file is the single source of truth for both sides — it must not import
  * anything but types, so both the daemon and thin clients can depend on it.
  */
-import type { CommandKind, CommandSource, TargetId, Templates } from "../config/types.js";
+import type { CommandKind, CommandSource, InstanceRepoRecord, TargetId, Templates } from "../config/types.js";
 
 /** Bumped on breaking wire changes; checked during the attach handshake. */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 // ---------------------------------------------------------------------------
 // Core value types
@@ -106,11 +106,17 @@ export interface TaskResult {
 // ---------------------------------------------------------------------------
 
 export interface SnapshotApp {
+  /** Instance-qualified outside base: `api@feat-x`. */
   id: TargetId;
+  /** The id as the config spells it, whichever instance this copy is in. */
+  baseId: TargetId;
+  instance: string;
   repoName: string;
   name: string;
   implicit: boolean;
   cwd: string;
+  /** Named ports as this copy has them; the first is its primary one. */
+  ports: Record<string, number>;
   template?: string;
   hasHealth: boolean;
   dependsOn: TargetId[];
@@ -119,10 +125,26 @@ export interface SnapshotApp {
 }
 
 export interface SnapshotRepo {
+  /** Instance-qualified outside base: `platform@feat-x`. */
   name: string;
+  /** The repo's key in the config. */
+  baseName: string;
+  instance: string;
   path: string;
   template?: string;
   apps: SnapshotApp[];
+}
+
+export interface SnapshotInstance {
+  name: string;
+  isBase: boolean;
+  createdAt: number;
+  /** Qualified ids of the apps this instance runs. */
+  appIds: TargetId[];
+  /** Its checkouts by qualified repo name; empty for base. */
+  checkouts: Record<string, InstanceRepoRecord>;
+  /** Whether its init steps have completed; always true for base. */
+  initialized: boolean;
 }
 
 export interface SnapshotProfile {
@@ -152,7 +174,11 @@ export interface Snapshot {
   daemonVersion: string;
   workspace: { id: string; name: string; rootDir: string; configPath: string };
   templates: Templates;
+  /** Every instance's repos: base first, then the others in creation order. */
   repos: SnapshotRepo[];
+  /** Base first. Never empty. */
+  instances: SnapshotInstance[];
+  /** Profiles select among base apps; an instance's selection is its own app list. */
   profiles: SnapshotProfile[];
   activeProfile: string;
   commands: SnapshotCommand[];
@@ -192,15 +218,32 @@ export interface RpcMethods {
 
   "profile.use": { params: { name: string }; result: { ok: true; activeProfile: string } };
 
-  /** Targets are raw strings (`repo`, `repo.app`); empty means the active profile. */
-  "service.start": { params: { targets?: string[] }; result: { runId: string } };
-  "service.stop": { params: { targets?: string[] }; result: { runId: string } };
-  "service.restart": { params: { targets?: string[] }; result: { runId: string } };
+  /**
+   * Targets are raw strings (`repo`, `repo.app`), read from inside `instance`
+   * (base when omitted): a bare name is that instance's copy, and reaching
+   * another takes an explicit `name@instance`. No targets means the active
+   * profile in base and every app of the instance anywhere else.
+   */
+  "service.start": { params: { targets?: string[]; instance?: string; wait?: boolean }; result: { runId: string } };
+  "service.stop": { params: { targets?: string[]; instance?: string }; result: { runId: string } };
+  "service.restart": { params: { targets?: string[]; instance?: string; wait?: boolean }; result: { runId: string } };
 
   "command.run": {
-    params: { command: string; targets?: string[]; serial?: boolean; concurrency?: number };
+    params: { command: string; targets?: string[]; instance?: string; serial?: boolean; concurrency?: number };
     result: { runId: string };
   };
+
+  /**
+   * Creates an instance: a checkout per repo (a new worktree, or an existing
+   * one adopted as it is), ports for every app, and the record that makes its
+   * apps exist. `runId` is the init run — awaiting it is how a client knows the
+   * instance is ready to start.
+   */
+  "instance.create": { params: InstanceCreateParams; result: { instance: SnapshotInstance; runId: string } };
+  /** Stops its services, runs teardown, removes the worktrees u8 created, frees its ports. */
+  "instance.destroy": { params: { name: string; force?: boolean }; result: { runId: string } };
+  /** Re-runs the init steps of an existing instance. */
+  "instance.init": { params: { name: string }; result: { runId: string } };
   /** Resolves when the run finishes; safe to call after completion (results are retained). */
   "run.await": { params: { runId: string }; result: TaskResult };
 
@@ -209,6 +252,26 @@ export interface RpcMethods {
   "logs.unsubscribe": { params: { targetId: TargetId }; result: { ok: true } };
 
   "indicators.list": { params: Record<string, never>; result: { indicators: IndicatorValue[] } };
+}
+
+export interface InstanceCreateParams {
+  name: string;
+  /** Repos and/or apps, as written in the config. Empty means the active profile. */
+  targets?: string[];
+  /**
+   * Existing git worktrees to use as they are. Each one covers every repo of the
+   * workspace that lives in the same git repository, so a tool that made one
+   * worktree of a monorepo does not have to know how the config slices it.
+   */
+  adopt?: string[];
+  /** An existing directory for one repo, by repo name — for a clone git cannot relate to base. */
+  paths?: Record<string, string>;
+  /** Branch for new worktrees; defaults to the instance name. */
+  branch?: string;
+  /** Start point for a branch that does not exist yet; defaults to the base checkout's HEAD. */
+  from?: string;
+  /** Overrides for `${vars.<name>}`. */
+  vars?: Record<string, string>;
 }
 
 export type RpcMethod = keyof RpcMethods;

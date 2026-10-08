@@ -8,37 +8,99 @@
  */
 import { U8Error } from "../util/errors.js";
 import {
+  BASE_INSTANCE,
   findApp,
   findCommand,
+  findInstance,
   findProfile,
+  INSTANCE_SEPARATOR,
   type NormalizedCommand,
   type NormalizedWorkspace,
+  qualify,
+  splitQualified,
   type TargetId,
 } from "./types.js";
 
-/** App ids a single target string covers, or `undefined` when it matches nothing. */
-export function expandTarget(ws: NormalizedWorkspace, spec: string): TargetId[] | undefined {
-  if (ws.apps.some((a) => a.id === spec)) return [spec];
-  const repo = ws.repos.find((r) => r.name === spec);
+/**
+ * The fully qualified form of a target string typed from inside `instance`.
+ *
+ * A bare name means "mine": `api` typed in `feat-x` is `api@feat-x`. A name that
+ * carries its own `@instance` is taken at its word, which is the only way to
+ * reach across — and `@base` is spelled out for that purpose, since base ids
+ * are otherwise the bare ones.
+ */
+export function qualifyTarget(spec: string, instance: string = BASE_INSTANCE): string {
+  if (!spec.includes(INSTANCE_SEPARATOR)) return qualify(spec, instance);
+  const split = splitQualified(spec);
+  return qualify(split.name, split.instance);
+}
+
+/**
+ * App ids a single target string covers, or `undefined` when it matches nothing.
+ *
+ * Never falls back from an instance to base: `u8 restart api` typed in a
+ * worktree that has no api of its own must not restart the one everybody else
+ * is using. Reaching base takes `api@base`.
+ */
+export function expandTarget(
+  ws: NormalizedWorkspace,
+  spec: string,
+  instance: string = BASE_INSTANCE,
+): TargetId[] | undefined {
+  const wanted = qualifyTarget(spec, instance);
+  if (ws.apps.some((a) => a.id === wanted)) return [wanted];
+  const repo = ws.repos.find((r) => r.name === wanted);
   return repo?.apps.map((a) => a.id);
+}
+
+/**
+ * Why a target string matched nothing, in terms of the instance it was typed in.
+ * The interesting case is a name that exists — just not here.
+ */
+export function unknownTargetMessage(ws: NormalizedWorkspace, spec: string, instance: string = BASE_INSTANCE): string {
+  if (instance !== BASE_INSTANCE && !spec.includes(INSTANCE_SEPARATOR) && expandTarget(ws, spec, BASE_INSTANCE)) {
+    return (
+      `"${spec}" is not part of instance "${instance}", which uses base's — ` +
+      `name it as "${spec}${INSTANCE_SEPARATOR}${BASE_INSTANCE}" to act on that one`
+    );
+  }
+  const { instance: named } = splitQualified(qualifyTarget(spec, instance));
+  if (!findInstance(ws, named)) {
+    return `unknown instance "${named}" in target "${spec}" — known: ${ws.instances.map((i) => i.name).join(", ")}`;
+  }
+  return `unknown target "${spec}" — expected a repo name or "repo.app"`;
 }
 
 /**
  * Target strings → app ids: repo names expand to all their apps, duplicates
  * collapse, and the order the user (or the config) wrote them in is preserved.
  */
-export function resolveTargetStrings(ws: NormalizedWorkspace, specs: readonly string[]): TargetId[] {
+export function resolveTargetStrings(
+  ws: NormalizedWorkspace,
+  specs: readonly string[],
+  instance: string = BASE_INSTANCE,
+): TargetId[] {
   const out: TargetId[] = [];
   for (const spec of specs) {
-    const ids = expandTarget(ws, spec);
+    const ids = expandTarget(ws, spec, instance);
     if (!ids) {
-      throw new U8Error("UNKNOWN_TARGET", `unknown target "${spec}" — expected a repo name or "repo.app"`, {
-        spec,
-      });
+      throw new U8Error("UNKNOWN_TARGET", unknownTargetMessage(ws, spec, instance), { spec, instance });
     }
     for (const id of ids) if (!out.includes(id)) out.push(id);
   }
   return out;
+}
+
+/** Every app an instance runs — what an untargeted command means outside base. */
+export function instanceTargets(ws: NormalizedWorkspace, name: string): TargetId[] {
+  const instance = findInstance(ws, name);
+  if (!instance) {
+    throw new U8Error("UNKNOWN_INSTANCE", `unknown instance "${name}"`, {
+      instance: name,
+      known: ws.instances.map((i) => i.name),
+    });
+  }
+  return [...instance.appIds];
 }
 
 /** App ids of a profile; defaults to the workspace's default profile. */

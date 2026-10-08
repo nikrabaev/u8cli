@@ -138,7 +138,7 @@ export function indicatorContext(fixture: Fixture, overrides: Partial<IndicatorC
     exec: async () => execStub(),
     store: new Map<string, unknown>(),
     scope: "app",
-    repo: { name: repo.name, path: repo.path },
+    repo: { name: repo.name, baseName: repo.name, instance: "base", path: repo.path },
     target: targetInfo(fixture),
     cwd: app.cwd,
     service: serviceState(app.id),
@@ -157,7 +157,7 @@ export function commandContext(fixture: Fixture, overrides: Partial<CommandConte
     store: new Map<string, unknown>(),
     command: "demo:run",
     runId: "test-run",
-    repo: { name: repo.name, path: repo.path },
+    repo: { name: repo.name, baseName: repo.name, instance: "base", path: repo.path },
     target: targetInfo(fixture),
     cwd: app.cwd,
     log: () => {},
@@ -181,12 +181,15 @@ export function targetInfo(fixture: Fixture): TargetInfo {
   if (!app) throw new Error("fixture workspace has no app");
   return {
     id: app.id,
+    baseId: app.baseId,
+    instance: app.instance,
     repoName: app.repoName,
     name: app.name,
     implicit: app.implicit,
     cwd: app.cwd,
     scripts: { ...app.scripts },
     env: { ...app.env },
+    ports: { ...app.ports },
     dependsOn: [...app.dependsOn],
     hasHealth: app.health !== undefined,
   };
