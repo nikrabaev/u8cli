@@ -1,0 +1,10 @@
+# pnpm 9 rejects a workspace file that lists no packages; the repo root is the
+# only one.
+packages:
+  - "."
+
+# pnpm runs no dependency's install script unless it is approved here, and
+# fails the install over one nobody has ruled on. esbuild (pulled in by vitest)
+# is the only dependency that has one.
+allowBuilds:
+  esbuild: true

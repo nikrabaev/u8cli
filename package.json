@@ -61,9 +61,6 @@
     "schema": "node scripts/gen-schema.js",
     "u8": "node --import ./node_modules/jiti/lib/jiti-register.mjs src/cli/main.ts"
   },
-  "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
-  },
   "dependencies": {
     "commander": "^14.0.2",
     "ink": "^6.4.1",
